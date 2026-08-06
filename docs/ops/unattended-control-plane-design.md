@@ -108,6 +108,8 @@ Product Owner 的授权必须绑定到一份结构化记录，经校验后才能
 {
   "schema_version": "owner_authorization_v1",
   "authorization_id": "unique-id",
+  "request_id": "immutable-request-id",
+  "task_id": "AGE-1-or-runtime-task-id",
   "authorization_type": "IMPLEMENTATION | PR_CREATE | READY | MERGE | DEPLOY | FORCE_PUSH",
   "authorization_status": "PENDING | CONSUMED | REVOKED | EXPIRED",
   "repository": "owner/repository",
@@ -126,13 +128,24 @@ Product Owner 的授权必须绑定到一份结构化记录，经校验后才能
   "merge_method": null,
   "issued_by": "Product Owner",
   "issued_at": "ISO-8601 timestamp",
+  "source_evidence_ref": "immutable-reference-to-owner-instruction",
   "expires_at": "ISO-8601 timestamp or null",
   "consumed_at": "ISO-8601 timestamp or null",
-  "execution_result_sha": null
+  "execution_result": {
+    "status": "SUCCEEDED | FAILED | DRIFTED | CANCELLED",
+    "completed_at": null,
+    "result_sha": null,
+    "evidence_ref": null
+  }
 }
 ```
 
 字段约束（执行门禁）：
+
+- `authorization_id`：这份授权记录自身的唯一 ID。
+- `request_id`：原始 Product Owner 授权请求的不可变关联 ID。
+- `task_id`：被授权执行的具体任务或运行单元。
+- `issue_id`：Linear 规划对象，不可替代 `task_id`，三者不得相互推断。
 
 - `exact_head_sha` 与 `exact_base_sha` 必须是完整 40 字符 SHA，**禁止缩写**。
 - 必须是一次性消费（成功、失败或远程状态漂移后不得复用）。
