@@ -46,16 +46,16 @@ Claude Code 仅为可选兼容层。
 
 ### 3.1 授权来源
 
-Product Owner 的明确指令可以是授权来源。但运行时必须将其**转换、绑定和验证**为结构化授权投影（见 3.2），才能执行对应操作。
+Product Owner 的明确指令本身就是权限来源。运行时系统必须对其进行**可信捕获**，并转换为结构化授权投影（见 3.2），以此作为执行门禁。
 
 接受的授权来源形式：
 
-- Product Owner 直接在当前会话中给出明确结构化授权指令
+- Product Owner 直接在当前会话中给出明确指令（系统负责将其转换为投影）
 - Product Owner 将授权记录写入 `.agent-bridge/owner-authorizations/<authorization_id>.json`
 
 **不接受的形式：**
 
-- 本地 JSON 文件作为"原始"授权来源（本地 JSON 是投影载体，不是权限来源）
+- 本地 JSON 文件作为"原始"授权来源（本地 JSON 只是投影载体，不能凭空编造）
 - 任何第三方（包括 Reviewer Agent）代 Product Owner 出具授权
 - 从 CI/CD 状态、Linear 状态、SHA 匹配等推断授权
 
@@ -67,7 +67,8 @@ Product Owner 的明确指令可以是授权来源。但运行时必须将其**�
 {
   "schema_version": "owner_authorization_v1",
   "authorization_id": "unique-id",
-  "authorization_type": "IMPLEMENTATION | PR_CREATE | READY | MERGE | DEPLOY",
+  "authorization_type": "IMPLEMENTATION | PR_CREATE | READY | MERGE | DEPLOY | FORCE_PUSH",
+  "authorization_status": "PENDING | CONSUMED | REVOKED | EXPIRED",
   "repository": "owner/repository",
   "issue_id": "AGE-xx",
   "pr_number": null,
@@ -77,17 +78,22 @@ Product Owner 的明确指令可以是授权来源。但运行时必须将其**�
   "allowed_operations": ["edit", "commit", "push"],
   "merge_method": null,
   "issued_by": "Product Owner",
-  "issued_at": "ISO-8601 timestamp"
+  "issued_at": "ISO-8601 timestamp",
+  "expires_at": "ISO-8601 timestamp or null",
+  "consumed_at": "ISO-8601 timestamp or null",
+  "execution_result_sha": null
 }
 ```
 
 字段硬约束：
 
 - `exact_head_sha` / `exact_base_sha` 必须 40 字符完整 SHA，**禁止缩写**
+- 必须是一次性消费（成功、失败或远程状态漂移后不得复用）
+- 必须支持 Owner 撤销以及过期失效（`expires_at`）
 - `allowed_scope` 必须确切路径，**禁止通配符**
 - `allowed_operations` 必须是显式操作列表，不是描述
 - `merge_method` 为 `null` 时表示"等 Product Owner 在 GitHub PR 页面手工合并"
-- **没有此绑定 → 不得执行对应授权类型**
+- **投影不完整或不匹配实时远程状态 → 不得执行对应授权类型**
 
 存储位置：
 
@@ -114,22 +120,22 @@ Reviewer 只能输出以下结构化结果，**均不产生授权**：
 
 MCP、gh CLI、git push、HTTP API 均为**执行通道**，不是授权来源。选择哪个通道不改变授权要求。
 
-以下为 Agent Relay 暴露的能力（由环境提供，本提示词不要求实现）：
+以下为 Agent Relay 拟议的能力（由外部环境提供，本 PR 中尚未实现，仅作契约示例）：
 
 ```bash
-# 发送结构化汇报并等待 Reviewer 回复
+# (Proposed) 发送结构化汇报并等待 Reviewer 回复
 python3 .agent-bridge/auto_relay.py --send --wait-timeout 600
 
-# 解析 Reviewer 回复为结构化 evidence
+# (Proposed) 解析 Reviewer 回复为结构化 evidence
 python3 .agent-bridge/parse_review_reply.py
 
-# 检查 Reviewer 状态
+# (Proposed) 检查 Reviewer 状态
 python3 .agent-bridge/relay.py --status
 
-# 校验授权绑定是否存在且未过期
+# (Proposed) 校验授权绑定是否存在且未过期
 python3 .agent-bridge/check_owner_authorization.py <authorization_id>
 
-# 启动一轮受限循环
+# (Proposed) 启动一轮受限循环
 python3 .agent-bridge/auto_loop.py --goal <goal-id> --max-rounds 10
 ```
 
@@ -160,7 +166,7 @@ python3 .agent-bridge/auto_loop.py --goal <goal-id> --max-rounds 10
 
 完成当前任务无新指令时：
 
-1. 等待外部调度策略指定的时间（默认 10 分钟）
+1. 等待外部调度策略指定的时间（示例策略：10 分钟，由外部环境配置决定，不构成默认授权）
 2. 仅当外部调度策略明确要求时，才向 Reviewer 发送状态询问
 3. **未被明确要求时，不得主动询问或编造下一任务**
 4. Reviewer 回复 → 解析 evidence 继续
@@ -174,7 +180,7 @@ python3 .agent-bridge/auto_loop.py --goal <goal-id> --max-rounds 10
 | Reviewer 长思考 | 响应流持续变化 | 等待（非故障） |
 | 登录过期 | 页面出现登录/验证 | ⚠️ 通知 Product Owner |
 
-6. 修复后重试，最多 **3 轮**，仍失败通知 Product Owner
+6. 修复后重试，最多执行示例策略允许的轮数（如 **3 轮**），仍失败通知 Product Owner
 
 **无变化时不得调用模型。**
 
@@ -202,7 +208,7 @@ ready_authorized: false / merge_authorized: false / deploy_authorized: false
 | Ready PR | ❌ 需 §三 的 READY 授权 |
 | 合并到 main | ❌ 需 §三 的 MERGE 授权 |
 | 部署到生产 | ❌ 需 §三 的 DEPLOY 授权 |
-| force push | ❌ 禁止，无论任何情况 |
+| force push / 重写 main | ❌ 默认禁止，只有 PO 针对 exact SHA 和目标仓库单独明确授权时才可执行 |
 | 直接提交到 main | ❌ 禁止 |
 | 创建 PR | ❌ 需 §三 的 PR_CREATE 授权 |
 | git commit / push（授权范围内） | ✅ 可在结构化授权绑定下执行 |
@@ -236,8 +242,8 @@ ready_authorized: false / merge_authorized: false / deploy_authorized: false
 
 如果你不是 OpenCode 或 Antigravity，需通过 Adapter 接入：
 
-- **OpenCode Adapter**：主目标，开箱即用
-- **Antigravity Adapter**：主目标，开箱即用
+- **OpenCode Adapter**：主目标（拟议接口，AGE-1 中未实现）
+- **Antigravity Adapter**：主目标（拟议接口，AGE-1 中未实现）
 - **Optional Claude Code Adapter**：可选，向后兼容
 - **自定义 Adapter**：实现 §五 中的最小命令契约
 

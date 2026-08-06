@@ -69,7 +69,7 @@ Linear **不保存**：
 
 **Product Owner 是权限主体，可以授权实施、创建 PR、Ready、合并、部署。**
 
-Product Owner 的明确指令可以是授权来源。但运行时必须将其**转换、绑定和验证**为结构化授权投影（见 §四），才能执行对应操作。
+Product Owner 的明确指令本身就是权限来源。系统需将其**可信捕获**并转换为结构化授权投影（见 §四），以此作为执行门禁。
 
 授权规则：
 
@@ -108,7 +108,8 @@ Product Owner 的授权必须绑定到一份结构化记录，经校验后才能
 {
   "schema_version": "owner_authorization_v1",
   "authorization_id": "unique-id",
-  "authorization_type": "IMPLEMENTATION | PR_CREATE | READY | MERGE | DEPLOY",
+  "authorization_type": "IMPLEMENTATION | PR_CREATE | READY | MERGE | DEPLOY | FORCE_PUSH",
+  "authorization_status": "PENDING | CONSUMED | REVOKED | EXPIRED",
   "repository": "owner/repository",
   "issue_id": "AGE-xx",
   "pr_number": null,
@@ -124,17 +125,22 @@ Product Owner 的授权必须绑定到一份结构化记录，经校验后才能
   ],
   "merge_method": null,
   "issued_by": "Product Owner",
-  "issued_at": "ISO-8601 timestamp"
+  "issued_at": "ISO-8601 timestamp",
+  "expires_at": "ISO-8601 timestamp or null",
+  "consumed_at": "ISO-8601 timestamp or null",
+  "execution_result_sha": null
 }
 ```
 
-字段约束：
+字段约束（执行门禁）：
 
 - `exact_head_sha` 与 `exact_base_sha` 必须是完整 40 字符 SHA，**禁止缩写**。
+- 必须是一次性消费（成功、失败或远程状态漂移后不得复用）。
+- 必须支持 Owner 撤销以及过期失效（`expires_at`）。
 - `allowed_scope` 必须列出确切路径，**禁止通配符或目录别名**。
 - `allowed_operations` 必须是显式操作列表，不是描述。
 - `merge_method` 留 `null` 时表示"等待 owner 在 GitHub PR 页面手工合并"。
-- 没有此绑定 → Agent Runner 不得执行任何 `IMPLEMENTATION` / `PR_CREATE` / `READY` / `MERGE` / `DEPLOY` 操作。
+- 投影不完整或不匹配实时远程状态 → Agent Runner 不得执行任何 `IMPLEMENTATION` / `PR_CREATE` / `READY` / `MERGE` / `DEPLOY` 操作。
 
 存储位置：
 
@@ -215,14 +221,14 @@ Adapter 必须实现最小接口契约（任何宿主 Agent 都能满足）：
 
 提供现成 Adapter：
 
-- `OpenCode Adapter`（主目标平台）
-- `Antigravity Adapter`（主目标平台）
+- `OpenCode Adapter`（主目标平台，拟议接口）
+- `Antigravity Adapter`（主目标平台，拟议接口）
 - `Optional Claude Code Adapter`（可选，向后兼容）
 - 自定义 Adapter 接入点
 
 ### 6.4 Agent Relay 提供的工具（运行时，非实现文档）
 
-仅描述能力边界，不在本 PR 中实现：
+仅描述能力边界，不在 AGE-1 中实现，为后续拟议契约：
 
 | 工具 | 职责 |
 |------|------|
@@ -258,9 +264,9 @@ AgentOps 只能在任务授权明确包含目标仓库时，才能操作其他�
 | PR Ready for Review | `READY` | 不得基于 review PASS 自动触发 |
 | Merge to main | `MERGE` | 不得基于 CI 绿灯、review PASS 自动触发 |
 | Deploy to production | `DEPLOY` | 不得基于 merge 自动触发 |
-| force push | 禁止 | 无论任何情况均禁止 |
+| force push | `FORCE_PUSH` | 默认禁止；只有 Product Owner 针对目标仓库、目标分支、exact SHA 和操作范围单独明确授权时才可执行 |
 | 直接提交到 main | 禁止 | 无论任何情况均禁止 |
-| main 历史重写 | 禁止 | 无论任何情况均禁止 |
+| main 历史重写 | 需明确授权 | 同 force push 规则 |
 | 访问生产资源 | `IMPLEMENTATION`（scope 限定） | 需明确 scope |
 
 **Fail-closed 原则**：授权绑定缺失或不完整时，默认拒绝执行，不得推断或降级执行。
@@ -288,9 +294,9 @@ AgentOps 只能在任务授权明确包含目标仓库时，才能操作其他�
 
 ### 阶段 1：合并发送 + 等待
 
-新建 `auto_relay.py`：
+新建 `auto_relay.py`（拟议）：
 
-```
+```bash
 python3 auto_relay.py --send --wait-timeout 600
 ```
 
@@ -378,14 +384,14 @@ while round < max_rounds:
 - ❌ 部署到生产（需 DEPLOY 授权）
 - ❌ 创建 PR（需 PR_CREATE 授权）
 - ❌ 任何基于关键词推断出来的"授权"
-- ❌ force push（禁止，无论任何情况）
+- ❌ force push（默认禁止，需单独明确授权）
 
 ### 阶段 4.5：空闲等待模式
 
 当 auto_loop 进入空闲状态：
 
 ```
-IDLE → 等待外部调度策略指定时间 → 仅在调度策略明确要求时向 Reviewer 发送询问
+IDLE → 等待外部调度策略指定时间（如 10 分钟，仅为示例） → 仅在调度策略明确要求时向 Reviewer 发送询问
                                   → 等待回复 → 解析 evidence
                                             ↓
                                   Reviewer 未回复（timeout/离线）
