@@ -1,0 +1,12 @@
+.agent-bridge/private/
+.agent-bridge/evidence*.json
+.agent-bridge/owner-authorizations/
+.loopx/
+loop-state.json
+loop-log/
+.env
+.env.*
+*.local
+.DS_Store
+__pycache__/
+*.pyc
