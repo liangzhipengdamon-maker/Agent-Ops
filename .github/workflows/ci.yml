@@ -32,16 +32,20 @@ jobs:
 
       - name: Run relay_adapter tests
         run: |
-          if [ -f tests/test_relay_adapter.py ]; then
-            python -m unittest tests/test_relay_adapter.py
-          else
-            echo "tests/test_relay_adapter.py not found. Skipping."
+          if [ ! -f tests/test_relay_adapter.py ]; then
+            echo "tests/test_relay_adapter.py is missing! Failing."
+            exit 1
           fi
+          python -m unittest tests/test_relay_adapter.py
 
       - name: Run neutral_relay tests
         run: |
-          if [ -f tools/neutral-relay/tests/test_neutral_relay.py ]; then
+          if [ -f tools/neutral-relay/neutral_relay.py ]; then
+            if [ ! -f tools/neutral-relay/tests/test_neutral_relay.py ]; then
+              echo "neutral_relay.py exists but test file tools/neutral-relay/tests/test_neutral_relay.py is missing! Failing."
+              exit 1
+            fi
             python -m unittest tools/neutral-relay/tests/test_neutral_relay.py
           else
-            echo "tools/neutral-relay/tests/test_neutral_relay.py not found. Skipping."
+            echo "tools/neutral-relay/neutral_relay.py not found. Skipping neutral_relay tests."
           fi
