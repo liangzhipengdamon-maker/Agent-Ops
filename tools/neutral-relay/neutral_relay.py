@@ -17,21 +17,30 @@ async def run_relay(args):
     with open(args.request_file, "r") as f:
         request_text = f.read()
 
-    # Extract REPO and REVIEW_REQUEST_ID for routing and anti-crosstalk
-    repo = None
-    req_id = None
+    # Extract required fields for routing and anti-crosstalk
+    envelope = {
+        "REPO": None,
+        "REVIEW_REQUEST_ID": None,
+        "PR": None,
+        "HEAD": None,
+        "REQUEST": None
+    }
+    
     for line in request_text.split('\n'):
-        if line.startswith("REPO:"):
-            repo = line.split("REPO:")[1].strip()
-        elif line.startswith("REVIEW_REQUEST_ID:"):
-            req_id = line.split("REVIEW_REQUEST_ID:")[1].strip()
+        for key in envelope.keys():
+            if line.startswith(f"{key}:"):
+                val = line.split(f"{key}:", 1)[1].strip()
+                if val:
+                    envelope[key] = val
 
-    if not repo:
-        print("Error: REPO field not found in request file. Fail closed.")
-        return 1
-    if not req_id:
-        print("Error: REVIEW_REQUEST_ID field not found in request file. Fail closed.")
-        return 1
+    # Verify all required fields are present and non-empty
+    for key, val in envelope.items():
+        if not val:
+            print(f"Error: {key} field missing or empty in request file. Fail closed.")
+            return 1
+
+    repo = envelope["REPO"]
+    req_id = envelope["REVIEW_REQUEST_ID"]
 
     # 2. Config Routing (Trusted routing only)
     config_file = args.config_file
@@ -129,10 +138,12 @@ async def run_relay(args):
                 continue
             
             # Check for the latest assistant message specifically
-            latest_assistant_text = str(await js("(()=>{const msgs=Array.from(document.querySelectorAll('[data-message-author-role=\"assistant\"]')); if(msgs.length===0) return ''; return msgs[msgs.length-1].innerText||'';})()"))
+            # Return all assistant messages to let Python handle the strict extraction
+            assistant_messages = await js("(()=>{const msgs=Array.from(document.querySelectorAll('[data-message-author-role=\"assistant\"]')); return msgs.map(m=>m.innerText||'');})()")
             
-            if req_id in latest_assistant_text:
-                final_text = latest_assistant_text
+            extracted = extract_latest_assistant_response(assistant_messages, req_id)
+            if extracted:
+                final_text = extracted
                 found_response = True
                 break
             await asyncio.sleep(3)
@@ -147,6 +158,23 @@ async def run_relay(args):
             
         print(f"Success: Wrote review to {args.output_file}")
         return 0
+
+def extract_latest_assistant_response(assistant_messages, req_id):
+    """
+    Pure extraction logic for testability.
+    Rules:
+    - Must only look at the LATEST assistant message.
+    - If the latest does not contain the req_id, fail closed (return None).
+    - If the latest does contain the req_id, return ONLY that message.
+    """
+    if not assistant_messages or not isinstance(assistant_messages, list):
+        return None
+        
+    latest = assistant_messages[-1]
+    if req_id in latest:
+        return latest
+        
+    return None
 
 def main():
     parser = argparse.ArgumentParser(description="Neutral Relay Transport for Agent-Ops")
