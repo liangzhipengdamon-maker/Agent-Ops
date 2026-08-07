@@ -1,4 +1,5 @@
 import unittest
+import unittest.mock
 import json
 import os
 import sys
@@ -380,6 +381,88 @@ class TestRelayAdapter(unittest.TestCase):
             final_status = json.load(f)
         # Should fail closed and not transition to WAITING_PO_AUTH
         self.assertEqual(final_status["state"], "WAITING_FOR_REVIEW")
+
+class TestRelayAdapterLoadProfile(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.valid_profile = {
+            "project_identity": "test",
+            "github": {"repository": "test/repo", "canonical_branch": "main"},
+            "linear": {"team_key": "TEST", "project_id": "test-id"},
+            "local_builder": {"relative_path": ".", "required_env_vars": []},
+            "validation": {"ci_command": "true"},
+            "reviewer_relay": {"binding_type": "test", "contact_uri": "test://uri"},
+            "governance": {
+                "capabilities": ["independent_review"],
+                "required_gates": ["WAITING_PO_AUTH"],
+                "protected_project": False,
+                "cross_project_allowed": False
+            }
+        }
+        self.profile_path = os.path.join(self.temp_dir.name, "profile.json")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_valid_profile_load_success(self):
+        with open(self.profile_path, "w") as f:
+            json.dump(self.valid_profile, f)
+        # Should return successfully
+        profile = relay_adapter.load_profile(self.profile_path)
+        self.assertEqual(profile["project_identity"], "test")
+
+    def test_unknown_field_fail_closed(self):
+        invalid_profile = dict(self.valid_profile)
+        invalid_profile["unknown_field"] = "bad"
+        with open(self.profile_path, "w") as f:
+            json.dump(invalid_profile, f)
+        with self.assertRaises(SystemExit) as cm:
+            relay_adapter.load_profile(self.profile_path)
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_missing_required_field_fail_closed(self):
+        invalid_profile = dict(self.valid_profile)
+        del invalid_profile["github"]
+        with open(self.profile_path, "w") as f:
+            json.dump(invalid_profile, f)
+        with self.assertRaises(SystemExit) as cm:
+            relay_adapter.load_profile(self.profile_path)
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_malformed_profile_json_fail_closed(self):
+        with open(self.profile_path, "w") as f:
+            f.write("{ bad json ")
+        with self.assertRaises(SystemExit) as cm:
+            relay_adapter.load_profile(self.profile_path)
+        self.assertEqual(cm.exception.code, 1)
+
+    @unittest.mock.patch('relay_adapter.__file__', new='/tmp/fake_dir/fake.py')
+    def test_missing_schema_fail_closed(self):
+        with open(self.profile_path, "w") as f:
+            json.dump(self.valid_profile, f)
+        with self.assertRaises(SystemExit) as cm:
+            relay_adapter.load_profile(self.profile_path)
+        self.assertEqual(cm.exception.code, 1)
+
+    @unittest.mock.patch('relay_adapter.__file__', new='/tmp/fake_dir/fake.py')
+    def test_malformed_schema_fail_closed(self):
+        # Create a fake schema that is malformed
+        fake_schema_dir = "/tmp/docs/schemas"
+        os.makedirs(fake_schema_dir, exist_ok=True)
+        fake_schema_path = os.path.join(fake_schema_dir, "project_profile.schema.json")
+        with open(fake_schema_path, "w") as f:
+            f.write("{ malformed schema ")
+            
+        with open(self.profile_path, "w") as f:
+            json.dump(self.valid_profile, f)
+            
+        try:
+            with self.assertRaises(SystemExit) as cm:
+                relay_adapter.load_profile(self.profile_path)
+            self.assertEqual(cm.exception.code, 1)
+        finally:
+            if os.path.exists(fake_schema_path):
+                os.remove(fake_schema_path)
 
 if __name__ == '__main__':
     unittest.main()

@@ -24,18 +24,31 @@ def load_profile(profile_path):
     if not os.path.exists(profile_path):
         print(f"STOP_AND_WAIT: Profile not found at {profile_path}")
         sys.exit(1)
-    with open(profile_path, "r") as f:
-        profile_data = json.load(f)
+        
+    try:
+        with open(profile_path, "r") as f:
+            profile_data = json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"STOP_AND_WAIT: Profile JSON malformed: {e}")
+        sys.exit(1)
         
     schema_path = os.path.join(os.path.dirname(__file__), "..", "docs", "schemas", "project_profile.schema.json")
-    if os.path.exists(schema_path):
+    if not os.path.exists(schema_path):
+        print(f"STOP_AND_WAIT: Schema not found at {schema_path}")
+        sys.exit(1)
+        
+    try:
         with open(schema_path, "r") as sf:
             schema = json.load(sf)
-        try:
-            jsonschema.validate(instance=profile_data, schema=schema)
-        except jsonschema.exceptions.ValidationError as e:
-            print(f"STOP_AND_WAIT: Profile validation failed: {e}")
-            sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"STOP_AND_WAIT: Schema JSON malformed: {e}")
+        sys.exit(1)
+        
+    try:
+        jsonschema.validate(instance=profile_data, schema=schema)
+    except jsonschema.exceptions.ValidationError as e:
+        print(f"STOP_AND_WAIT: Profile validation failed: {e}")
+        sys.exit(1)
             
     return profile_data
 
