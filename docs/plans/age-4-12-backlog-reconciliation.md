@@ -18,7 +18,7 @@ Furthermore, real-world failure evidence from AGE-16 and AGE-17 (such as transie
   - PR #12: AGE-16 Project Onboarding Profile
 
 ## Real-World Failure Evidence (from AGE-16 / AGE-17)
-- **Transient model/network retry interruption**: During Neutral Relay interactions, network or UI-loading timeouts occurred. A page reload was added to `neutral_relay.py` but there is no exponential backoff or transport-retry daemon. (Remains unresolved).
+- **Transient model/network retry interruption**: During Neutral Relay interactions, network or UI-loading timeouts occurred. Current `neutral_relay.py` connects via CDP, sends once, polls, and returns an error on timeout. There is no transport retry/backoff loop. (Remains unresolved operational evidence).
 - **Local tool permission interruption**: The Builder attempted to invoke an unauthorized bash tool and was stopped by local environment limitations. This is an environmental restriction, not a formal AgentOps scope-firewall. (Remains unresolved as formal governance).
 - **`CHANGES_REQUESTED` continuation failure**: `relay_adapter.py` sets state to `CHANGES_REQUESTED` upon receiving negative review, but there is no wake/resume/fix loop to automatically drive the Builder back into implementation. (Remains unresolved).
 - **UNKNOWN_RESULT / remote-write mismatch**: In AGE-17, local commit/push/Linear API commands returned success, but remote state (GitHub branch/PR, Linear issue) was completely missing. (Remains unresolved).
@@ -74,13 +74,13 @@ Furthermore, real-world failure evidence from AGE-16 and AGE-17 (such as transie
 ### AGE-8: Harden relay completion detection and structured reports
 - **Original Intent**: Replace fragile DOM completion checks with request-bound delivery detection and structured reports.
 - **Classification**: PARTIALLY_COVERED
-- **Main Evidence**: `neutral_relay.py` uses `Page.reload` and waits for a Send button.
+- **Main Evidence**: `neutral_relay.py` provides request-ID correlation and latest-assistant extraction.
 - **Merged PR Evidence**: PR #6.
 - **Runtime Evidence**: `request.txt` / `status.json` mechanism.
 - **Test Evidence**: N/A.
 - **E2E / Operational Evidence**: Transient network failures in Neutral Relay still occur without exponential backoff.
-- **Remaining Gap**: Robust transport retries, structured report schema.
-- **Recommended Disposition**: Retain in Backlog, add exponential backoff.
+- **Remaining Gap**: Response hash, explicit retry state machine, and transport retry/backoff.
+- **Recommended Disposition**: Retain in Backlog, add exact missing features.
 
 ### AGE-9: Prototype one-bounded-action workflow runner
 - **Original Intent**: A runner that loads fresh state, verifies scope/permission, claims lease, performs one action, validates, records, and yields.
@@ -134,9 +134,9 @@ Furthermore, real-world failure evidence from AGE-16 and AGE-17 (such as transie
 - **Remote Read-back Enforcement**: Current logic easily assumes commands succeed without remote state validation, leading to UNKNOWN_RESULT mismatch.
 
 ## Proposed Future Execution Sequence
-1. **AGE-8**: Harden relay completion (add robust transport retry/backoff).
-2. **AGE-7 / AGE-9**: Implement the read-only state monitor and Outer Runner to provide wake/resume loops (solving the `CHANGES_REQUESTED` failure).
-3. **AGE-5 / AGE-6**: Design action-specific authorization verifier and scope firewall.
+1. **AGE-5 / AGE-6**: Design action-specific authorization verifier and scope firewall.
+2. **AGE-8**: Harden relay completion (add robust transport retry/backoff).
+3. **AGE-7 / AGE-9**: Implement the read-only state monitor and Outer Runner to provide wake/resume loops (solving the `CHANGES_REQUESTED` failure).
 4. **AGE-12**: Validate the recovery and lease mechanism of the runner.
 5. **AGE-11**: Formally integrate the Antigravity AgentOps adapter into the runner.
 
