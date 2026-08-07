@@ -529,18 +529,19 @@ Linear **不**：
 3. **真相与修正冲突**：GitHub main 始终是 canonical repository truth。当 GitHub 与 Linear 不一致时，以 GitHub 为准；Builder 有责任修正 Linear 以反映 GitHub 的真实状态，**绝对不得反向修改 GitHub 来迁就 Linear**。
 4. **禁止自我授权**：Builder 不得通过修改 Linear 状态来给自己生成 Implementation / Ready / Merge / Deploy 等执行权限。
 
-### 15.2 Reviewer 职责（状态校验）
+### 15.3 Reviewer 职责（状态校验）
 
 1. 独立审核 GitHub 上的实现代码与逻辑。
 2. 同时核验 Linear 是否准确反映 GitHub 当前事实。
 3. 如果发现 Linear 状态漂移（drift），要求 Builder 修正；Reviewer 原则上不替 Builder 日常维护 Linear。
 
-### 15.3 到达治理停点的汇报规范
+### 15.4 到达治理停点的汇报规范
 
-到达治理停点后（如 WAITING_PO_AUTH, BLOCKED），必须：
+到达治理停点后（如 WAITING_PO_AUTH, BLOCKED, CHANGES_REQUESTED），必须：
 1. Builder 更新 Linear 到对应管理状态。
-2. 使用 Status Report 自动向当前外部 ChatGPT Reviewer 汇报最终状态。
-3. STOP。
+2. 确保最新 Review Outcome 和 Governance State 已真正同步回 Linear 记录（如写入描述或评论）。
+3. 使用 Status Report 自动向当前外部 ChatGPT Reviewer 汇报最终状态。
+4. STOP。
 
 ---
 
