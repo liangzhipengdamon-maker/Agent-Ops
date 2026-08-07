@@ -17,6 +17,12 @@ class TestRelayAdapter(unittest.TestCase):
         self.status_file = relay_adapter.get_status_file()
         self.review_file = relay_adapter.get_review_file()
         
+        self.mock_profile = {
+            "github": {
+                "repository": "liangzhipengdamon-maker/Agent-Ops"
+            }
+        }
+        
         # We don't touch the real bridge directory at all.
         self.initial_status = {
             "protocol_version": "1",
@@ -36,13 +42,13 @@ class TestRelayAdapter(unittest.TestCase):
             del os.environ["AGENT_BRIDGE_DIR"]
 
     def test_review_request_transitions_to_waiting(self):
-        relay_adapter.handle_review_request()
+        relay_adapter.handle_review_request(self.mock_profile)
         with open(self.status_file, "r") as f:
             status = json.load(f)
         self.assertEqual(status["state"], "WAITING_FOR_REVIEW")
 
     def test_gpt_review_triple_head_match_pass(self):
-        relay_adapter.handle_review_request()
+        relay_adapter.handle_review_request(self.mock_profile)
         
         with open(self.status_file, "r") as f:
             status = json.load(f)
@@ -52,14 +58,14 @@ class TestRelayAdapter(unittest.TestCase):
             f.write(f"REVIEW_REQUEST_ID: {req_id}\nVERDICT: PASS\nREPO: liangzhipengdamon-maker/Agent-Ops\nPR: 5\nHEAD: abcdef123456\nSUMMARY:\nLooks good.\nACTIONS:\n")
             
         # Provide matching current_head
-        relay_adapter.handle_gpt_review_return(current_head="abcdef123456")
+        relay_adapter.handle_gpt_review_return(self.mock_profile, current_head="abcdef123456")
         
         with open(self.status_file, "r") as f:
             status = json.load(f)
         self.assertEqual(status["state"], "WAITING_PO_AUTH")
 
     def test_gpt_review_missing_current_head_fails_closed(self):
-        relay_adapter.handle_review_request()
+        relay_adapter.handle_review_request(self.mock_profile)
         
         with open(self.status_file, "r") as f:
             status = json.load(f)
@@ -69,7 +75,7 @@ class TestRelayAdapter(unittest.TestCase):
             f.write(f"REVIEW_REQUEST_ID: {req_id}\nVERDICT: PASS\nREPO: liangzhipengdamon-maker/Agent-Ops\nPR: 5\nHEAD: abcdef123456\n")
             
         # Provide NO current_head
-        relay_adapter.handle_gpt_review_return(current_head=None)
+        relay_adapter.handle_gpt_review_return(self.mock_profile, current_head=None)
         
         with open(self.status_file, "r") as f:
             status = json.load(f)
@@ -77,7 +83,7 @@ class TestRelayAdapter(unittest.TestCase):
         self.assertEqual(status["state"], "WAITING_FOR_REVIEW")
 
     def test_stale_review_rejected_review_head_mismatch(self):
-        relay_adapter.handle_review_request()
+        relay_adapter.handle_review_request(self.mock_profile)
         
         with open(self.status_file, "r") as f:
             status = json.load(f)
@@ -86,14 +92,14 @@ class TestRelayAdapter(unittest.TestCase):
         with open(self.review_file, "w") as f:
             f.write(f"REVIEW_REQUEST_ID: {req_id}\nVERDICT: PASS\nREPO: liangzhipengdamon-maker/Agent-Ops\nPR: 5\nHEAD: 000000000000\n")
         
-        relay_adapter.handle_gpt_review_return(current_head="abcdef123456")
+        relay_adapter.handle_gpt_review_return(self.mock_profile, current_head="abcdef123456")
         
         with open(self.status_file, "r") as f:
             status = json.load(f)
         self.assertEqual(status["state"], "WAITING_FOR_REVIEW")
 
     def test_stale_review_rejected_current_head_mismatch(self):
-        relay_adapter.handle_review_request()
+        relay_adapter.handle_review_request(self.mock_profile)
         
         with open(self.status_file, "r") as f:
             status = json.load(f)
@@ -103,7 +109,7 @@ class TestRelayAdapter(unittest.TestCase):
             f.write(f"REVIEW_REQUEST_ID: {req_id}\nVERDICT: PASS\nREPO: liangzhipengdamon-maker/Agent-Ops\nPR: 5\nHEAD: abcdef123456\n")
         
         # The remote GitHub PR HEAD drifted!
-        relay_adapter.handle_gpt_review_return(current_head="drifted12345")
+        relay_adapter.handle_gpt_review_return(self.mock_profile, current_head="drifted12345")
         
         with open(self.status_file, "r") as f:
             status = json.load(f)
@@ -111,7 +117,7 @@ class TestRelayAdapter(unittest.TestCase):
         self.assertEqual(status["state"], "WAITING_FOR_REVIEW")
 
     def test_missing_repo_fails_closed(self):
-        relay_adapter.handle_review_request()
+        relay_adapter.handle_review_request(self.mock_profile)
         
         with open(self.status_file, "r") as f:
             status = json.load(f)
@@ -121,14 +127,14 @@ class TestRelayAdapter(unittest.TestCase):
             # MISSING REPO
             f.write(f"REVIEW_REQUEST_ID: {req_id}\nVERDICT: PASS\nPR: 5\nHEAD: abcdef123456\n")
         
-        relay_adapter.handle_gpt_review_return(current_head="abcdef123456")
+        relay_adapter.handle_gpt_review_return(self.mock_profile, current_head="abcdef123456")
         
         with open(self.status_file, "r") as f:
             status = json.load(f)
         self.assertEqual(status["state"], "WAITING_FOR_REVIEW")
 
     def test_mismatched_repo_fails_closed(self):
-        relay_adapter.handle_review_request()
+        relay_adapter.handle_review_request(self.mock_profile)
         
         with open(self.status_file, "r") as f:
             status = json.load(f)
@@ -138,7 +144,7 @@ class TestRelayAdapter(unittest.TestCase):
             # MISMATCHED REPO
             f.write(f"REVIEW_REQUEST_ID: {req_id}\nVERDICT: PASS\nREPO: some/other-repo\nPR: 5\nHEAD: abcdef123456\n")
         
-        relay_adapter.handle_gpt_review_return(current_head="abcdef123456")
+        relay_adapter.handle_gpt_review_return(self.mock_profile, current_head="abcdef123456")
         
         with open(self.status_file, "r") as f:
             status = json.load(f)
@@ -156,7 +162,7 @@ class TestRelayAdapter(unittest.TestCase):
         with open(os.path.join(self.temp_dir.name, "status.json"), "w") as f:
             json.dump(status, f)
 
-        relay_adapter.handle_status_report("Test summary", "NONE")
+        relay_adapter.handle_status_report(self.mock_profile, "Test summary", "NONE")
         
         request_file = os.path.join(self.temp_dir.name, "request.txt")
         self.assertTrue(os.path.exists(request_file))
@@ -188,7 +194,7 @@ class TestRelayAdapter(unittest.TestCase):
         with open(os.path.join(self.temp_dir.name, "status.json"), "w") as f:
             json.dump(status, f)
 
-        relay_adapter.handle_status_report("Test summary", "NONE")
+        relay_adapter.handle_status_report(self.mock_profile, "Test summary", "NONE")
         request_file = os.path.join(self.temp_dir.name, "request.txt")
         self.assertFalse(os.path.exists(request_file))
 
@@ -203,7 +209,7 @@ class TestRelayAdapter(unittest.TestCase):
         with open(os.path.join(self.temp_dir.name, "status.json"), "w") as f:
             json.dump(status, f)
 
-        relay_adapter.handle_status_report("Test summary", "NONE")
+        relay_adapter.handle_status_report(self.mock_profile, "Test summary", "NONE")
         request_file = os.path.join(self.temp_dir.name, "request.txt")
         self.assertFalse(os.path.exists(request_file))
 
@@ -229,7 +235,7 @@ class TestRelayAdapter(unittest.TestCase):
         with open(os.path.join(self.temp_dir.name, "gpt-review.md"), "w") as f:
             f.write(review)
 
-        relay_adapter.process_ack(current_head="abcdef123456")
+        relay_adapter.process_ack(self.mock_profile, current_head="abcdef123456")
         
         with open(os.path.join(self.temp_dir.name, "status.json"), "r") as f:
             updated = json.load(f)
@@ -258,7 +264,7 @@ class TestRelayAdapter(unittest.TestCase):
             f.write(review)
 
         # Output should be STOP_AND_WAIT
-        relay_adapter.process_ack(current_head="abcdef123456")
+        relay_adapter.process_ack(self.mock_profile, current_head="abcdef123456")
 
 if __name__ == '__main__':
     unittest.main()
