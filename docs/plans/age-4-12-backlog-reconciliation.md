@@ -33,7 +33,7 @@ Furthermore, real-world failure evidence from AGE-16 and AGE-17 (such as transie
 - **Main Evidence**: `relay_adapter.py` requires triple HEAD binding and PR matching. `neutral_relay.py` requires specific formats.
 - **Merged PR Evidence**: PR #5, #6 (AGE-3).
 - **Runtime Evidence**: `handle_gpt_review_return` checks `current_head` vs `status_head` and `pr`.
-- **Test Evidence**: N/A
+- **Test Evidence**: `tests/test_relay_adapter.py` includes `test_review_request_transitions_to_waiting`, `test_gpt_review_triple_head_match_pass`, and stale review rejection tests.
 - **E2E / Operational Evidence**: Fails closed if SHA mismatches.
 - **Remaining Gap**: Formal JSON schema for the review payload and strict review protocol definitions are missing.
 - **Recommended Disposition**: Implement formal schema validation for review evidence.
