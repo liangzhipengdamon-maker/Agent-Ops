@@ -63,7 +63,8 @@ ALLOWED_STATES = {
     "BUILDER_FIXING",
     "REVIEW_REQUESTED_AGAIN",
     "BLOCKED",
-    "WAITING_PO_AUTH"
+    "WAITING_PO_AUTH",
+    "DONE"
 }
 
 def load_status():
@@ -200,6 +201,7 @@ def handle_gpt_review_return(profile, current_head=None):
         print(f"STOP_AND_WAIT: Unknown verdict {verdict}")
         return
 
+    status.pop("status_report_acked", None)
     save_status(status)
     print(f"Review processed successfully. New state: {status['state']}")
 
@@ -210,9 +212,13 @@ def handle_status_report(profile, summary, unauthorized_actions):
         return
 
     # P0: Enforce stop states
-    stop_states = {"WAITING_PO_AUTH", "BLOCKED", "CHANGES_REQUESTED", "NEEDS_OWNER_DECISION"}
+    stop_states = {"WAITING_PO_AUTH", "BLOCKED", "CHANGES_REQUESTED", "NEEDS_OWNER_DECISION", "DONE"}
     if status.get("state") not in stop_states:
         print(f"STOP_AND_WAIT: Cannot send status_report from non-stop state: {status.get('state')}")
+        return
+
+    if status.get("status_report_acked"):
+        print("STOP_AND_WAIT: Status report already acknowledged for this state.")
         return
 
     canonical_repo = get_canonical_repo(profile)
@@ -308,6 +314,8 @@ def process_ack(profile, current_head=None):
         return
 
     # Success, state is unchanged
+    status["status_report_acked"] = True
+    save_status(status)
     print(f"ACK verified successfully. State remains: {status['state']}")
 
 if __name__ == "__main__":
