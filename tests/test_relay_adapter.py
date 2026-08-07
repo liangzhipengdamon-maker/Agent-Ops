@@ -144,5 +144,121 @@ class TestRelayAdapter(unittest.TestCase):
             status = json.load(f)
         self.assertEqual(status["state"], "WAITING_FOR_REVIEW")
 
+    def test_handle_status_report_success(self):
+        status = {
+            "protocol_version": "1.0",
+            "state": "WAITING_PO_AUTH",
+            "repo": "liangzhipengdamon-maker/Agent-Ops",
+            "pr": 42,
+            "head": "abcdef123456",
+            "request": "Independent review for PR"
+        }
+        with open(os.path.join(self.temp_dir.name, "status.json"), "w") as f:
+            json.dump(status, f)
+
+        relay_adapter.handle_status_report("Test summary", "NONE")
+        
+        request_file = os.path.join(self.temp_dir.name, "request.txt")
+        self.assertTrue(os.path.exists(request_file))
+        
+        with open(request_file, "r") as f:
+            content = f.read()
+            
+        self.assertIn("REVIEW_REQUEST_ID:", content)
+        self.assertIn("REPO: liangzhipengdamon-maker/Agent-Ops", content)
+        self.assertIn("PR: 42", content)
+        self.assertIn("HEAD: abcdef123456", content)
+        self.assertIn("REQUEST: status_report", content)
+        self.assertIn("STATE: WAITING_PO_AUTH", content)
+        self.assertIn("SUMMARY: Test summary", content)
+        self.assertIn("UNAUTHORIZED_ACTIONS: NONE", content)
+        
+        with open(os.path.join(self.temp_dir.name, "status.json"), "r") as f:
+            updated_status = json.load(f)
+        self.assertIn("request_id", updated_status)
+
+    def test_handle_status_report_non_stop_state(self):
+        status = {
+            "protocol_version": "1.0",
+            "state": "REVIEW_REQUESTED",
+            "repo": "liangzhipengdamon-maker/Agent-Ops",
+            "pr": 42,
+            "head": "abcdef123456"
+        }
+        with open(os.path.join(self.temp_dir.name, "status.json"), "w") as f:
+            json.dump(status, f)
+
+        relay_adapter.handle_status_report("Test summary", "NONE")
+        request_file = os.path.join(self.temp_dir.name, "request.txt")
+        self.assertFalse(os.path.exists(request_file))
+
+    def test_handle_status_report_missing_envelope(self):
+        status = {
+            "protocol_version": "1.0",
+            "state": "WAITING_PO_AUTH",
+            "repo": "liangzhipengdamon-maker/Agent-Ops",
+            "head": "abcdef123456"
+            # Missing pr
+        }
+        with open(os.path.join(self.temp_dir.name, "status.json"), "w") as f:
+            json.dump(status, f)
+
+        relay_adapter.handle_status_report("Test summary", "NONE")
+        request_file = os.path.join(self.temp_dir.name, "request.txt")
+        self.assertFalse(os.path.exists(request_file))
+
+    def test_process_ack_success(self):
+        status = {
+            "protocol_version": "1.0",
+            "state": "WAITING_PO_AUTH",
+            "repo": "liangzhipengdamon-maker/Agent-Ops",
+            "pr": 42,
+            "head": "abcdef123456",
+            "request_id": "test-req-123"
+        }
+        with open(os.path.join(self.temp_dir.name, "status.json"), "w") as f:
+            json.dump(status, f)
+
+        review = (
+            "REVIEW_REQUEST_ID: test-req-123\n"
+            "REPO: liangzhipengdamon-maker/Agent-Ops\n"
+            "PR: 42\n"
+            "HEAD: abcdef123456\n"
+            "ACK: status_report_received\n"
+        )
+        with open(os.path.join(self.temp_dir.name, "gpt-review.md"), "w") as f:
+            f.write(review)
+
+        relay_adapter.process_ack(current_head="abcdef123456")
+        
+        with open(os.path.join(self.temp_dir.name, "status.json"), "r") as f:
+            updated = json.load(f)
+        self.assertEqual(updated["state"], "WAITING_PO_AUTH")
+
+    def test_process_ack_mismatched_id(self):
+        status = {
+            "protocol_version": "1.0",
+            "state": "WAITING_PO_AUTH",
+            "repo": "liangzhipengdamon-maker/Agent-Ops",
+            "pr": 42,
+            "head": "abcdef123456",
+            "request_id": "test-req-123"
+        }
+        with open(os.path.join(self.temp_dir.name, "status.json"), "w") as f:
+            json.dump(status, f)
+
+        review = (
+            "REVIEW_REQUEST_ID: mismatched-id\n"
+            "REPO: liangzhipengdamon-maker/Agent-Ops\n"
+            "PR: 42\n"
+            "HEAD: abcdef123456\n"
+            "ACK: status_report_received\n"
+        )
+        with open(os.path.join(self.temp_dir.name, "gpt-review.md"), "w") as f:
+            f.write(review)
+
+        # Output should be STOP_AND_WAIT
+        relay_adapter.process_ack(current_head="abcdef123456")
+
 if __name__ == '__main__':
     unittest.main()

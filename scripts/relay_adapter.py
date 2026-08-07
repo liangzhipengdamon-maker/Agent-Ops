@@ -163,12 +163,131 @@ def handle_gpt_review_return(current_head=None):
     save_status(status)
     print(f"Review processed successfully. New state: {status['state']}")
 
+def handle_status_report(summary, unauthorized_actions):
+    status = load_status()
+    if not status:
+        print("No status.json found.")
+        return
+
+    # P0: Enforce stop states
+    stop_states = {"WAITING_PO_AUTH", "BLOCKED", "CHANGES_REQUESTED", "NEEDS_OWNER_DECISION"}
+    if status.get("state") not in stop_states:
+        print(f"STOP_AND_WAIT: Cannot send status_report from non-stop state: {status.get('state')}")
+        return
+
+    # P1: Strict envelope binding
+    repo = status.get('repo')
+    pr = status.get('pr')
+    head = status.get('head')
+    
+    if not repo or not pr or not head or repo != CANONICAL_REPO:
+        print("STOP_AND_WAIT: Missing or invalid REPO/PR/HEAD in status.json for status_report.")
+        return
+
+    req_id = str(uuid.uuid4())
+    # Save the request_id to verify the ACK later
+    status["request_id"] = req_id
+    save_status(status)
+
+    payload = (
+        f"REVIEW_REQUEST_ID: {req_id}\n"
+        f"REPO: {repo}\n"
+        f"PR: {pr}\n"
+        f"HEAD: {head}\n"
+        f"REQUEST: status_report\n"
+        f"STATE: {status.get('state')}\n"
+        f"SUMMARY: {summary}\n"
+        f"UNAUTHORIZED_ACTIONS: {unauthorized_actions}\n"
+    )
+    
+    with open(get_request_file(), "w") as f:
+        f.write(payload)
+        
+    print("STATUS_REPORT")
+    print(f"Request file created at: {get_request_file()}")
+
+def process_ack(current_head=None):
+    if not current_head:
+        print("STOP_AND_WAIT: Missing --current-head argument.")
+        return
+
+    status = load_status()
+    if not status:
+        print("No status.json found.")
+        return
+
+    rf = get_review_file()
+    if not os.path.exists(rf):
+        print("No gpt-review.md found.")
+        return
+
+    with open(rf, "r") as f:
+        content = f.read()
+
+    lines = content.split('\n')
+    ack = None
+    pr = None
+    head = None
+    req_id = None
+    review_repo = None
+
+    for line in lines:
+        if line.startswith("ACK:"):
+            ack = line.split("ACK:")[1].strip()
+        elif line.startswith("PR:"):
+            pr = line.split("PR:")[1].strip()
+        elif line.startswith("HEAD:"):
+            head = line.split("HEAD:")[1].strip()
+        elif line.startswith("REVIEW_REQUEST_ID:") or line.startswith("REPORT_ID:"):
+            req_id = line.split(":", 1)[1].strip()
+        elif line.startswith("REPO:"):
+            review_repo = line.split("REPO:")[1].strip()
+
+    if not req_id or req_id != status.get("request_id"):
+        print(f"STOP_AND_WAIT: Mismatched ACK ID. Expected {status.get('request_id')} got {req_id}")
+        return
+
+    if review_repo != status.get("repo") or review_repo != CANONICAL_REPO:
+        print("STOP_AND_WAIT: REPO mismatch in ACK.")
+        return
+
+    if head != status.get("head") or head != current_head:
+        print("STOP_AND_WAIT: HEAD mismatch in ACK.")
+        return
+
+    if str(pr) != str(status.get("pr")):
+        print("STOP_AND_WAIT: PR mismatch in ACK.")
+        return
+
+    if ack != "status_report_received":
+        print(f"STOP_AND_WAIT: Invalid ACK received: {ack}")
+        return
+
+    # Success, state is unchanged
+    print(f"ACK verified successfully. State remains: {status['state']}")
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "process_review":
+    if len(sys.argv) > 1:
         parser = argparse.ArgumentParser()
         parser.add_argument("command", help="Command to run")
-        parser.add_argument("--current-head", required=True, help="Current remote PR HEAD SHA to prevent stale reviews.")
+        parser.add_argument("--current-head", help="Current remote PR HEAD SHA to prevent stale reviews.")
+        parser.add_argument("--summary", help="Summary for status report")
+        parser.add_argument("--unauthorized-actions", help="Unauthorized actions for status report", default="NONE")
         args = parser.parse_args()
-        handle_gpt_review_return(current_head=args.current_head)
+        
+        if args.command == "process_review":
+            if not args.current_head:
+                print("STOP_AND_WAIT: Missing --current-head argument.")
+                sys.exit(1)
+            handle_gpt_review_return(current_head=args.current_head)
+        elif args.command == "status_report":
+            handle_status_report(summary=args.summary or "Status update.", unauthorized_actions=args.unauthorized_actions)
+        elif args.command == "process_ack":
+            if not args.current_head:
+                print("STOP_AND_WAIT: Missing --current-head argument.")
+                sys.exit(1)
+            process_ack(current_head=args.current_head)
+        else:
+            print(f"Unknown command: {args.command}")
     else:
         handle_review_request()
