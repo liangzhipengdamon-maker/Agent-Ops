@@ -480,12 +480,12 @@ IDLE → 等待外部调度策略指定时间（如 10 分钟，仅为示例） 
 
 ---
 
-## 十五、与 Linear 的关系
+## 十五、与 Linear 的关系及 Builder/Reviewer 职责
 
-Linear 在本方案中只承担：
+Linear 在本方案中只承担规划和状态投影：
 
 - Issue 列表与编号（`AGE-NN` 格式）
-- 状态分类
+- 状态分类（Triage / In Progress / Blocked / Done 等）
 - 依赖关系
 - 授权摘要或证据链接（可选，辅助追踪）
 
@@ -497,6 +497,34 @@ Linear **不**：
 - 充当 Reviewer Agent 输出正文
 
 任何实际授权操作必须通过结构化授权绑定校验后才能执行，**不允许** Agent Runner 仅基于 Linear 状态变更执行 Ready、合并或部署。
+
+### 15.1 Builder 默认职责（Linear 生命周期维护）
+
+将 Linear 生命周期管理正式纳入 Builder 的默认职责：
+
+1. **工作认领与创建**：接到新的 AgentOps 工作时，必须先检查是否已有对应 AGE Issue。如果已有，使用现有 Issue，不重复创建；如果没有，在 AgentOps Team 创建新的 AGE Issue，关联正确的 AgentOps Project。
+2. **生命周期维护**：Builder 需在整个工作生命周期自行维护 Linear 状态。包括但不限于：
+   - 任务开始时标记 In Progress
+   - Draft PR 创建后更新 PR URL、exact HEAD 和 CI 状态
+   - 更新 Independent Review 状态
+   - 遇到阻碍或需要授权时流转至 CHANGES_REQUESTED / BLOCKED / WAITING_PO_AUTH
+   - Merge 后回读 GitHub
+   - 最终完成时标记为 Done
+3. **真相与修正冲突**：GitHub main 始终是 canonical repository truth。当 GitHub 与 Linear 不一致时，以 GitHub 为准；Builder 有责任修正 Linear 以反映 GitHub 的真实状态，**绝对不得反向修改 GitHub 来迁就 Linear**。
+4. **禁止自我授权**：Builder 不得通过修改 Linear 状态来给自己生成 Implementation / Ready / Merge / Deploy 等执行权限。
+
+### 15.2 Reviewer 职责（状态校验）
+
+1. 独立审核 GitHub 上的实现代码与逻辑。
+2. 同时核验 Linear 是否准确反映 GitHub 当前事实。
+3. 如果发现 Linear 状态漂移（drift），要求 Builder 修正；Reviewer 原则上不替 Builder 日常维护 Linear。
+
+### 15.3 到达治理停点的汇报规范
+
+到达治理停点后（如 WAITING_PO_AUTH, BLOCKED），必须：
+1. Builder 更新 Linear 到对应管理状态。
+2. 使用 Status Report 自动向当前外部 ChatGPT Reviewer 汇报最终状态。
+3. STOP。
 
 ---
 
