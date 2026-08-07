@@ -1,22 +1,22 @@
 # Project Policy Template
 
-This template defines project-level security policies. 
+This template defines project-level security policies for the Agent-Ops unattended control plane. 
 
-**CRITICAL RULE:** Project-level policies can ONLY tighten (restrict) the global Agent-Ops authorization rules. They cannot relax or bypass global safety nets (e.g., they cannot bypass exact-SHA validation for merges).
+**CRITICAL RULE:** Organization-level un-overridable rules (like exact-SHA validation for merges) can NEVER be relaxed, even through an `AMEND` authorization. 
 
 ## Base Configuration
 
 ```yaml
 project_id: "liangzhipengdamon-maker/Agent-Ops"
-policy_version: "v1.0"
+policy_version: "v1.1"
 
-# Strict Risk Limits (Cannot exceed global maximums)
+# Project Budgets (Can be explicitly amended by PO)
 max_budget:
   max_changed_files_per_mission: 50
   max_commits_per_mission: 10
   max_cost_usd_per_mission: 2.00
 
-# High-Risk Defaults
+# High-Risk Defaults (Organization strict, overrides possible only if explicitly stated)
 high_risk_actions:
   allow_database_migrations_by_default: false
   allow_workflow_mutations_by_default: false
@@ -32,5 +32,7 @@ gates:
 default_conflict_policy: "PINNED_BASE"
 ```
 
-## Enforcement
-The Trusted Authorization Provider (TAP) merges this project template with the PO's instruction. If a PO's instruction attempts to exceed these limits (e.g., touching 100 files when the limit is 50), the TAP must `DENY` the generation of the envelope and request explicit `AMEND` authorization from the PO to temporarily override the project limit.
+## Enforcement and Amendments
+- **Immutable Rules**: Global strict principles, such as Exact-SHA binding for Deployments and Merges, are hardcoded and non-negotiable.
+- **Budget Adjustments**: Project budget defaults (e.g., `max_changed_files`) may be adjusted explicitly by the Product Owner for a specific mission using an `AMEND` authorization binding the original Auth Code and Card Hash. 
+- **Amendment Scope**: An `AMEND` authorization *only* modifies the explicitly listed fields in the Amendment Card. All other fields continue to inherit the restrictions from the original pre-authorized envelope and the project defaults.

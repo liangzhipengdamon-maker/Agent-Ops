@@ -10,6 +10,7 @@ This template is used by the Agent to summarize a requested mission into a stric
 终点 (Terminal Stage): [e.g., DRAFT_PR, LOCAL_READY]
 禁止 (Prohibitions): [Explicitly blocked actions/paths, e.g., No DB migrations, No workflows]
 授权码 (Auth Code): [Unique nonce/idempotency key, e.g., AUTH-8f2a9c]
+卡片哈希 (Card Hash): [SHA256 of the normalized card contents, e.g., HASH-5c2b...]
 ```
 
 ## Field Definitions
@@ -17,4 +18,5 @@ This template is used by the Agent to summarize a requested mission into a stric
   - *低 (Low)*: Documentation, local tests, no production impact.
   - *中 (Medium)*: Code changes within isolated modules, draft PR creation.
   - *高 (High)*: Core architecture, CI/CD changes, database migrations, deployments.
-- **授权码 (Auth Code)**: Must be unique per proposal. The PO uses this code in the `批准 MISSION <授权码>` command to cryptographically bind their approval to this exact boundary configuration.
+- **授权码 (Auth Code)**: A standard nonce/idempotency key for preventing replay.
+- **卡片哈希 (Card Hash)**: A normalized, complete digest of the card's content. A simple nonce or auth code alone does not constitute a cryptographic binding. The Card Hash ensures the PO is approving the exact, immutable boundaries presented. If the Agent alters the card contents, a new hash must be generated, and any previous approval is invalidated.
