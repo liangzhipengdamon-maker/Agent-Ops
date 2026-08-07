@@ -1,0 +1,12 @@
+{
+  "routes": {
+    "liangzhipengdamon-maker/Agent-Ops": {
+      "conversation_url": "https://chatgpt.com/c/example-url-for-agent-ops",
+      "cdp_port": 9223
+    },
+    "liangzhipengdamon-maker/AI-Investment-Lab": {
+      "conversation_url": "https://chatgpt.com/c/example-url-for-investment-lab",
+      "cdp_port": 9223
+    }
+  }
+}

@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import argparse
+import uuid
 
 def get_bridge_dir():
     return os.environ.get("AGENT_BRIDGE_DIR", ".agent-bridge")
@@ -11,6 +12,9 @@ def get_status_file():
 
 def get_review_file():
     return os.path.join(get_bridge_dir(), "gpt-review.md")
+
+def get_request_file():
+    return os.path.join(get_bridge_dir(), "request.txt")
 
 CANONICAL_REPO = "liangzhipengdamon-maker/Agent-Ops"
 
@@ -58,16 +62,27 @@ def handle_review_request():
 
     state = status["state"]
     if state in ["REVIEW_REQUESTED", "REVIEW_REQUESTED_AGAIN"]:
-        # 2. duplicate request / infinite loop prevention
+        # generate unique request_id
+        req_id = str(uuid.uuid4())
+        status["request_id"] = req_id
         # State transition to WAITING_FOR_REVIEW immediately so it doesn't trigger twice
         status["state"] = "WAITING_FOR_REVIEW"
         save_status(status)
 
-        # Output minimal payload for GPT as per rules (Relay boundary)
+        # Output payload for Neutral Relay
+        payload = (
+            f"REVIEW_REQUEST_ID: {req_id}\n"
+            f"REPO: {status['repo']}\n"
+            f"PR: {status['pr']}\n"
+            f"HEAD: {status['head']}\n"
+            f"REQUEST: {status['request']}\n"
+        )
+        
+        with open(get_request_file(), "w") as f:
+            f.write(payload)
+            
         print("REVIEW_REQUEST")
-        print(f"repo: {status['repo']}")
-        print(f"pr: {status['pr']}")
-        print(f"head: {status['head']}")
+        print(f"Request file created at: {get_request_file()}")
     else:
         print(f"No outgoing request. Current state: {state}")
 
@@ -98,6 +113,8 @@ def handle_gpt_review_return(current_head=None):
     verdict = None
     pr = None
     head = None
+    req_id = None
+    review_repo = None
 
     for line in lines:
         if line.startswith("VERDICT:"):
@@ -106,6 +123,19 @@ def handle_gpt_review_return(current_head=None):
             pr = line.split("PR:")[1].strip()
         elif line.startswith("HEAD:"):
             head = line.split("HEAD:")[1].strip()
+        elif line.startswith("REVIEW_REQUEST_ID:"):
+            req_id = line.split("REVIEW_REQUEST_ID:")[1].strip()
+        elif line.startswith("REPO:"):
+            review_repo = line.split("REPO:")[1].strip()
+
+    if status.get("request_id") and req_id != status.get("request_id"):
+        print(f"STOP_AND_WAIT: Stale review detected (request_id mismatch). Expected {status.get('request_id')} got {req_id}")
+        return
+
+    # Verify REPO binding
+    if review_repo != status.get("repo") or review_repo != CANONICAL_REPO:
+        print(f"STOP_AND_WAIT: REPO mismatch. Review REPO ({review_repo}) vs Status ({status.get('repo')}) vs Canonical ({CANONICAL_REPO}).")
+        return
 
     # 1. stale review (Triple HEAD binding)
     status_head = status["head"]
