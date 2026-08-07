@@ -1,6 +1,6 @@
 # Architecture Documentation
 
-This directory contains design documents and architecture specifications for the Agent-Ops unattached control plane.
+This directory contains design documents and architecture specifications for the Agent-Ops unattended control plane.
 
 ## Index
 
