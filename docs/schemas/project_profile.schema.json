@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgentOps Project Onboarding Profile",
+  "type": "object",
+  "properties": {
+    "project_identity": {
+      "type": "string"
+    },
+    "github": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string" },
+        "canonical_branch": { "type": "string" }
+      },
+      "required": ["repository", "canonical_branch"]
+    },
+    "linear": {
+      "type": "object",
+      "properties": {
+        "team_key": { "type": "string" },
+        "project_id": { "type": "string" }
+      },
+      "required": ["team_key", "project_id"]
+    },
+    "local_builder": {
+      "type": "object",
+      "properties": {
+        "relative_path": { "type": "string" },
+        "required_env_vars": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "properties": {
+        "ci_command": { "type": "string" },
+        "test_command": { "type": "string" }
+      },
+      "required": ["ci_command"]
+    },
+    "reviewer_relay": {
+      "type": "object",
+      "properties": {
+        "binding_type": { "type": "string" },
+        "contact_uri": { "type": "string" }
+      },
+      "required": ["binding_type", "contact_uri"]
+    },
+    "governance": {
+      "type": "object",
+      "properties": {
+        "capabilities": { "type": "array", "items": { "type": "string" } },
+        "required_gates": { "type": "array", "items": { "type": "string" } },
+        "protected_project": { "type": "boolean", "default": false },
+        "cross_project_allowed": { "type": "boolean", "default": false }
+      },
+      "required": ["capabilities", "required_gates", "protected_project"]
+    }
+  },
+  "required": [
+    "project_identity",
+    "github",
+    "linear",
+    "validation",
+    "reviewer_relay",
+    "governance"
+  ]
+}

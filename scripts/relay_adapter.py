@@ -16,8 +16,17 @@ def get_review_file():
 def get_request_file():
     return os.path.join(get_bridge_dir(), "request.txt")
 
-CANONICAL_REPO = "liangzhipengdamon-maker/Agent-Ops"
+DEFAULT_PROFILE = "profiles/agentops.json"
 
+def load_profile(profile_path):
+    if not os.path.exists(profile_path):
+        print(f"STOP_AND_WAIT: Profile not found at {profile_path}")
+        sys.exit(1)
+    with open(profile_path, "r") as f:
+        return json.load(f)
+
+def get_canonical_repo(profile):
+    return profile.get("github", {}).get("repository")
 # Removed PASS from allowed states as PASS is just a verdict, not a durable state.
 ALLOWED_STATES = {
     "IDLE",
@@ -43,7 +52,7 @@ def save_status(data):
     with open(get_status_file(), "w") as f:
         json.dump(data, f, indent=2)
 
-def handle_review_request():
+def handle_review_request(profile):
     status = load_status()
     if not status:
         print("No status.json found.")
@@ -55,8 +64,10 @@ def handle_review_request():
         print("STOP_AND_WAIT: Malformed status.json missing required fields.")
         return
 
+    canonical_repo = get_canonical_repo(profile)
+
     # 5. wrong repository
-    if status["repo"] != CANONICAL_REPO:
+    if status["repo"] != canonical_repo:
         print(f"STOP_AND_WAIT: Unknown repository {status['repo']}")
         return
 
@@ -86,7 +97,7 @@ def handle_review_request():
     else:
         print(f"No outgoing request. Current state: {state}")
 
-def handle_gpt_review_return(current_head=None):
+def handle_gpt_review_return(profile, current_head=None):
     if not current_head:
         print("STOP_AND_WAIT: Missing --current-head argument. Cannot verify stale reviews without remote PR HEAD.")
         return
@@ -132,9 +143,11 @@ def handle_gpt_review_return(current_head=None):
         print(f"STOP_AND_WAIT: Stale review detected (request_id mismatch). Expected {status.get('request_id')} got {req_id}")
         return
 
+    canonical_repo = get_canonical_repo(profile)
+
     # Verify REPO binding
-    if review_repo != status.get("repo") or review_repo != CANONICAL_REPO:
-        print(f"STOP_AND_WAIT: REPO mismatch. Review REPO ({review_repo}) vs Status ({status.get('repo')}) vs Canonical ({CANONICAL_REPO}).")
+    if review_repo != status.get("repo") or review_repo != canonical_repo:
+        print(f"STOP_AND_WAIT: REPO mismatch. Review REPO ({review_repo}) vs Status ({status.get('repo')}) vs Canonical ({canonical_repo}).")
         return
 
     # 1. stale review (Triple HEAD binding)
@@ -163,7 +176,7 @@ def handle_gpt_review_return(current_head=None):
     save_status(status)
     print(f"Review processed successfully. New state: {status['state']}")
 
-def handle_status_report(summary, unauthorized_actions):
+def handle_status_report(profile, summary, unauthorized_actions):
     status = load_status()
     if not status:
         print("No status.json found.")
@@ -175,12 +188,14 @@ def handle_status_report(summary, unauthorized_actions):
         print(f"STOP_AND_WAIT: Cannot send status_report from non-stop state: {status.get('state')}")
         return
 
+    canonical_repo = get_canonical_repo(profile)
+
     # P1: Strict envelope binding
     repo = status.get('repo')
     pr = status.get('pr')
     head = status.get('head')
     
-    if not repo or not pr or not head or repo != CANONICAL_REPO:
+    if not repo or not pr or not head or repo != canonical_repo:
         print("STOP_AND_WAIT: Missing or invalid REPO/PR/HEAD in status.json for status_report.")
         return
 
@@ -206,7 +221,7 @@ def handle_status_report(summary, unauthorized_actions):
     print("STATUS_REPORT")
     print(f"Request file created at: {get_request_file()}")
 
-def process_ack(current_head=None):
+def process_ack(profile, current_head=None):
     if not current_head:
         print("STOP_AND_WAIT: Missing --current-head argument.")
         return
@@ -247,7 +262,9 @@ def process_ack(current_head=None):
         print(f"STOP_AND_WAIT: Mismatched ACK ID. Expected {status.get('request_id')} got {req_id}")
         return
 
-    if review_repo != status.get("repo") or review_repo != CANONICAL_REPO:
+    canonical_repo = get_canonical_repo(profile)
+
+    if review_repo != status.get("repo") or review_repo != canonical_repo:
         print("STOP_AND_WAIT: REPO mismatch in ACK.")
         return
 
@@ -267,27 +284,29 @@ def process_ack(current_head=None):
     print(f"ACK verified successfully. State remains: {status['state']}")
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        parser = argparse.ArgumentParser()
-        parser.add_argument("command", help="Command to run")
-        parser.add_argument("--current-head", help="Current remote PR HEAD SHA to prevent stale reviews.")
-        parser.add_argument("--summary", help="Summary for status report")
-        parser.add_argument("--unauthorized-actions", help="Unauthorized actions for status report", default="NONE")
-        args = parser.parse_args()
-        
-        if args.command == "process_review":
-            if not args.current_head:
-                print("STOP_AND_WAIT: Missing --current-head argument.")
-                sys.exit(1)
-            handle_gpt_review_return(current_head=args.current_head)
-        elif args.command == "status_report":
-            handle_status_report(summary=args.summary or "Status update.", unauthorized_actions=args.unauthorized_actions)
-        elif args.command == "process_ack":
-            if not args.current_head:
-                print("STOP_AND_WAIT: Missing --current-head argument.")
-                sys.exit(1)
-            process_ack(current_head=args.current_head)
-        else:
-            print(f"Unknown command: {args.command}")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", nargs="?", help="Command to run", default="request_review")
+    parser.add_argument("--current-head", help="Current remote PR HEAD SHA to prevent stale reviews.")
+    parser.add_argument("--summary", help="Summary for status report")
+    parser.add_argument("--unauthorized-actions", help="Unauthorized actions for status report", default="NONE")
+    parser.add_argument("--profile", help="Path to project profile JSON", default=DEFAULT_PROFILE)
+    args = parser.parse_args()
+
+    profile = load_profile(args.profile)
+    
+    if args.command == "process_review":
+        if not args.current_head:
+            print("STOP_AND_WAIT: Missing --current-head argument.")
+            sys.exit(1)
+        handle_gpt_review_return(profile, current_head=args.current_head)
+    elif args.command == "status_report":
+        handle_status_report(profile, summary=args.summary or "Status update.", unauthorized_actions=args.unauthorized_actions)
+    elif args.command == "process_ack":
+        if not args.current_head:
+            print("STOP_AND_WAIT: Missing --current-head argument.")
+            sys.exit(1)
+        process_ack(profile, current_head=args.current_head)
+    elif args.command == "request_review":
+        handle_review_request(profile)
     else:
-        handle_review_request()
+        print(f"Unknown command: {args.command}")
