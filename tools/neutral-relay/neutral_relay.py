@@ -1,4 +1,4 @@
-#!/usr/import/env python3
+#!/usr/bin/env python3
 import argparse
 import json
 import os
@@ -54,24 +54,12 @@ async def run_relay(args):
         print("Error: Incomplete route configuration. Need conversation_url and cdp_port.")
         return 1
 
-    # In DRY-RUN mode, just print what we would do and simulate success
+    # In DRY-RUN mode, just print what we would do and verify the payload
     if args.dry_run:
         print(f"[DRY-RUN] Would route {repo} to CDP port {cdp_port} at URL {gpt_url}")
         print(f"[DRY-RUN] Sending Payload:\n{request_text}")
         print(f"[DRY-RUN] Waiting for response with ID: {req_id}")
-        
-        # Simulate an external response write
-        mock_response = (
-            f"REVIEW_REQUEST_ID: {req_id}\n"
-            "VERDICT: PASS\n"
-            f"REPO: {repo}\n"
-            "PR: mock\n"
-            "HEAD: mock\n"
-            "SUMMARY: Dry run test\n"
-            "ACTIONS: None\n"
-        )
-        with open(args.output_file, "w") as f:
-            f.write(mock_response)
+        # Dry-run MUST NOT generate a fake review or write PASS. It only validates the transport config.
         return 0
 
     # 3. Transport via CDP
@@ -129,27 +117,31 @@ async def run_relay(args):
             print("Error: Send button not found or disabled.")
             return 1
 
-        # Poll for completion and check for request ID to prevent reading stale replies
+        # Poll for completion and check for request ID in the LATEST assistant message
         deadline = time.time() + 180
         found_response = False
         final_text = ""
         while time.time() < deadline:
-            text = str(await js("(()=>{const m=document.querySelector('main');return m?m.innerText||'':''})()"))
-            if "回复操作" in text or "Reply actions" in text:
-                if "正在思考" not in text[-2000:]:
-                    # Check if our req_id is in the latest text to ensure we aren't picking up a stale review
-                    if req_id in text[-4000:]:
-                        final_text = text
-                        found_response = True
-                        break
+            # First check if the page is still generating
+            is_generating = bool(await js("(()=>{const btns=Array.from(document.querySelectorAll('button')); return btns.some(b=>b.innerText.includes('停止生成') || b.innerText.includes('Stop generating'));})()"))
+            if is_generating:
+                await asyncio.sleep(3)
+                continue
+            
+            # Check for the latest assistant message specifically
+            latest_assistant_text = str(await js("(()=>{const msgs=Array.from(document.querySelectorAll('[data-message-author-role=\"assistant\"]')); if(msgs.length===0) return ''; return msgs[msgs.length-1].innerText||'';})()"))
+            
+            if req_id in latest_assistant_text:
+                final_text = latest_assistant_text
+                found_response = True
+                break
             await asyncio.sleep(3)
             
         if not found_response:
-            print("Error: Timed out waiting for Assistant reply or Request ID not found in reply.")
+            print("Error: Timed out waiting for Assistant reply or Request ID not found in the latest Assistant reply.")
             return 1
             
-        # Extract the relevant block (simplified: just dumping the whole latest response text that contains the ID)
-        # The relay_adapter will parse the strictly formatted block.
+        # Extract the relevant block strictly (only the latest assistant message, not history)
         with open(args.output_file, "w") as f:
             f.write(final_text)
             

@@ -114,6 +114,7 @@ def handle_gpt_review_return(current_head=None):
     pr = None
     head = None
     req_id = None
+    review_repo = None
 
     for line in lines:
         if line.startswith("VERDICT:"):
@@ -124,9 +125,16 @@ def handle_gpt_review_return(current_head=None):
             head = line.split("HEAD:")[1].strip()
         elif line.startswith("REVIEW_REQUEST_ID:"):
             req_id = line.split("REVIEW_REQUEST_ID:")[1].strip()
+        elif line.startswith("REPO:"):
+            review_repo = line.split("REPO:")[1].strip()
 
     if status.get("request_id") and req_id != status.get("request_id"):
         print(f"STOP_AND_WAIT: Stale review detected (request_id mismatch). Expected {status.get('request_id')} got {req_id}")
+        return
+
+    # Verify REPO binding
+    if review_repo != status.get("repo") or review_repo != CANONICAL_REPO:
+        print(f"STOP_AND_WAIT: REPO mismatch. Review REPO ({review_repo}) vs Status ({status.get('repo')}) vs Canonical ({CANONICAL_REPO}).")
         return
 
     # 1. stale review (Triple HEAD binding)

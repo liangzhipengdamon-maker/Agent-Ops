@@ -49,7 +49,7 @@ class TestRelayAdapter(unittest.TestCase):
         req_id = status["request_id"]
         
         with open(self.review_file, "w") as f:
-            f.write(f"REVIEW_REQUEST_ID: {req_id}\nVERDICT: PASS\nPR: 5\nHEAD: abcdef123456\nSUMMARY:\nLooks good.\nACTIONS:\n")
+            f.write(f"REVIEW_REQUEST_ID: {req_id}\nVERDICT: PASS\nREPO: liangzhipengdamon-maker/Agent-Ops\nPR: 5\nHEAD: abcdef123456\nSUMMARY:\nLooks good.\nACTIONS:\n")
             
         # Provide matching current_head
         relay_adapter.handle_gpt_review_return(current_head="abcdef123456")
@@ -66,7 +66,7 @@ class TestRelayAdapter(unittest.TestCase):
         req_id = status["request_id"]
         
         with open(self.review_file, "w") as f:
-            f.write(f"REVIEW_REQUEST_ID: {req_id}\nVERDICT: PASS\nPR: 5\nHEAD: abcdef123456\n")
+            f.write(f"REVIEW_REQUEST_ID: {req_id}\nVERDICT: PASS\nREPO: liangzhipengdamon-maker/Agent-Ops\nPR: 5\nHEAD: abcdef123456\n")
             
         # Provide NO current_head
         relay_adapter.handle_gpt_review_return(current_head=None)
@@ -84,7 +84,7 @@ class TestRelayAdapter(unittest.TestCase):
         req_id = status["request_id"]
         
         with open(self.review_file, "w") as f:
-            f.write(f"REVIEW_REQUEST_ID: {req_id}\nVERDICT: PASS\nPR: 5\nHEAD: 000000000000\n")
+            f.write(f"REVIEW_REQUEST_ID: {req_id}\nVERDICT: PASS\nREPO: liangzhipengdamon-maker/Agent-Ops\nPR: 5\nHEAD: 000000000000\n")
         
         relay_adapter.handle_gpt_review_return(current_head="abcdef123456")
         
@@ -100,7 +100,7 @@ class TestRelayAdapter(unittest.TestCase):
         req_id = status["request_id"]
         
         with open(self.review_file, "w") as f:
-            f.write(f"REVIEW_REQUEST_ID: {req_id}\nVERDICT: PASS\nPR: 5\nHEAD: abcdef123456\n")
+            f.write(f"REVIEW_REQUEST_ID: {req_id}\nVERDICT: PASS\nREPO: liangzhipengdamon-maker/Agent-Ops\nPR: 5\nHEAD: abcdef123456\n")
         
         # The remote GitHub PR HEAD drifted!
         relay_adapter.handle_gpt_review_return(current_head="drifted12345")
@@ -108,6 +108,40 @@ class TestRelayAdapter(unittest.TestCase):
         with open(self.status_file, "r") as f:
             status = json.load(f)
         # Should stay WAITING_FOR_REVIEW, effectively rejecting the stale PASS verdict
+        self.assertEqual(status["state"], "WAITING_FOR_REVIEW")
+
+    def test_missing_repo_fails_closed(self):
+        relay_adapter.handle_review_request()
+        
+        with open(self.status_file, "r") as f:
+            status = json.load(f)
+        req_id = status["request_id"]
+        
+        with open(self.review_file, "w") as f:
+            # MISSING REPO
+            f.write(f"REVIEW_REQUEST_ID: {req_id}\nVERDICT: PASS\nPR: 5\nHEAD: abcdef123456\n")
+        
+        relay_adapter.handle_gpt_review_return(current_head="abcdef123456")
+        
+        with open(self.status_file, "r") as f:
+            status = json.load(f)
+        self.assertEqual(status["state"], "WAITING_FOR_REVIEW")
+
+    def test_mismatched_repo_fails_closed(self):
+        relay_adapter.handle_review_request()
+        
+        with open(self.status_file, "r") as f:
+            status = json.load(f)
+        req_id = status["request_id"]
+        
+        with open(self.review_file, "w") as f:
+            # MISMATCHED REPO
+            f.write(f"REVIEW_REQUEST_ID: {req_id}\nVERDICT: PASS\nREPO: some/other-repo\nPR: 5\nHEAD: abcdef123456\n")
+        
+        relay_adapter.handle_gpt_review_return(current_head="abcdef123456")
+        
+        with open(self.status_file, "r") as f:
+            status = json.load(f)
         self.assertEqual(status["state"], "WAITING_FOR_REVIEW")
 
 if __name__ == '__main__':

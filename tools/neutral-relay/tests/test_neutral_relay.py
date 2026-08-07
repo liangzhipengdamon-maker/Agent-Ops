@@ -47,10 +47,8 @@ class TestNeutralRelay(unittest.TestCase):
         ret = asyncio.run(neutral_relay.run_relay(args))
         
         self.assertEqual(ret, 0)
-        self.assertTrue(os.path.exists(self.out_path))
-        with open(self.out_path, "r") as f:
-            content = f.read()
-            self.assertIn("REVIEW_REQUEST_ID: 12345", content)
+        # Dry-run should no longer generate an output file or fake PASS
+        self.assertFalse(os.path.exists(self.out_path))
 
     def test_unknown_repo_fails_closed(self):
         with open(self.req_path, "w") as f:
