@@ -144,5 +144,34 @@ class TestRelayAdapter(unittest.TestCase):
             status = json.load(f)
         self.assertEqual(status["state"], "WAITING_FOR_REVIEW")
 
+    def test_handle_status_report(self):
+        status = {
+            "protocol_version": "1.0",
+            "state": "WAITING_PO_AUTH",
+            "repo": "liangzhipengdamon-maker/Agent-Ops",
+            "pr": 42,
+            "head": "abcdef123456",
+            "request": "Independent review for PR"
+        }
+        with open(os.path.join(self.temp_dir.name, "status.json"), "w") as f:
+            json.dump(status, f)
+
+        relay_adapter.handle_status_report("Test summary", "NONE")
+        
+        request_file = os.path.join(self.temp_dir.name, "request.txt")
+        self.assertTrue(os.path.exists(request_file))
+        
+        with open(request_file, "r") as f:
+            content = f.read()
+            
+        self.assertIn("REVIEW_REQUEST_ID:", content)
+        self.assertIn("REPO: liangzhipengdamon-maker/Agent-Ops", content)
+        self.assertIn("PR: 42", content)
+        self.assertIn("HEAD: abcdef123456", content)
+        self.assertIn("REQUEST: status_report", content)
+        self.assertIn("STATE: WAITING_PO_AUTH", content)
+        self.assertIn("SUMMARY: Test summary", content)
+        self.assertIn("UNAUTHORIZED_ACTIONS: NONE", content)
+
 if __name__ == '__main__':
     unittest.main()

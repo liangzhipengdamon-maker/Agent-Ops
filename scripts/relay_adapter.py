@@ -163,12 +163,53 @@ def handle_gpt_review_return(current_head=None):
     save_status(status)
     print(f"Review processed successfully. New state: {status['state']}")
 
+def handle_status_report(summary, unauthorized_actions):
+    status = load_status()
+    if not status:
+        print("No status.json found.")
+        return
+
+    req_id = str(uuid.uuid4())
+    
+    pr = status.get('pr')
+    pr_str = str(pr) if pr else "N/A"
+    head = status.get('head')
+    head_str = head if head else "N/A"
+
+    payload = (
+        f"REVIEW_REQUEST_ID: {req_id}\n"
+        f"REPO: {status.get('repo', CANONICAL_REPO)}\n"
+        f"PR: {pr_str}\n"
+        f"HEAD: {head_str}\n"
+        f"REQUEST: status_report\n"
+        f"STATE: {status.get('state', 'UNKNOWN')}\n"
+        f"SUMMARY: {summary}\n"
+        f"UNAUTHORIZED_ACTIONS: {unauthorized_actions}\n"
+    )
+    
+    with open(get_request_file(), "w") as f:
+        f.write(payload)
+        
+    print("STATUS_REPORT")
+    print(f"Request file created at: {get_request_file()}")
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "process_review":
+    if len(sys.argv) > 1:
         parser = argparse.ArgumentParser()
         parser.add_argument("command", help="Command to run")
-        parser.add_argument("--current-head", required=True, help="Current remote PR HEAD SHA to prevent stale reviews.")
+        parser.add_argument("--current-head", help="Current remote PR HEAD SHA to prevent stale reviews.")
+        parser.add_argument("--summary", help="Summary for status report")
+        parser.add_argument("--unauthorized-actions", help="Unauthorized actions for status report", default="NONE")
         args = parser.parse_args()
-        handle_gpt_review_return(current_head=args.current_head)
+        
+        if args.command == "process_review":
+            if not args.current_head:
+                print("STOP_AND_WAIT: Missing --current-head argument.")
+                sys.exit(1)
+            handle_gpt_review_return(current_head=args.current_head)
+        elif args.command == "status_report":
+            handle_status_report(summary=args.summary or "Status update.", unauthorized_actions=args.unauthorized_actions)
+        else:
+            print(f"Unknown command: {args.command}")
     else:
         handle_review_request()
