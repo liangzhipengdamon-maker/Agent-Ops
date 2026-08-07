@@ -498,18 +498,34 @@ Linear **不**：
 
 任何实际授权操作必须通过结构化授权绑定校验后才能执行，**不允许** Agent Runner 仅基于 Linear 状态变更执行 Ready、合并或部署。
 
-### 15.1 Builder 默认职责（Linear 生命周期维护）
+### 15.1 AgentOps Governance State vs Linear Workflow Status
+
+必须严格区分底层的「Governance State (治理状态)」与面向协作的「Linear Workflow Status (Linear 工作流状态)」：
+- **Governance State**：由 GitHub 事实与 Neutral Relay 协议共同维护（如 `IMPLEMENTATION`, `REVIEW_REQUESTED`, `CHANGES_REQUESTED`, `WAITING_PO_AUTH`, `BLOCKED`, `NEEDS_OWNER_DECISION`, `DONE`）。决定能否执行机器授权操作。
+- **Linear Workflow Status**：纯粹用于人类协同与项目追踪的管理状态，不产生任何自动化授权。
+
+**实际状态映射规范（State Mapping）：**
+| AgentOps Governance State | Linear Workflow Status (Team: AGE) |
+|---------------------------|------------------------------------|
+| 任务初立 / 未开始 | `Todo` / `Backlog` |
+| `IMPLEMENTATION` | `In Progress` |
+| `REVIEW_REQUESTED` | `In Review` |
+| `CHANGES_REQUESTED` | `In Progress` |
+| `WAITING_PO_AUTH` | `In Review` |
+| `BLOCKED` / `NEEDS_OWNER_DECISION` | `In Progress` (并在评论置顶或用 Label 标识 Blocked 原因) |
+| `DONE` (已 Merge) | `Done` |
+
+### 15.2 Builder 默认职责（Linear 生命周期维护）
 
 将 Linear 生命周期管理正式纳入 Builder 的默认职责：
 
 1. **工作认领与创建**：接到新的 AgentOps 工作时，必须先检查是否已有对应 AGE Issue。如果已有，使用现有 Issue，不重复创建；如果没有，在 AgentOps Team 创建新的 AGE Issue，关联正确的 AgentOps Project。
-2. **生命周期维护**：Builder 需在整个工作生命周期自行维护 Linear 状态。包括但不限于：
-   - 任务开始时标记 In Progress
-   - Draft PR 创建后更新 PR URL、exact HEAD 和 CI 状态
-   - 更新 Independent Review 状态
-   - 遇到阻碍或需要授权时流转至 CHANGES_REQUESTED / BLOCKED / WAITING_PO_AUTH
-   - Merge 后回读 GitHub 确认已合并
-   - 最终完成时标记为 Done
+2. **生命周期与同步维护**：Builder 需在整个工作生命周期自行维护 Linear 状态。不仅要修改 Status，还需要**真正写入**以下数据作为证据记录：
+   - 当前最新 PR URL
+   - Exact HEAD SHA
+   - 最新 CI 状态 (Success/Failed)
+   - 最新 Review Outcome (如 PASS / CHANGES_REQUESTED)
+   - 当前 AgentOps Governance State
 3. **真相与修正冲突**：GitHub main 始终是 canonical repository truth。当 GitHub 与 Linear 不一致时，以 GitHub 为准；Builder 有责任修正 Linear 以反映 GitHub 的真实状态，**绝对不得反向修改 GitHub 来迁就 Linear**。
 4. **禁止自我授权**：Builder 不得通过修改 Linear 状态来给自己生成 Implementation / Ready / Merge / Deploy 等执行权限。
 
