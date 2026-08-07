@@ -501,7 +501,7 @@ Linear **不**：
 ### 15.1 AgentOps Governance State vs Linear Workflow Status
 
 必须严格区分底层的「Governance State (治理状态)」与面向协作的「Linear Workflow Status (Linear 工作流状态)」：
-- **Governance State**：由 GitHub 事实与 Neutral Relay 协议共同维护（如 `IMPLEMENTATION`, `REVIEW_REQUESTED`, `CHANGES_REQUESTED`, `WAITING_PO_AUTH`, `BLOCKED`, `NEEDS_OWNER_DECISION`, `DONE`）。决定能否执行机器授权操作。
+- **Governance State**：由 GitHub 事实与 Neutral Relay 协议共同维护（如 `IMPLEMENTATION`, `REVIEW_REQUESTED`, `CHANGES_REQUESTED`, `WAITING_PO_AUTH`, `BLOCKED`, `NEEDS_OWNER_DECISION`, `DONE`）。本身不产生授权，仅反映系统当前所处的审批与流转阶段，作为执行门禁的上下文。
 - **Linear Workflow Status**：纯粹用于人类协同与项目追踪的管理状态，不产生任何自动化授权。
 
 **实际状态映射规范（State Mapping）：**
