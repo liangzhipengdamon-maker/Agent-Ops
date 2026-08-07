@@ -266,5 +266,86 @@ class TestRelayAdapter(unittest.TestCase):
         # Output should be STOP_AND_WAIT
         relay_adapter.process_ack(self.mock_profile, current_head="abcdef123456")
 
+    def test_alternate_project_positive_path(self):
+        # Create an alternate profile
+        alt_profile = {
+            "github": {
+                "repository": "example-org/example-repo"
+            }
+        }
+        
+        # Set status.json to match alternate profile
+        status = {
+            "protocol_version": "1.0",
+            "state": "REVIEW_REQUESTED",
+            "repo": "example-org/example-repo",
+            "pr": 99,
+            "head": "alt123456",
+            "request": "review alternate"
+        }
+        with open(os.path.join(self.temp_dir.name, "status.json"), "w") as f:
+            json.dump(status, f)
+            
+        relay_adapter.handle_review_request(alt_profile)
+        
+        with open(os.path.join(self.temp_dir.name, "status.json"), "r") as f:
+            status = json.load(f)
+        self.assertEqual(status["state"], "WAITING_FOR_REVIEW")
+        
+        req_id = status["request_id"]
+        
+        # Write matching review
+        with open(self.review_file, "w") as f:
+            f.write(f"REVIEW_REQUEST_ID: {req_id}\nVERDICT: PASS\nREPO: example-org/example-repo\nPR: 99\nHEAD: alt123456\nSUMMARY:\nLooks good.\nACTIONS:\n")
+            
+        relay_adapter.handle_gpt_review_return(alt_profile, current_head="alt123456")
+        
+        with open(os.path.join(self.temp_dir.name, "status.json"), "r") as f:
+            final_status = json.load(f)
+        self.assertEqual(final_status["state"], "WAITING_PO_AUTH")
+
+    def test_repository_mismatch_fail_closed(self):
+        alt_profile = {
+            "github": {
+                "repository": "example-org/example-repo"
+            }
+        }
+        
+        # Status has wrong repo (not matching profile)
+        status = {
+            "protocol_version": "1.0",
+            "state": "REVIEW_REQUESTED",
+            "repo": "malicious-org/wrong-repo",
+            "pr": 99,
+            "head": "alt123456",
+            "request": "review alternate"
+        }
+        with open(os.path.join(self.temp_dir.name, "status.json"), "w") as f:
+            json.dump(status, f)
+            
+        relay_adapter.handle_review_request(alt_profile)
+        
+        with open(os.path.join(self.temp_dir.name, "status.json"), "r") as f:
+            status = json.load(f)
+        # Should be rejected, state should remain REVIEW_REQUESTED
+        self.assertEqual(status["state"], "REVIEW_REQUESTED")
+        
+        # Manually force into WAITING_FOR_REVIEW to test the return path
+        status["state"] = "WAITING_FOR_REVIEW"
+        status["request_id"] = "test-req-123"
+        with open(os.path.join(self.temp_dir.name, "status.json"), "w") as f:
+            json.dump(status, f)
+            
+        # Review has matching wrong repo, but profile is different
+        with open(self.review_file, "w") as f:
+            f.write(f"REVIEW_REQUEST_ID: test-req-123\nVERDICT: PASS\nREPO: malicious-org/wrong-repo\nPR: 99\nHEAD: alt123456\nSUMMARY:\nLooks good.\nACTIONS:\n")
+            
+        relay_adapter.handle_gpt_review_return(alt_profile, current_head="alt123456")
+        
+        with open(os.path.join(self.temp_dir.name, "status.json"), "r") as f:
+            final_status = json.load(f)
+        # Should fail closed and not transition to WAITING_PO_AUTH
+        self.assertEqual(final_status["state"], "WAITING_FOR_REVIEW")
+
 if __name__ == '__main__':
     unittest.main()
