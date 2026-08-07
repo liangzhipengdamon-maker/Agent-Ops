@@ -508,7 +508,7 @@ Linear **不**：
    - Draft PR 创建后更新 PR URL、exact HEAD 和 CI 状态
    - 更新 Independent Review 状态
    - 遇到阻碍或需要授权时流转至 CHANGES_REQUESTED / BLOCKED / WAITING_PO_AUTH
-   - Merge 后回读 GitHub
+   - Merge 后回读 GitHub 确认已合并
    - 最终完成时标记为 Done
 3. **真相与修正冲突**：GitHub main 始终是 canonical repository truth。当 GitHub 与 Linear 不一致时，以 GitHub 为准；Builder 有责任修正 Linear 以反映 GitHub 的真实状态，**绝对不得反向修改 GitHub 来迁就 Linear**。
 4. **禁止自我授权**：Builder 不得通过修改 Linear 状态来给自己生成 Implementation / Ready / Merge / Deploy 等执行权限。
