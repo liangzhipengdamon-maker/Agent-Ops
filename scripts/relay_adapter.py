@@ -18,12 +18,26 @@ def get_request_file():
 
 DEFAULT_PROFILE = "profiles/agentops.json"
 
+import jsonschema
+
 def load_profile(profile_path):
     if not os.path.exists(profile_path):
         print(f"STOP_AND_WAIT: Profile not found at {profile_path}")
         sys.exit(1)
     with open(profile_path, "r") as f:
-        return json.load(f)
+        profile_data = json.load(f)
+        
+    schema_path = os.path.join(os.path.dirname(__file__), "..", "docs", "schemas", "project_profile.schema.json")
+    if os.path.exists(schema_path):
+        with open(schema_path, "r") as sf:
+            schema = json.load(sf)
+        try:
+            jsonschema.validate(instance=profile_data, schema=schema)
+        except jsonschema.exceptions.ValidationError as e:
+            print(f"STOP_AND_WAIT: Profile validation failed: {e}")
+            sys.exit(1)
+            
+    return profile_data
 
 def get_canonical_repo(profile):
     return profile.get("github", {}).get("repository")

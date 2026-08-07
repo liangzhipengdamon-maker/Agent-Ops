@@ -18,8 +18,20 @@ class TestRelayAdapter(unittest.TestCase):
         self.review_file = relay_adapter.get_review_file()
         
         self.mock_profile = {
+            "project_identity": "test",
             "github": {
-                "repository": "liangzhipengdamon-maker/Agent-Ops"
+                "repository": "liangzhipengdamon-maker/Agent-Ops",
+                "canonical_branch": "main"
+            },
+            "linear": {"team_key": "TEST", "project_id": "test-id"},
+            "local_builder": {"relative_path": ".", "required_env_vars": []},
+            "validation": {"ci_command": "true"},
+            "reviewer_relay": {"binding_type": "test", "contact_uri": "test://uri"},
+            "governance": {
+                "capabilities": ["independent_review"],
+                "required_gates": ["WAITING_PO_AUTH"],
+                "protected_project": False,
+                "cross_project_allowed": False
             }
         }
         
@@ -269,8 +281,19 @@ class TestRelayAdapter(unittest.TestCase):
     def test_alternate_project_positive_path(self):
         # Create an alternate profile
         alt_profile = {
+            "project_identity": "test-alt",
             "github": {
-                "repository": "example-org/example-repo"
+                "repository": "example-org/example-repo",
+                "canonical_branch": "main"
+            },
+            "linear": {"team_key": "TEST", "project_id": "test-id"},
+            "validation": {"ci_command": "true"},
+            "reviewer_relay": {"binding_type": "test", "contact_uri": "test://uri"},
+            "governance": {
+                "capabilities": ["independent_review"],
+                "required_gates": ["WAITING_PO_AUTH"],
+                "protected_project": False,
+                "cross_project_allowed": False
             }
         }
         
@@ -306,8 +329,19 @@ class TestRelayAdapter(unittest.TestCase):
 
     def test_repository_mismatch_fail_closed(self):
         alt_profile = {
+            "project_identity": "test-alt",
             "github": {
-                "repository": "example-org/example-repo"
+                "repository": "example-org/example-repo",
+                "canonical_branch": "main"
+            },
+            "linear": {"team_key": "TEST", "project_id": "test-id"},
+            "validation": {"ci_command": "true"},
+            "reviewer_relay": {"binding_type": "test", "contact_uri": "test://uri"},
+            "governance": {
+                "capabilities": ["independent_review"],
+                "required_gates": ["WAITING_PO_AUTH"],
+                "protected_project": False,
+                "cross_project_allowed": False
             }
         }
         
