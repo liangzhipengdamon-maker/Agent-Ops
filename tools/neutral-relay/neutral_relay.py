@@ -335,10 +335,9 @@ class DomProbe:
         'form button[type="submit"]',
     )
 
-    PROBE_COMPOSER = """
-    (()=>{
+    PROBE_COMPOSER = """(sels)=>{
       const out=[];
-      for (const sel of arguments[0]) {
+      for (const sel of sels) {
         let el;
         try { el = document.querySelector(sel); } catch(e) { el = null; }
         if (!el) { out.push({sel, found:false}); continue; }
@@ -350,13 +349,11 @@ class DomProbe:
                   textLen: (txt||'').length});
       }
       return out;
-    })
-    """
+    }"""
 
-    PROBE_SEND = """
-    (()=>{
+    PROBE_SEND = """(sels)=>{
       const out=[];
-      for (const sel of arguments[0]) {
+      for (const sel of sels) {
         let el;
         try { el = document.querySelector(sel); } catch(e) { el = null; }
         if (!el) { out.push({sel, found:false}); continue; }
@@ -365,11 +362,9 @@ class DomProbe:
         out.push({sel, found:true, vis, disabled: !!el.disabled, w:Math.round(r.width)});
       }
       return out;
-    })
-    """
+    }"""
 
-    PROBE_CONVERSATION = """
-    (()=>{
+    PROBE_CONVERSATION = """()=>{
       const users = Array.from(document.querySelectorAll('[data-message-author-role="user"]'))
                          .map(m => m.innerText || '');
       const asst = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'))
@@ -377,28 +372,23 @@ class DomProbe:
       const stopBtn = !!Array.from(document.querySelectorAll('button'))
                               .find(b => /停止生成|Stop generating/.test(b.innerText || ''));
       return {users, asst, stopBtn};
-    })()
-    """
+    }"""
 
-    PROBE_FOCUS_COMPOSER = """
-    (()=>{
-      for (const sel of arguments[0]) {
+    PROBE_FOCUS_COMPOSER = """(sels)=>{
+      for (const sel of sels) {
         const el = document.querySelector(sel);
         if (el && el.offsetParent !== null) { el.focus(); return sel; }
       }
       return null;
-    })
-    """
+    }"""
 
-    PROBE_CLICK_SEND = """
-    (()=>{
-      for (const sel of arguments[0]) {
+    PROBE_CLICK_SEND = """(sels)=>{
+      for (const sel of sels) {
         const el = document.querySelector(sel);
         if (el && !el.disabled && el.offsetParent !== null) { el.click(); return sel; }
       }
       return null;
-    })
-    """
+    }"""
 
     PROBE_CURRENT_URL = "(()=>window.location.href)()"
 
