@@ -1,5 +1,6 @@
 import unittest
 import time
+import os
 from auth_verifier import AuthVerifier, AuthContext, ActionRequest
 
 class TestAuthVerifier(unittest.TestCase):
@@ -8,13 +9,15 @@ class TestAuthVerifier(unittest.TestCase):
         self.valid_expiry = time.time() + 3600
         
         self.base_auth = AuthContext(
-            provenance="PO",
+            trusted_signature="valid_po_sig_xyz123",
             request_id="req-123",
+            task_id="task-456",
             repository="owner/repo",
             branch="feature/AGE-5",
             base_sha="abcdef1",
             target_sha="abcdef2",
             allowed_paths=["docs/"],
+            allowed_operations=["write_file"],
             allowed_action_types=["commit", "push"],
             expiry=self.valid_expiry,
             revoked=False,
@@ -24,27 +27,63 @@ class TestAuthVerifier(unittest.TestCase):
 
         self.valid_action = ActionRequest(
             request_id="req-123",
+            task_id="task-456",
             repository="owner/repo",
             branch="feature/AGE-5",
             base_sha="abcdef1",
             target_sha="abcdef2",
             target_paths=["docs/governance.md"],
+            operation="write_file",
             action_type="commit"
         )
 
-    def test_valid_authorization(self):
+    def test_valid_authorization_and_consume(self):
         self.verifier.grant_authorization(self.base_auth)
         self.assertTrue(self.verifier.verify(self.valid_action))
         
-        # Test one-time consumption
+        # Test explicit one-time consumption
+        self.assertTrue(self.verifier.consume("req-123"))
         self.assertFalse(self.verifier.verify(self.valid_action), "Should fail if one-time auth is already consumed")
 
-    def test_fail_missing_auth(self):
-        self.assertFalse(self.verifier.verify(self.valid_action))
+    def test_fail_duplicate_grant(self):
+        self.verifier.grant_authorization(self.base_auth)
+        with self.assertRaises(ValueError):
+            self.verifier.grant_authorization(self.base_auth)
 
     def test_fail_invalid_provenance(self):
-        self.base_auth.provenance = "Agent"
+        self.base_auth.trusted_signature = "invalid_sig_agent"
         self.verifier.grant_authorization(self.base_auth)
+        self.assertFalse(self.verifier.verify(self.valid_action))
+
+    def test_fail_task_id_mismatch(self):
+        self.verifier.grant_authorization(self.base_auth)
+        action = self.valid_action
+        action.task_id = "task-789"
+        self.assertFalse(self.verifier.verify(action))
+
+    def test_fail_path_traversal(self):
+        self.verifier.grant_authorization(self.base_auth)
+        action = self.valid_action
+        # Attempt to bypass via ../
+        action.target_paths = ["docs/../src/secret.py"]
+        self.assertFalse(self.verifier.verify(action))
+
+        action.target_paths = ["/etc/passwd"]
+        self.assertFalse(self.verifier.verify(action))
+
+    def test_fail_operation_mismatch(self):
+        self.verifier.grant_authorization(self.base_auth)
+        action = self.valid_action
+        action.operation = "delete_file"
+        self.assertFalse(self.verifier.verify(action))
+
+    def test_fail_action_type_mismatch(self):
+        self.verifier.grant_authorization(self.base_auth)
+        action = self.valid_action
+        action.action_type = "merge"
+        self.assertFalse(self.verifier.verify(action))
+
+    def test_fail_missing_auth(self):
         self.assertFalse(self.verifier.verify(self.valid_action))
 
     def test_fail_revoked(self):
@@ -57,40 +96,20 @@ class TestAuthVerifier(unittest.TestCase):
         self.verifier.grant_authorization(self.base_auth)
         self.assertFalse(self.verifier.verify(self.valid_action))
 
-    def test_fail_repo_mismatch(self):
+    def test_fail_repo_branch_sha_mismatch(self):
         self.verifier.grant_authorization(self.base_auth)
-        action = self.valid_action
-        action.repository = "owner/other-repo"
-        self.assertFalse(self.verifier.verify(action))
+        action1 = ActionRequest(**{**self.valid_action.__dict__, "repository": "owner/other-repo"})
+        self.assertFalse(self.verifier.verify(action1))
 
-    def test_fail_branch_mismatch(self):
-        self.verifier.grant_authorization(self.base_auth)
-        action = self.valid_action
-        action.branch = "main"
-        self.assertFalse(self.verifier.verify(action))
+        action2 = ActionRequest(**{**self.valid_action.__dict__, "branch": "main"})
+        self.assertFalse(self.verifier.verify(action2))
 
-    def test_fail_sha_mismatch(self):
-        self.verifier.grant_authorization(self.base_auth)
-        action = self.valid_action
-        action.base_sha = "wrong"
-        self.assertFalse(self.verifier.verify(action))
+        action3 = ActionRequest(**{**self.valid_action.__dict__, "base_sha": "wrong"})
+        self.assertFalse(self.verifier.verify(action3))
         
-        action.base_sha = "abcdef1"
-        action.target_sha = "wrong"
-        self.assertFalse(self.verifier.verify(action))
+        action4 = ActionRequest(**{**self.valid_action.__dict__, "target_sha": "wrong"})
+        self.assertFalse(self.verifier.verify(action4))
 
-    def test_fail_action_type_mismatch(self):
-        # Inferring Ready/Merge from commit is invalid
-        self.verifier.grant_authorization(self.base_auth)
-        action = self.valid_action
-        action.action_type = "merge"
-        self.assertFalse(self.verifier.verify(action))
-
-    def test_fail_scope_mismatch(self):
-        self.verifier.grant_authorization(self.base_auth)
-        action = self.valid_action
-        action.target_paths = ["src/main.py"]
-        self.assertFalse(self.verifier.verify(action))
 
 if __name__ == '__main__':
     unittest.main()
