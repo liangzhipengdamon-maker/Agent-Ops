@@ -87,3 +87,118 @@ class TestExecuteStopProtocol(unittest.TestCase):
         with open(self.status_file, "r") as f: updated = json.load(f)
         self.assertTrue(updated["stop_episode"]["acked"])
         self.assertEqual(updated["stop_episode"]["request_id"], "test-req-123")
+
+    @unittest.mock.patch('time.sleep')
+    @unittest.mock.patch('subprocess.run')
+    def test_stop_protocol_mismatched_ack_does_not_exit(self, mock_run, mock_sleep):
+        status = {
+            "protocol_version": "1.0", "state": "WAITING_PO_AUTH", "repo": "liangzhipengdamon-maker/Agent-Ops", "pr": 42, "head": "abcdef123456",
+            "stop_episode": {"request_id": "test-req-123", "state": "WAITING_PO_AUTH", "head": "abcdef123456", "pr": 42, "acked": False}
+        }
+        with open(self.status_file, "w") as f: json.dump(status, f)
+
+        calls = {"relay": 0}
+        def side_effect(*args, **kwargs):
+            if args[0][0] == "gh":
+                return unittest.mock.Mock(stdout='{"headRefOid": "abcdef123456", "merged": false}', returncode=0)
+            elif any("neutral_relay.py" in arg for arg in args[0]):
+                calls["relay"] += 1
+                if calls["relay"] == 1:
+                    # First: WRONG request_id ACK, must NOT exit
+                    with open(self.review_file, "w") as f:
+                        f.write("REVIEW_REQUEST_ID: wrong-id\nREPO: liangzhipengdamon-maker/Agent-Ops\nPR: 42\nHEAD: abcdef123456\nACK: status_report_received\n")
+                else:
+                    # Second: correct ACK, protocol should finish
+                    with open(self.review_file, "w") as f:
+                        f.write("REVIEW_REQUEST_ID: test-req-123\nREPO: liangzhipengdamon-maker/Agent-Ops\nPR: 42\nHEAD: abcdef123456\nACK: status_report_received\n")
+                return unittest.mock.Mock(returncode=0)
+
+        mock_run.side_effect = side_effect
+        relay_adapter.execute_stop_protocol(self.mock_profile, "Test summary", "NONE")
+        with open(self.status_file, "r") as f: updated = json.load(f)
+        self.assertTrue(updated["stop_episode"]["acked"])
+        self.assertGreaterEqual(calls["relay"], 2)
+
+    @unittest.mock.patch('time.sleep')
+    @unittest.mock.patch('subprocess.run')
+    def test_stop_protocol_wrong_binding_ack_does_not_exit(self, mock_run, mock_sleep):
+        status = {
+            "protocol_version": "1.0", "state": "WAITING_PO_AUTH", "repo": "liangzhipengdamon-maker/Agent-Ops", "pr": 42, "head": "abcdef123456",
+            "stop_episode": {"request_id": "test-req-123", "state": "WAITING_PO_AUTH", "head": "abcdef123456", "pr": 42, "acked": False}
+        }
+        with open(self.status_file, "w") as f: json.dump(status, f)
+
+        calls = {"relay": 0}
+        def side_effect(*args, **kwargs):
+            if args[0][0] == "gh":
+                return unittest.mock.Mock(stdout='{"headRefOid": "abcdef123456", "merged": false}', returncode=0)
+            elif any("neutral_relay.py" in arg for arg in args[0]):
+                calls["relay"] += 1
+                if calls["relay"] == 1:
+                    # First: WRONG PR binding ACK, must NOT exit
+                    with open(self.review_file, "w") as f:
+                        f.write("REVIEW_REQUEST_ID: test-req-123\nREPO: liangzhipengdamon-maker/Agent-Ops\nPR: 99\nHEAD: abcdef123456\nACK: status_report_received\n")
+                else:
+                    with open(self.review_file, "w") as f:
+                        f.write("REVIEW_REQUEST_ID: test-req-123\nREPO: liangzhipengdamon-maker/Agent-Ops\nPR: 42\nHEAD: abcdef123456\nACK: status_report_received\n")
+                return unittest.mock.Mock(returncode=0)
+
+        mock_run.side_effect = side_effect
+        relay_adapter.execute_stop_protocol(self.mock_profile, "Test summary", "NONE")
+        with open(self.status_file, "r") as f: updated = json.load(f)
+        self.assertTrue(updated["stop_episode"]["acked"])
+        self.assertGreaterEqual(calls["relay"], 2)
+
+    @unittest.mock.patch('time.sleep')
+    @unittest.mock.patch('subprocess.run')
+    def test_remote_readback_binds_canonical_repo(self, mock_run, mock_sleep):
+        status = {
+            "protocol_version": "1.0", "state": "WAITING_PO_AUTH", "repo": "liangzhipengdamon-maker/Agent-Ops", "pr": 42, "head": "abcdef123456",
+            "stop_episode": {"request_id": "test-req-123", "state": "WAITING_PO_AUTH", "head": "abcdef123456", "pr": 42, "acked": False}
+        }
+        with open(self.status_file, "w") as f: json.dump(status, f)
+
+        gh_calls = []
+        def side_effect(*args, **kwargs):
+            cmd = args[0]
+            if cmd[0] == "gh":
+                gh_calls.append(cmd)
+                return unittest.mock.Mock(stdout='{"headRefOid": "abcdef123456", "merged": false}', returncode=0)
+            elif any("neutral_relay.py" in arg for arg in cmd):
+                with open(self.review_file, "w") as f:
+                    f.write("REVIEW_REQUEST_ID: test-req-123\nREPO: liangzhipengdamon-maker/Agent-Ops\nPR: 42\nHEAD: abcdef123456\nACK: status_report_received\n")
+                return unittest.mock.Mock(returncode=0)
+
+        mock_run.side_effect = side_effect
+        relay_adapter.execute_stop_protocol(self.mock_profile, "Test summary", "NONE")
+
+        self.assertEqual(len(gh_calls), 1)
+        gh_cmd = gh_calls[0]
+        self.assertIn("--repo", gh_cmd)
+        self.assertIn("liangzhipengdamon-maker/Agent-Ops", gh_cmd)
+
+    @unittest.mock.patch('time.sleep')
+    @unittest.mock.patch('subprocess.run')
+    def test_execute_stop_protocol_non_stop_state_rejected(self, mock_run, mock_sleep):
+        status = {
+            "protocol_version": "1.0", "state": "REVIEW_REQUESTED", "repo": "liangzhipengdamon-maker/Agent-Ops", "pr": 42, "head": "abcdef123456"
+        }
+        with open(self.status_file, "w") as f: json.dump(status, f)
+
+        with self.assertRaises(SystemExit) as cm:
+            relay_adapter.execute_stop_protocol(self.mock_profile, "Test summary", "NONE")
+        self.assertEqual(cm.exception.code, 1)
+        mock_run.assert_not_called()
+
+    @unittest.mock.patch('time.sleep')
+    @unittest.mock.patch('subprocess.run')
+    def test_execute_stop_protocol_missing_envelope_rejected(self, mock_run, mock_sleep):
+        status = {
+            "protocol_version": "1.0", "state": "WAITING_PO_AUTH", "repo": "liangzhipengdamon-maker/Agent-Ops", "head": "abcdef123456"
+        }
+        with open(self.status_file, "w") as f: json.dump(status, f)
+
+        with self.assertRaises(SystemExit) as cm:
+            relay_adapter.execute_stop_protocol(self.mock_profile, "Test summary", "NONE")
+        self.assertEqual(cm.exception.code, 1)
+        mock_run.assert_not_called()

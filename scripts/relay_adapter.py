@@ -139,9 +139,10 @@ def execute_stop_protocol(profile, summary, unauthorized_actions):
         sys.exit(1)
 
     # 1. Authoritative remote read-back
+    canonical_repo = get_canonical_repo(profile)
     try:
         result = subprocess.run(
-            ["gh", "pr", "view", str(pr), "--json", "headRefOid,state,merged"],
+            ["gh", "pr", "view", str(pr), "--repo", canonical_repo, "--json", "headRefOid,state,merged"],
             capture_output=True, text=True, check=True
         )
         remote_pr_data = json.loads(result.stdout)
@@ -174,7 +175,6 @@ def execute_stop_protocol(profile, summary, unauthorized_actions):
             episode = None
 
     # 3. Create Status Report
-    canonical_repo = get_canonical_repo(profile)
     repo = status.get('repo')
     
     if not repo or repo != canonical_repo:
@@ -229,8 +229,8 @@ def execute_stop_protocol(profile, summary, unauthorized_actions):
                 content = f.read()
                 if "ACK: status_report_received" in content:
                     print("Received ACK.")
-                    process_ack(profile, current_head=remote_head)
-                    return
+                    if process_ack(profile, current_head=remote_head):
+                        return
         print("No valid ACK received. Retrying in 5 seconds...")
         time.sleep(5)
     
@@ -322,17 +322,17 @@ def handle_gpt_review_return(profile, current_head=None):
 def process_ack(profile, current_head=None):
     if not current_head:
         print("STOP_AND_WAIT: Missing --current-head argument.")
-        return
+        return False
 
     status = load_status()
     if not status:
         print("No status.json found.")
-        return
+        return False
 
     rf = get_review_file()
     if not os.path.exists(rf):
         print("No gpt-review.md found.")
-        return
+        return False
 
     with open(rf, "r") as f:
         content = f.read()
@@ -359,34 +359,35 @@ def process_ack(profile, current_head=None):
     episode = status.get("stop_episode")
     if not episode:
         print("STOP_AND_WAIT: No active stop episode found.")
-        return
+        return False
 
     if not req_id or req_id != episode.get("request_id"):
         print(f"STOP_AND_WAIT: Mismatched ACK ID. Expected {episode.get('request_id')} got {req_id}")
-        return
+        return False
 
     canonical_repo = get_canonical_repo(profile)
 
     if review_repo != status.get("repo") or review_repo != canonical_repo:
         print("STOP_AND_WAIT: REPO mismatch in ACK.")
-        return
+        return False
 
     if head != status.get("head") or head != current_head:
         print("STOP_AND_WAIT: HEAD mismatch in ACK.")
-        return
+        return False
 
     if str(pr) != str(status.get("pr")):
         print("STOP_AND_WAIT: PR mismatch in ACK.")
-        return
+        return False
 
     if ack != "status_report_received":
         print(f"STOP_AND_WAIT: Invalid ACK received: {ack}")
-        return
+        return False
 
     # Success, record ACK in episode
     episode["acked"] = True
     save_status(status)
     print(f"ACK verified successfully. State remains: {status['state']}")
+    return True
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
