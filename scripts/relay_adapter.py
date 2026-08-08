@@ -141,11 +141,12 @@ def execute_stop_protocol(profile, summary, unauthorized_actions):
     # 1. Authoritative remote read-back
     try:
         result = subprocess.run(
-            ["gh", "pr", "view", str(pr), "--json", "headRefOid"],
+            ["gh", "pr", "view", str(pr), "--json", "headRefOid,state,merged"],
             capture_output=True, text=True, check=True
         )
         remote_pr_data = json.loads(result.stdout)
         remote_head = remote_pr_data.get("headRefOid")
+        remote_merged = remote_pr_data.get("merged")
     except Exception as e:
         # In test environments or on failure, fail closed
         print(f"STOP_AND_WAIT: Failed to read remote PR via gh cli: {e}")
@@ -153,6 +154,10 @@ def execute_stop_protocol(profile, summary, unauthorized_actions):
 
     if remote_head != status.get('head'):
         print(f"STOP_AND_WAIT: Remote HEAD mismatch. Local: {status.get('head')}, Remote: {remote_head}")
+        sys.exit(1)
+        
+    if status.get("state") == "DONE" and not remote_merged:
+        print("STOP_AND_WAIT: Cannot transition to DONE unless PR is authoritatively merged on GitHub.")
         sys.exit(1)
 
     # 2. Check idempotency
