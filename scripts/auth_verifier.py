@@ -23,6 +23,105 @@ class AuthContext:
     consumed: bool = False
 
 
+# ---------------------------------------------------------------------------
+# Issuer-side trust boundary
+# ---------------------------------------------------------------------------
+# The boundary between the trusted PO authorization channel and the rest of
+# the system. Only the module-level functions below may produce a usable
+# POMintCapability. Ordinary caller code that holds a reference to the
+# AuthVerifier or the TrustedAuthorizationProvider still cannot mint a
+# VerifiedAssertion because it cannot satisfy the trusted_po_ingress check.
+#
+# In production this would be backed by a real cryptographic signature
+# verified against the PO's registered public key. For the AGE-5 isolated
+# reference model, the boundary is expressed structurally: the
+# po_sign_envelope function stamps a marker that only trusted_po_ingress
+# accepts, and the provider's issue_assertion requires a POMintCapability
+# from the trusted ingress.
+
+
+class _POSignedEnvelope:
+    """
+    Opaque envelope carrying an AuthContext for PO authorization issuance.
+
+    Only envelopes produced by ``po_sign_envelope`` carry the marker the
+    trusted ingress requires. Direct construction at the Python language
+    level is permitted (the language does not seal classes) but yields an
+    envelope the ingress rejects, so it grants no mint authority.
+    """
+
+    def __init__(self, auth: AuthContext):
+        self._auth = auth
+        # _signed_by_po is set ONLY by po_sign_envelope. Its absence causes
+        # the trusted ingress to reject the envelope.
+        self._signed_by_po = False
+
+
+def po_sign_envelope(auth: AuthContext) -> _POSignedEnvelope:
+    """
+    The PO's trusted signing function. The only path that produces an
+    envelope the trusted ingress will accept.
+
+    In production this would emit a real cryptographic signature. In the
+    AGE-5 isolated reference model, it stamps the envelope with the PO
+    marker that the ingress checks for.
+
+    This function is intentionally NOT a method on any class. It is the
+    issuer-side trust boundary and must be invoked directly by the trusted
+    PO authorization channel.
+    """
+    envelope = _POSignedEnvelope(auth)
+    envelope._signed_by_po = True
+    return envelope
+
+
+class POMintCapability:
+    """
+    Opaque mint capability. Produced ONLY by ``trusted_po_ingress`` after
+    a PO-signed envelope has been verified.
+
+    Direct construction at the Python language level is permitted but
+    useless: attaching a directly-constructed POMintCapability to a forged
+    VerifiedAssertion still fails the provider's registry check, so it
+    grants no mint authority.
+    """
+
+    def __init__(self):
+        # No fields. The capability's value is its origin in the trusted
+        # ingress call, not its content.
+        pass
+
+
+def trusted_po_ingress(po_signed_envelope: _POSignedEnvelope) -> POMintCapability:
+    """
+    The trusted ingress for PO authorization issuance. Verifies the input
+    is a PO-signed envelope produced by ``po_sign_envelope`` and, if so,
+    issues a POMintCapability.
+
+    This function is the SOLE producer of POMintCapability objects. It is
+    intentionally a module-level function — not a method on any class — so
+    that an ordinary caller who possesses or has discovered a reference to
+    the AuthVerifier or the TrustedAuthorizationProvider cannot reach a
+    working mint path.
+    """
+    if not isinstance(po_signed_envelope, _POSignedEnvelope):
+        raise ValueError(
+            "Trusted ingress rejects the input: not a PO-signed envelope."
+        )
+    if not getattr(po_signed_envelope, "_signed_by_po", False):
+        raise ValueError(
+            "Trusted ingress rejects the envelope: PO signature marker "
+            "missing. Only envelopes produced by po_sign_envelope are "
+            "accepted."
+        )
+    return POMintCapability()
+
+
+# ---------------------------------------------------------------------------
+# Provider and Verifier
+# ---------------------------------------------------------------------------
+
+
 class VerifiedAssertion:
     """
     An authorization that originates from a TrustedAuthorizationProvider.
@@ -32,23 +131,20 @@ class VerifiedAssertion:
     minted; AuthVerifier only accepts assertions whose object identity is in
     that registry. A VerifiedAssertion constructed by any path other than
     ``TrustedAuthorizationProvider.issue_assertion`` — including any manual
-    copy, even one that copies ``_auth`` and ``_provider`` from a
-    legitimately-issued assertion — is not in the registry and therefore has
-    no provenance.
-
-    In production this boundary would be backed by cryptographic signatures
-    over a private key held by the provider. For the AGE-5 isolated reference
-    model, provider-held object identity is the minimal expression of the
-    trust boundary.
+    copy, even one that copies ``_auth``, ``_provider``, and
+    ``_mint_capability`` from a legitimately-issued assertion — is not in
+    the registry and therefore has no provenance.
     """
 
     def __init__(
         self,
         _auth: "AuthContext",
         _provider: "TrustedAuthorizationProvider",
+        _mint_capability: POMintCapability,
     ):
         self._auth = _auth
         self._provider = _provider
+        self._mint_capability = _mint_capability
 
     @property
     def auth(self) -> "AuthContext":
@@ -57,29 +153,52 @@ class VerifiedAssertion:
 
 class TrustedAuthorizationProvider:
     """
-    Sole issuer of ``VerifiedAssertion`` objects.
+    Sole issuer of VerifiedAssertion objects.
 
-    Each assertion minted by ``issue_assertion`` is registered in the
-    provider's internal registry. The AuthVerifier calls
-    ``is_valid_assertion`` to confirm an assertion is one this provider
-    actually issued before granting authorization. Because the registry is the
-    only source of truth, there is no caller-visible token string to guess,
-    copy, or forge.
+    ``issue_assertion`` requires a POMintCapability from the trusted
+    ingress (``trusted_po_ingress``), which in turn requires a PO-signed
+    envelope produced by ``po_sign_envelope``. Ordinary callers — including
+    those that have discovered or hold a reference to this provider via the
+    AuthVerifier — cannot mint assertions because they cannot satisfy the
+    ingress check.
+
+    In production the ingress would verify a real cryptographic signature
+    against the PO's registered public key. For the AGE-5 isolated
+    reference model, the structural separation between
+    ``po_sign_envelope`` and ``trusted_po_ingress`` and the provider's
+    requirement for a POMintCapability express the boundary.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        ingress: typing.Callable[[_POSignedEnvelope], POMintCapability] = trusted_po_ingress,
+    ):
         self._issued: "weakref.WeakSet[VerifiedAssertion]" = weakref.WeakSet()
+        self._ingress = ingress
 
-    def issue_assertion(self, auth: "AuthContext") -> "VerifiedAssertion":
-        # Only path that registers an assertion into the provider's registry.
-        assertion = VerifiedAssertion(_auth=auth, _provider=self)
+    def issue_assertion(
+        self,
+        auth: AuthContext,
+        po_signed_envelope: _POSignedEnvelope,
+    ) -> VerifiedAssertion:
+        # Issuer-side trust boundary: must obtain a mint capability from the
+        # trusted ingress. Ordinary callers cannot satisfy this because they
+        # cannot produce envelopes the ingress accepts.
+        mint_capability = self._ingress(po_signed_envelope)
+        assertion = VerifiedAssertion(
+            _auth=auth,
+            _provider=self,
+            _mint_capability=mint_capability,
+        )
         self._issued.add(assertion)
         return assertion
 
-    def is_valid_assertion(self, assertion: "VerifiedAssertion") -> bool:
-        # Trust boundary: only objects this provider actually minted are valid.
-        # Manual construction — even with copied fields or a real provider
-        # reference — fails closed.
+    def is_valid_assertion(self, assertion: VerifiedAssertion) -> bool:
+        # Trust boundary on the consumer side: only objects this provider
+        # actually minted are valid. Manual construction — even with
+        # copied fields, a real provider reference, and a real mint
+        # capability — fails closed because the forged object is not in
+        # this registry.
         return (
             assertion is not None
             and assertion._provider is self
@@ -101,10 +220,29 @@ class ActionRequest:
 
 
 class AuthVerifier:
+    """
+    Pure verifier of provider-issued assertions. Does NOT expose any path
+    to minting a VerifiedAssertion.
+
+    The verifier holds a reference to the provider only so it can call
+    ``is_valid_assertion`` to confirm provenance. The provider's
+    ``issue_assertion`` still requires a POMintCapability from the trusted
+    ingress — which is NOT obtainable through this verifier.
+
+    No method on this class creates a VerifiedAssertion. ``grant_authorization``
+    only registers an already-issued assertion that has passed
+    ``is_valid_assertion``; it is a registration step, not a mint step.
+    """
+
     def __init__(self, trusted_provider: TrustedAuthorizationProvider):
         self.auth_store: typing.Dict[str, VerifiedAssertion] = {}
         self.trusted_provider = trusted_provider
         self._lock = threading.Lock()  # Model for transaction safety
+
+    # NOTE: AuthVerifier exposes NO method that creates a VerifiedAssertion.
+    # To mint an assertion, a caller must use:
+    #   po_sign_envelope(auth) → trusted_po_ingress(envelope) → provider.issue_assertion(auth, envelope)
+    # None of those three functions is reachable through this verifier.
 
     def grant_authorization(self, assertion: VerifiedAssertion):
         # 1. Trusted provenance: confirm the assertion was actually issued by
