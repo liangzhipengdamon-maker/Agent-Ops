@@ -1,8 +1,10 @@
-import time
-import typing
 import os
 import threading
-from dataclasses import dataclass, field
+import time
+import typing
+import weakref
+from dataclasses import dataclass
+
 
 @dataclass
 class AuthContext:
@@ -20,38 +22,69 @@ class AuthContext:
     is_one_time: bool = False
     consumed: bool = False
 
-@dataclass
+
 class VerifiedAssertion:
     """
-    Represents an authorization that has been cryptographically or systemically 
-    verified as originating from the PO. This cannot be instantiated by regular 
-    untrusted caller code (in a real system, the constructor would be private/sealed).
+    An authorization that originates from a TrustedAuthorizationProvider.
+
+    Provenance is NOT determined by inspectable string fields. The issuing
+    provider maintains a private registry of the assertion objects it has
+    minted; AuthVerifier only accepts assertions whose object identity is in
+    that registry. A VerifiedAssertion constructed by any path other than
+    ``TrustedAuthorizationProvider.issue_assertion`` — including any manual
+    copy, even one that copies ``_auth`` and ``_provider`` from a
+    legitimately-issued assertion — is not in the registry and therefore has
+    no provenance.
+
+    In production this boundary would be backed by cryptographic signatures
+    over a private key held by the provider. For the AGE-5 isolated reference
+    model, provider-held object identity is the minimal expression of the
+    trust boundary.
     """
-    _auth: AuthContext
-    _issuer_token: str
+
+    def __init__(
+        self,
+        _auth: "AuthContext",
+        _provider: "TrustedAuthorizationProvider",
+    ):
+        self._auth = _auth
+        self._provider = _provider
 
     @property
-    def auth(self) -> AuthContext:
+    def auth(self) -> "AuthContext":
         return self._auth
 
 
 class TrustedAuthorizationProvider:
     """
-    The strict boundary that verifies PO signatures and issues VerifiedAssertions.
-    In the reference model, it acts as the sole issuer of valid assertions.
+    Sole issuer of ``VerifiedAssertion`` objects.
+
+    Each assertion minted by ``issue_assertion`` is registered in the
+    provider's internal registry. The AuthVerifier calls
+    ``is_valid_assertion`` to confirm an assertion is one this provider
+    actually issued before granting authorization. Because the registry is the
+    only source of truth, there is no caller-visible token string to guess,
+    copy, or forge.
     """
-    def __init__(self, expected_system_token: str = "sys_internal_secret"):
-        self._system_token = expected_system_token
 
-    def issue_assertion(self, auth: AuthContext, po_cryptographic_signature: str) -> VerifiedAssertion:
-        # In a real implementation, this verifies the cryptographic signature against the PO's public key.
-        # Here we mock the boundary: only valid signatures produce an assertion.
-        if not po_cryptographic_signature.startswith("VALID_PO_SIG_"):
-            raise ValueError("Invalid cryptographic signature. Cannot issue trusted assertion.")
-        return VerifiedAssertion(_auth=auth, _issuer_token=self._system_token)
+    def __init__(self):
+        self._issued: "weakref.WeakSet[VerifiedAssertion]" = weakref.WeakSet()
 
-    def is_valid_assertion(self, assertion: VerifiedAssertion) -> bool:
-        return assertion._issuer_token == self._system_token
+    def issue_assertion(self, auth: "AuthContext") -> "VerifiedAssertion":
+        # Only path that registers an assertion into the provider's registry.
+        assertion = VerifiedAssertion(_auth=auth, _provider=self)
+        self._issued.add(assertion)
+        return assertion
+
+    def is_valid_assertion(self, assertion: "VerifiedAssertion") -> bool:
+        # Trust boundary: only objects this provider actually minted are valid.
+        # Manual construction — even with copied fields or a real provider
+        # reference — fails closed.
+        return (
+            assertion is not None
+            and assertion._provider is self
+            and assertion in self._issued
+        )
 
 
 @dataclass
@@ -74,7 +107,9 @@ class AuthVerifier:
         self._lock = threading.Lock()  # Model for transaction safety
 
     def grant_authorization(self, assertion: VerifiedAssertion):
-        # 1. Trusted provenance: verify the assertion itself was issued by our trusted provider
+        # 1. Trusted provenance: confirm the assertion was actually issued by
+        #    the configured provider via its private registry. There is no
+        #    caller-visible token to forge.
         if not self.trusted_provider.is_valid_assertion(assertion):
             raise ValueError("Untrusted assertion provenance. Cannot grant authorization.")
 
@@ -82,7 +117,10 @@ class AuthVerifier:
         # Fail closed on duplicate/conflict instead of overwrite
         with self._lock:
             if auth.request_id in self.auth_store:
-                raise ValueError(f"Authorization for request {auth.request_id} already exists. Conflicts fail closed.")
+                raise ValueError(
+                    f"Authorization for request {auth.request_id} already exists. "
+                    "Conflicts fail closed."
+                )
             self.auth_store[auth.request_id] = assertion
 
     def verify(self, action: ActionRequest) -> bool:
@@ -94,7 +132,12 @@ class AuthVerifier:
             assertion = self.auth_store.get(action.request_id)
             if not assertion:
                 return False
-                
+
+            # Re-check provenance on every verify: enforce the trust boundary
+            # uniformly and defend against store tampering.
+            if not self.trusted_provider.is_valid_assertion(assertion):
+                return False
+
             auth = assertion.auth
 
             # 2. Revocation & Expiry
@@ -124,10 +167,10 @@ class AuthVerifier:
                 return False
             if action.action_type not in auth.allowed_action_types:
                 return False
-                
+
             # 6. Path validation (strict exact or prefix match, no wildcards, no path traversal)
             if not action.target_paths:
-                return False # Fails closed if empty
+                return False  # Fails closed if empty
             for path in action.target_paths:
                 if not self._is_path_allowed(path, auth.allowed_paths):
                     return False
@@ -143,6 +186,11 @@ class AuthVerifier:
             assertion = self.auth_store.get(request_id)
             if not assertion:
                 return False
+
+            # Re-check provenance on every consume: defend against store tampering.
+            if not self.trusted_provider.is_valid_assertion(assertion):
+                return False
+
             auth = assertion.auth
             if auth.is_one_time:
                 if auth.consumed:
@@ -158,7 +206,10 @@ class AuthVerifier:
 
         for a in allowed:
             norm_a = os.path.normpath(a)
-            # No wildcard `*` support: strict exact/prefix bounding required
+            # No wildcard `*` support: strict exact/prefix bounding required.
+            # Wildcard entries in the allow-list are treated literally as
+            # exact directory/file names and therefore cannot authorize any
+            # other path.
             if normalized_path == norm_a:
                 return True
             prefix = norm_a if norm_a.endswith(os.sep) else norm_a + os.sep

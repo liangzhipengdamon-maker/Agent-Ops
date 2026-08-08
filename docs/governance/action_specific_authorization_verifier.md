@@ -5,7 +5,7 @@ Define a strict authorization verifier that ensures any bounded workflow step or
 
 ## Verification Dimensions
 The following dimensions MUST be precisely validated:
-1. **Trusted Authorization Provenance**: Authorization must originate exclusively from the PO. To model the trust boundary, authorizations are accepted only from a `TrustedAuthorizationProvider` / verified assertion type that ordinary action input cannot fabricate (actual production cryptography remains explicitly out of scope for the AGE-5 isolated model).
+1. **Trusted Authorization Provenance**: Authorization must originate exclusively from the PO. The trust boundary is enforced by `TrustedAuthorizationProvider`, which is the sole issuer of `VerifiedAssertion` objects. Each issued assertion is registered with the provider; the AuthVerifier only accepts assertions whose object identity is in that registry. Manually constructed `VerifiedAssertion` objects — even with copied fields or a real provider reference — are not in the registry and therefore fail the provenance check. There is no caller-visible token string the verifier compares against: provenance is determined entirely by provider-held object identity. (Actual production cryptography remains explicitly out of scope for the AGE-5 isolated model.)
 2. **Request and Task Binding**: The exact request ID and an independent mission/task ID must match.
 3. **Repository and Branch Binding**: Exact repository name and branch name must match.
 4. **Commit SHA Binding**: Exact base or target commit SHA must match.
