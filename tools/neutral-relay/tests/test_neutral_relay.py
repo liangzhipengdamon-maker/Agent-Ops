@@ -186,6 +186,67 @@ class TestCorrelateResponse(unittest.TestCase):
         self.assertIn("v2", result)
         self.assertNotIn("v1", result)
 
+    def test_request_id_only_rejected(self):
+        # Only REQUEST_ID present, no REPO/PR/HEAD -> reject.
+        msgs = ["REVIEW_REQUEST_ID: req-123\nVERDICT: PASS"]
+        self.assertIsNone(correlate_response(msgs, self.env))
+
+    def test_missing_repo_rejected(self):
+        msgs = ["REVIEW_REQUEST_ID: req-123\nPR: 5\nHEAD: abc123\nVERDICT: PASS"]
+        self.assertIsNone(correlate_response(msgs, self.env))
+
+    def test_missing_pr_rejected(self):
+        msgs = ["REVIEW_REQUEST_ID: req-123\nREPO: test/repo\nHEAD: abc123\nVERDICT: PASS"]
+        self.assertIsNone(correlate_response(msgs, self.env))
+
+    def test_missing_head_rejected(self):
+        msgs = ["REVIEW_REQUEST_ID: req-123\nREPO: test/repo\nPR: 5\nVERDICT: PASS"]
+        self.assertIsNone(correlate_response(msgs, self.env))
+
+    def test_empty_repo_rejected(self):
+        msgs = ["REVIEW_REQUEST_ID: req-123\nREPO:\nPR: 5\nHEAD: abc123\nVERDICT: PASS"]
+        self.assertIsNone(correlate_response(msgs, self.env))
+
+    def test_empty_pr_rejected(self):
+        msgs = ["REVIEW_REQUEST_ID: req-123\nREPO: test/repo\nPR:\nHEAD: abc123\nVERDICT: PASS"]
+        self.assertIsNone(correlate_response(msgs, self.env))
+
+    def test_empty_head_rejected(self):
+        msgs = ["REVIEW_REQUEST_ID: req-123\nREPO: test/repo\nPR: 5\nHEAD:\nVERDICT: PASS"]
+        self.assertIsNone(correlate_response(msgs, self.env))
+
+    def test_empty_request_id_rejected(self):
+        msgs = ["REVIEW_REQUEST_ID:\nREPO: test/repo\nPR: 5\nHEAD: abc123\nVERDICT: PASS"]
+        self.assertIsNone(correlate_response(msgs, self.env))
+
+    def test_wrong_repo_rejected_strict(self):
+        msgs = ["REVIEW_REQUEST_ID: req-123\nREPO: some/other\nPR: 5\nHEAD: abc123\nVERDICT: PASS"]
+        self.assertIsNone(correlate_response(msgs, self.env))
+
+    def test_wrong_pr_rejected_strict(self):
+        msgs = ["REVIEW_REQUEST_ID: req-123\nREPO: test/repo\nPR: 99\nHEAD: abc123\nVERDICT: PASS"]
+        self.assertIsNone(correlate_response(msgs, self.env))
+
+    def test_wrong_head_rejected_strict(self):
+        msgs = ["REVIEW_REQUEST_ID: req-123\nREPO: test/repo\nPR: 5\nHEAD: deadbeef\nVERDICT: PASS"]
+        self.assertIsNone(correlate_response(msgs, self.env))
+
+    def test_wrong_request_id_rejected_strict(self):
+        msgs = ["REVIEW_REQUEST_ID: other-req\nREPO: test/repo\nPR: 5\nHEAD: abc123\nVERDICT: PASS"]
+        self.assertIsNone(correlate_response(msgs, self.env))
+
+    def test_all_four_exact_accepted(self):
+        msgs = ["REVIEW_REQUEST_ID: req-123\nREPO: test/repo\nPR: 5\nHEAD: abc123\nVERDICT: PASS"]
+        result = correlate_response(msgs, self.env)
+        self.assertIsNotNone(result)
+        self.assertIn("VERDICT: PASS", result)
+
+    def test_envelope_missing_field_rejected(self):
+        # envelope missing HEAD -> correlation cannot be strict -> reject.
+        msgs = ["REVIEW_REQUEST_ID: req-123\nREPO: test/repo\nPR: 5\nHEAD: abc123\nVERDICT: PASS"]
+        bad_env = {"REVIEW_REQUEST_ID": "req-123", "REPO": "test/repo", "PR": "5"}
+        self.assertIsNone(correlate_response(msgs, bad_env))
+
 
 class TestClassifySendResult(unittest.TestCase):
     """Tests 6, 7, 8: reconcile / read-back semantics."""
@@ -247,8 +308,8 @@ class TestSendFlow(unittest.TestCase):
                 probe.conv_state["users"] = [make_request_text(env)]
             if state["n"] >= 3:
                 probe.conv_state["asst"] = [
-                    f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nREPO: test/repo\nPR: 5\nHEAD: abc123\nVERDICT: PASS\nv1",
-                    f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nREPO: test/repo\nPR: 5\nHEAD: abc123\nVERDICT: PASS\nv2",
+                    f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nREPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\nVERDICT: PASS\nv1",
+                    f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nREPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\nVERDICT: PASS\nv2",
                 ]
             return dict(probe.conv_state)
         probe.conversation = conv
@@ -274,7 +335,7 @@ class TestSendFlow(unittest.TestCase):
             if state["n"] >= 2:
                 probe.conv_state["users"] = [make_request_text(env)]
             if state["n"] >= 3:
-                probe.conv_state["asst"] = [f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nVERDICT: PASS"]
+                probe.conv_state["asst"] = [f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nREPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\nVERDICT: PASS"]
             return dict(probe.conv_state)
         probe.conversation = conv
 
@@ -309,7 +370,7 @@ class TestSendFlow(unittest.TestCase):
         async def conv():
             if state["n"] >= 3:
                 probe.conv_state["users"] = [make_request_text(env)]
-                probe.conv_state["asst"] = [f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nVERDICT: PASS"]
+                probe.conv_state["asst"] = [f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nREPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\nVERDICT: PASS"]
             return dict(probe.conv_state)
         probe.conversation = conv
 
@@ -343,7 +404,7 @@ class TestSendFlow(unittest.TestCase):
             if state["n"] >= 2:
                 probe.conv_state["users"] = [make_request_text(env)]
             if state["n"] >= 3:
-                probe.conv_state["asst"] = [f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nVERDICT: PASS"]
+                probe.conv_state["asst"] = [f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nREPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\nVERDICT: PASS"]
             return dict(probe.conv_state)
         probe.conversation = conv
 
@@ -366,7 +427,7 @@ class TestSendFlow(unittest.TestCase):
             if state["sends"] >= 30:
                 probe.conv_state["users"] = [make_request_text(env)]
             if state["sends"] >= 31:
-                probe.conv_state["asst"] = [f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nVERDICT: PASS"]
+                probe.conv_state["asst"] = [f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nREPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\nVERDICT: PASS"]
             return dict(probe.conv_state)
         probe.conversation = conv
 
@@ -418,8 +479,8 @@ class TestSendFlow(unittest.TestCase):
 
         async def conv():
             probe.conv_state["asst"] = [
-                f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nVERDICT: PASS\nold",
-                f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nVERDICT: PASS\nnew",
+                f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nREPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\nVERDICT: PASS\nold",
+                f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nREPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\nVERDICT: PASS\nnew",
             ]
             return dict(probe.conv_state)
         probe.conversation = conv
@@ -558,7 +619,7 @@ class TestConversationIdentityInFlow(unittest.TestCase):
             if state["n"] >= 2:
                 probe.conv_state["users"] = [make_request_text(env)]
             if state["n"] >= 3:
-                probe.conv_state["asst"] = [f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nVERDICT: PASS"]
+                probe.conv_state["asst"] = [f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nREPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\nVERDICT: PASS"]
             return dict(probe.conv_state)
         probe.conversation = conv
 

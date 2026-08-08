@@ -168,21 +168,28 @@ def extract_latest_assistant_response(assistant_messages, req_id):
 def correlate_response(assistant_messages, envelope):
     """Find the assistant message that is the correlated response.
 
-    Rules (fail closed):
+    Rules (fail closed, strict):
     - ONLY the LATEST assistant message is eligible to be the response.
-    - The latest message must contain the envelope REVIEW_REQUEST_ID.
-    - If the latest message also states REPO / PR / HEAD, they must match the
-      envelope exactly. A stated mismatch -> reject (returns None).
-    - An older assistant message (from a previous request or stale) is NEVER
-      accepted, even if it contains this request_id, because the latest
-      message did not.
+    - The latest message must bind ALL FOUR correlation fields:
+        REVIEW_REQUEST_ID, REPO, PR, HEAD.
+    - Each of the four fields in the latest message must:
+        * be present
+        * be non-empty
+        * exactly equal the corresponding envelope value
+    - Any missing, empty, or mismatched field -> reject (returns None).
+    - An older assistant message is NEVER accepted, even if it contains this
+      request_id, because the latest message did not.
 
     Returns the matched text or None.
     """
     if not assistant_messages or not isinstance(assistant_messages, list):
         return None
-    req_id = (envelope or {}).get("REVIEW_REQUEST_ID")
-    if not req_id:
+    env = envelope or {}
+    req_id = env.get("REVIEW_REQUEST_ID")
+    exp_repo = env.get("REPO")
+    exp_pr = env.get("PR")
+    exp_head = env.get("HEAD")
+    if not req_id or not exp_repo or not exp_pr or not exp_head:
         return None
     latest = assistant_messages[-1]
     text = latest or ""
@@ -193,13 +200,20 @@ def correlate_response(assistant_messages, envelope):
         for key in ("REVIEW_REQUEST_ID", "REPO", "PR", "HEAD"):
             if line.startswith(f"{key}:"):
                 fields[key] = line.split(f"{key}:", 1)[1].strip()
-    stated_req = fields.get("REVIEW_REQUEST_ID", req_id)
-    if stated_req != req_id:
+    stated_req = fields.get("REVIEW_REQUEST_ID")
+    stated_repo = fields.get("REPO")
+    stated_pr = fields.get("PR")
+    stated_head = fields.get("HEAD")
+    # Strict: all four must be present, non-empty, and exactly equal.
+    if not stated_req or stated_req != req_id:
         return None
-    for key in ("REPO", "PR", "HEAD"):
-        stated = fields.get(key)
-        if stated and stated != envelope.get(key):
-            return None  # mismatched binding -> fail closed
+    if not stated_repo or stated_repo != exp_repo:
+        return None
+    if not stated_pr or stated_pr != exp_pr:
+        return None
+    if not stated_head or stated_head != exp_head:
+        return None
+    return text
     return text
 
 
