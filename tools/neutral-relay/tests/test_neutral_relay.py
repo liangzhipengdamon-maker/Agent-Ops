@@ -20,10 +20,12 @@ from neutral_relay import (
     normalize_text,
     extract_latest_assistant_response,
     ConversationIdentityError,
+    RuntimeIdentityError,
     resolve_reviewer_target,
     target_matches_reviewer,
     conversation_id_from_url,
     normalize_conversation_url,
+    verify_runtime_identity,
 )
 
 
@@ -680,6 +682,133 @@ class TestConversationIdentityInFlow(unittest.TestCase):
         self.assertEqual(probe.click_count, 0)
 
 
+class TestRuntimeIsolation(unittest.TestCase):
+    """AgentOps runtime isolation from LearnMind 9223 browser runtime."""
+
+    AGENTOPS_URL = "https://chatgpt.com/c/6a74f5c0-a240-83ec-9cff-198ffab1140e"
+    LEARNMIND_URL = "https://chatgpt.com/c/6a712e41-3b20-83ec-932d-3b429fdfb0bc"
+
+    def _write_marker(self, profile_dir, content):
+        with open(os.path.join(profile_dir, "AGENTOPS_MARKER"), "w") as f:
+            f.write(content + "\n")
+
+    def _config(self, profile_dir, runtime_port=9233, marker="AgentOps-9233"):
+        return {
+            "runtime": {
+                "name": "AgentOps",
+                "cdp_port": runtime_port,
+                "browser_profile": profile_dir,
+                "runtime_marker": marker,
+            },
+            "routes": {
+                "liangzhipengdamon-maker/Agent-Ops": {
+                    "conversation_url": self.AGENTOPS_URL,
+                    "cdp_port": runtime_port,
+                }
+            }
+        }
+
+    def test_config_uses_dedicated_port(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._write_marker(td, "AgentOps-9233")
+            cfg = self._config(td, runtime_port=9233)
+            name, port, marker, cid = verify_runtime_identity(cfg)
+            self.assertEqual(port, 9233)
+            self.assertEqual(name, "AgentOps")
+            self.assertEqual(cid, "6a74f5c0-a240-83ec-9cff-198ffab1140e")
+
+    def test_no_runtime_path_defaults_to_9223(self):
+        # The AgentOps config must NOT silently default to LearnMind's 9223.
+        with tempfile.TemporaryDirectory() as td:
+            self._write_marker(td, "AgentOps-9233")
+            cfg = self._config(td, runtime_port=9233)
+            _, port, _, _ = verify_runtime_identity(cfg)
+            self.assertNotEqual(port, 9223)
+
+    def test_wrong_cdp_port_runtime_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._write_marker(td, "AgentOps-9233")
+            cfg = self._config(td, runtime_port=9233)
+            # Route points at LearnMind's 9222 runtime instead of canonical 9233.
+            cfg["routes"]["liangzhipengdamon-maker/Agent-Ops"]["cdp_port"] = 9222
+            with self.assertRaises(RuntimeIdentityError) as ctx:
+                verify_runtime_identity(cfg)
+            self.assertEqual(ctx.exception.code, "WRONG_BROWSER_RUNTIME")
+
+    def test_only_learnmind_tab_on_9223_irrelevant(self):
+        # On port 9223 with only OLD tab present, the AgentOps resolver
+        # would never be invoked because the runtime guard refuses 9223.
+        targets = [self.page(self.LEARNMIND_URL, "t1", title="Phase 0C 核验任务")]
+        with self.assertRaises(ConversationIdentityError) as ctx:
+            resolve_reviewer_target(targets, self.AGENTOPS_URL)
+        self.assertEqual(ctx.exception.code, "REVIEWER_CONVERSATION_NOT_FOUND")
+
+    def test_agentops_runtime_9233_new_tab_succeeds(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._write_marker(td, "AgentOps-9233")
+            cfg = self._config(td, runtime_port=9233)
+            verify_runtime_identity(cfg)  # identity ok
+            targets = [self.page(self.AGENTOPS_URL, "t-agentops", title="AgentOps 项目治理")]
+            t = resolve_reviewer_target(targets, self.AGENTOPS_URL)
+            self.assertEqual(t["targetId"], "t-agentops")
+
+    def test_old_tab_in_separate_browser_cannot_be_selected(self):
+        # Even if the OLD tab exists in some other browser, the AgentOps
+        # resolver only sees tabs on its own CDP port. Here we model the
+        # AgentOps browser having no OLD tab.
+        targets = [self.page(self.AGENTOPS_URL, "t-agentops", title="AgentOps 项目治理")]
+        with self.assertRaises(ConversationIdentityError) as ctx:
+            resolve_reviewer_target(targets, self.LEARNMIND_URL)
+        self.assertEqual(ctx.exception.code, "REVIEWER_CONVERSATION_NOT_FOUND")
+
+    def test_missing_agentops_marker_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            # Do not write the marker file.
+            cfg = self._config(td, runtime_port=9233, marker="AgentOps-9233")
+            with self.assertRaises(RuntimeIdentityError) as ctx:
+                verify_runtime_identity(cfg)
+            self.assertEqual(ctx.exception.code, "WRONG_BROWSER_RUNTIME")
+
+    def test_marker_mismatch_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._write_marker(td, "LearnMind-9223")  # wrong marker
+            cfg = self._config(td, runtime_port=9233, marker="AgentOps-9233")
+            with self.assertRaises(RuntimeIdentityError) as ctx:
+                verify_runtime_identity(cfg)
+            self.assertEqual(ctx.exception.code, "WRONG_BROWSER_RUNTIME")
+
+    def test_canonical_conversation_missing_on_runtime_fails_closed(self):
+        # Real CDP run: only OLD tab present on AgentOps runtime -> fail closed.
+        targets = [self.page(self.LEARNMIND_URL, "t1", title="Phase 0C 核验任务")]
+        with self.assertRaises(ConversationIdentityError) as ctx:
+            resolve_reviewer_target(targets, self.AGENTOPS_URL)
+        self.assertEqual(ctx.exception.code, "REVIEWER_CONVERSATION_NOT_FOUND")
+
+    def test_neutral_relay_source_has_no_activate_or_bringtofront(self):
+        # Static guard: Neutral Relay source must not call activate/bringToFront
+        # or arbitrary createTarget.
+        import re as _re
+        src_path = os.path.join(os.path.dirname(__file__), "..", "neutral_relay.py")
+        with open(src_path, "r") as f:
+            src = f.read()
+        forbidden = [
+            r"\bactivateTarget\b",
+            r"\bbringToFront\b",
+            r"Page\.navigate\b",
+            r"Page\.bringToFront\b",
+            r"window\.open\b",
+        ]
+        for pat in forbidden:
+            self.assertIsNone(
+                _re.search(pat, src),
+                f"Neutral Relay source must not contain {pat!r}")
+        # Target.createTarget is allowed only in client bootstrap, not here.
+        self.assertNotIn("Target.createTarget", src)
+
+    def page(self, url, target_id="t1", title="ChatGPT"):
+        return {"type": "page", "url": url, "targetId": target_id, "title": title}
+
+
 class TestRunRelayConfigLevel(unittest.TestCase):
     """Config / envelope-level tests that do not need a browser."""
 
@@ -689,7 +818,23 @@ class TestRunRelayConfigLevel(unittest.TestCase):
         self.req_path = os.path.join(self.temp_dir.name, "request.txt")
         self.out_path = os.path.join(self.temp_dir.name, "out.md")
         with open(self.config_path, "w") as f:
-            json.dump({"routes": {"test/repo": {"conversation_url": "mock_url", "cdp_port": 1234}}}, f)
+            json.dump({
+                "runtime": {
+                    "name": "AgentOps",
+                    "cdp_port": 1234,
+                    "browser_profile": self.temp_dir.name,
+                    "runtime_marker": "AgentOps-test-marker",
+                },
+                "routes": {
+                    "test/repo": {
+                        "conversation_url": "https://chatgpt.com/c/6a74f5c0-a240-83ec-9cff-198ffab1140e",
+                        "cdp_port": 1234,
+                    }
+                }
+            }, f)
+        # Write the on-disk marker file the relay verifies.
+        with open(os.path.join(self.temp_dir.name, "AGENTOPS_MARKER"), "w") as f:
+            f.write("AgentOps-test-marker\n")
 
     def tearDown(self):
         self.temp_dir.cleanup()

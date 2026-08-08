@@ -111,6 +111,94 @@ def target_matches_reviewer(target_url, reviewer_url):
     return conversation_id_from_url(target_url) == reviewer_cid
 
 
+class RuntimeIdentityError(Exception):
+    """Fail-closed runtime-identity verification error (WRONG_BROWSER_RUNTIME)."""
+
+    def __init__(self, code, reason):
+        super().__init__(f"[{code}] {reason}")
+        self.code = code
+        self.reason = reason
+
+
+def verify_runtime_identity(config):
+    """Verify the config's AgentOps runtime identity guards.
+
+    Returns a tuple (runtime_name, runtime_cdp_port, runtime_marker, reviewer_cid).
+    Raises RuntimeIdentityError if:
+      - route cdp_port != runtime.cdp_port (mismatched port)
+      - runtime_marker is set but the on-disk marker file under
+        runtime.browser_profile does not match
+    """
+    routes = config.get("routes") or {}
+    runtime_cfg = config.get("runtime") or {}
+    runtime_name = runtime_cfg.get("name", "AgentOps")
+    runtime_expected_port = runtime_cfg.get("cdp_port")
+    runtime_marker = runtime_cfg.get("runtime_marker", "")
+    runtime_profile = runtime_cfg.get("browser_profile", "")
+
+    if not routes:
+        raise RuntimeIdentityError("CONFIG_NO_ROUTES", "config has no routes")
+    if runtime_expected_port is None:
+        raise RuntimeIdentityError(
+            "RUNTIME_PORT_MISSING",
+            f"runtime.cdp_port missing in config (name={runtime_name!r})")
+
+    selected_port = None
+    selected_route = None
+    for repo, route in routes.items():
+        cp = route.get("cdp_port")
+        if cp is None:
+            raise RuntimeIdentityError(
+                "ROUTE_PORT_MISSING",
+                f"route {repo!r} missing cdp_port")
+        if selected_port is None:
+            selected_port = cp
+            selected_route = (repo, route)
+        elif int(cp) != int(selected_port):
+            raise RuntimeIdentityError(
+                "ROUTE_PORT_MISMATCH",
+                f"route cdp_port mismatch: {repo!r}={cp} vs first={selected_port}")
+    if selected_port is None or selected_route is None:
+        raise RuntimeIdentityError("CONFIG_NO_PORT", "no route port resolved")
+
+    if int(selected_port) != int(runtime_expected_port):
+        raise RuntimeIdentityError(
+            "WRONG_BROWSER_RUNTIME",
+            f"route cdp_port {selected_port} != runtime {runtime_name!r} "
+            f"expected port {runtime_expected_port}")
+
+    if runtime_marker and runtime_profile:
+        marker_path = os.path.join(runtime_profile, "AGENTOPS_MARKER")
+        if not os.path.exists(marker_path):
+            raise RuntimeIdentityError(
+                "WRONG_BROWSER_RUNTIME",
+                f"marker file not found at {marker_path} (not an AgentOps runtime)")
+        try:
+            with open(marker_path, "r") as f:
+                on_disk_marker = f.read().strip()
+        except OSError as e:
+            raise RuntimeIdentityError(
+                "WRONG_BROWSER_RUNTIME",
+                f"cannot read marker file at {marker_path}: {e}")
+        if on_disk_marker != runtime_marker:
+            raise RuntimeIdentityError(
+                "WRONG_BROWSER_RUNTIME",
+                f"marker file says {on_disk_marker!r}, config says {runtime_marker!r}")
+
+    repo, route = selected_route
+    gpt_url = route.get("conversation_url")
+    if not gpt_url:
+        raise RuntimeIdentityError(
+            "ROUTE_NO_CONVERSATION_URL",
+            f"route {repo!r} missing conversation_url")
+    reviewer_cid = conversation_id_from_url(gpt_url)
+    if not reviewer_cid:
+        raise RuntimeIdentityError(
+            "INVALID_REVIEWER_CONVERSATION_URL",
+            f"route {repo!r} conversation_url does not identify a conversation")
+    return runtime_name, int(selected_port), runtime_marker, reviewer_cid
+
+
 def resolve_reviewer_target(targets, reviewer_url):
     """Select exactly one reviewer conversation among CDP page targets.
 
@@ -666,18 +754,36 @@ async def run_relay(args):
         print("Error: Incomplete route configuration (need conversation_url and cdp_port).")
         return 1
 
+    try:
+        runtime_name, runtime_port, runtime_marker, reviewer_cid = verify_runtime_identity(config)
+    except RuntimeIdentityError as e:
+        print(f"STOP: {e}")
+        return 1
+
+    print(f"BROWSER_RUNTIME: {runtime_name}")
+    print(f"CDP_PORT: {runtime_port}")
+    print(f"EXPECTED_CONVERSATION_ID: {reviewer_cid}")
+    if runtime_marker:
+        print(f"RUNTIME_MARKER: {runtime_marker}")
+
     if args.dry_run:
         print(f"[DRY-RUN] Would route {repo} to CDP port {cdp_port} at URL {gpt_url}")
         print(f"[DRY-RUN] Sending Payload:\n{request_text}")
         print(f"[DRY-RUN] Waiting for response with ID: {req_id}")
         return 0
 
-    # 3. CDP connect
+    # 3. CDP connect + runtime guard
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{cdp_port}/json/version", timeout=8) as r:
-            ws_url = json.loads(r.read().decode()).get("webSocketDebuggerUrl", "")
+            version_doc = json.loads(r.read().decode())
+            ws_url = version_doc.get("webSocketDebuggerUrl", "")
+            browser_label = version_doc.get("Browser", "")
     except Exception as e:
         print(f"Error connecting to CDP on port {cdp_port}: {e}")
+        return 1
+
+    if not ws_url:
+        print("Error: CDP did not return webSocketDebuggerUrl")
         return 1
 
     async with CdpSession(ws_url) as session:
@@ -691,14 +797,16 @@ async def run_relay(args):
         except ConversationIdentityError as e:
             print(f"Error: {e}")
             return 1
-        reviewer_cid = conversation_id_from_url(gpt_url)
         matched_cid = conversation_id_from_url(target["url"])
-        print(f"EXPECTED_CONVERSATION_ID: {reviewer_cid}")
         print(f"MATCHED_CONVERSATION_ID: {matched_cid}")
+        print(f"TARGET_SELECTED: {target['targetId']}")
+        print(f"TARGET_URL: {target['url']}")
+        print(f"TARGET_ACTIVATION_REQUESTED: NO")
         if reviewer_cid != matched_cid:
             print("STOP: CONVERSATION_ID_MISMATCH")
             return 1
         sid = await session.attach(target["targetId"])
+        print(f"TARGET_ACTIVATED_ID: none (attach-only, background)")
 
         probe = DomProbe(session, sid)
         timeout = getattr(args, "timeout", None) or 180
@@ -707,6 +815,8 @@ async def run_relay(args):
 
         # Second identity check after attach: read the actual page URL again.
         try:
+            post_url = await probe.current_url()
+            print(f"POST_ACTIVATION_URL: {post_url}")
             await flow.verify_conversation_identity()
         except SendFlowError as e:
             print(f"Error: {e}")
