@@ -3,207 +3,125 @@ import threading
 import time
 import typing
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
-@dataclass
+@dataclass(frozen=True)
 class AuthContext:
+    """
+    Immutable description of a proposed authorization.
+
+    Frozen dataclass with tuple-typed collection fields so that the payload
+    cannot be mutated after it is bound into a VerifiedAssertion. Fields are
+    all assigned at construction time.
+    """
+
     request_id: str
     task_id: str  # Independent mission/task binding
     repository: str
     branch: str
     base_sha: str
     target_sha: str
-    allowed_paths: typing.List[str]
-    allowed_operations: typing.List[str]  # e.g., ['write_file', 'create_pr']
-    allowed_action_types: typing.List[str]  # e.g., ['commit', 'push', 'merge', 'deploy']
-    expiry: float  # Unix timestamp
+    allowed_paths: typing.Tuple[str, ...] = field(default_factory=tuple)
+    allowed_operations: typing.Tuple[str, ...] = field(default_factory=tuple)
+    allowed_action_types: typing.Tuple[str, ...] = field(default_factory=tuple)
+    expiry: float = 0.0  # Unix timestamp
     revoked: bool = False
     is_one_time: bool = False
-    consumed: bool = False
-
-
-# ---------------------------------------------------------------------------
-# Issuer-side trust boundary
-# ---------------------------------------------------------------------------
-# The boundary between the trusted PO authorization channel and the rest of
-# the system. Only the module-level functions below may produce a usable
-# POMintCapability. Ordinary caller code that holds a reference to the
-# AuthVerifier or the TrustedAuthorizationProvider still cannot mint a
-# VerifiedAssertion because it cannot satisfy the trusted_po_ingress check.
-#
-# In production this would be backed by a real cryptographic signature
-# verified against the PO's registered public key. For the AGE-5 isolated
-# reference model, the boundary is expressed structurally: the
-# po_sign_envelope function stamps a marker that only trusted_po_ingress
-# accepts, and the provider's issue_assertion requires a POMintCapability
-# from the trusted ingress.
-
-
-class _POSignedEnvelope:
-    """
-    Opaque envelope carrying an AuthContext for PO authorization issuance.
-
-    Only envelopes produced by ``po_sign_envelope`` carry the marker the
-    trusted ingress requires. Direct construction at the Python language
-    level is permitted (the language does not seal classes) but yields an
-    envelope the ingress rejects, so it grants no mint authority.
-    """
-
-    def __init__(self, auth: AuthContext):
-        self._auth = auth
-        # _signed_by_po is set ONLY by po_sign_envelope. Its absence causes
-        # the trusted ingress to reject the envelope.
-        self._signed_by_po = False
-
-
-def po_sign_envelope(auth: AuthContext) -> _POSignedEnvelope:
-    """
-    The PO's trusted signing function. The only path that produces an
-    envelope the trusted ingress will accept.
-
-    In production this would emit a real cryptographic signature. In the
-    AGE-5 isolated reference model, it stamps the envelope with the PO
-    marker that the ingress checks for.
-
-    This function is intentionally NOT a method on any class. It is the
-    issuer-side trust boundary and must be invoked directly by the trusted
-    PO authorization channel.
-    """
-    envelope = _POSignedEnvelope(auth)
-    envelope._signed_by_po = True
-    return envelope
-
-
-class POMintCapability:
-    """
-    Opaque mint capability. Produced ONLY by ``trusted_po_ingress`` after
-    a PO-signed envelope has been verified.
-
-    Direct construction at the Python language level is permitted but
-    useless: attaching a directly-constructed POMintCapability to a forged
-    VerifiedAssertion still fails the provider's registry check, so it
-    grants no mint authority.
-    """
-
-    def __init__(self):
-        # No fields. The capability's value is its origin in the trusted
-        # ingress call, not its content.
-        pass
-
-
-def trusted_po_ingress(po_signed_envelope: _POSignedEnvelope) -> POMintCapability:
-    """
-    The trusted ingress for PO authorization issuance. Verifies the input
-    is a PO-signed envelope produced by ``po_sign_envelope`` and, if so,
-    issues a POMintCapability.
-
-    This function is the SOLE producer of POMintCapability objects. It is
-    intentionally a module-level function — not a method on any class — so
-    that an ordinary caller who possesses or has discovered a reference to
-    the AuthVerifier or the TrustedAuthorizationProvider cannot reach a
-    working mint path.
-    """
-    if not isinstance(po_signed_envelope, _POSignedEnvelope):
-        raise ValueError(
-            "Trusted ingress rejects the input: not a PO-signed envelope."
-        )
-    if not getattr(po_signed_envelope, "_signed_by_po", False):
-        raise ValueError(
-            "Trusted ingress rejects the envelope: PO signature marker "
-            "missing. Only envelopes produced by po_sign_envelope are "
-            "accepted."
-        )
-    return POMintCapability()
-
-
-# ---------------------------------------------------------------------------
-# Provider and Verifier
-# ---------------------------------------------------------------------------
 
 
 class VerifiedAssertion:
     """
-    An authorization that originates from a TrustedAuthorizationProvider.
+    Opaque trusted authorization object, produced ONLY by
+    ``TrustedAuthorizationProvider._mint`` (the private trusted ingress).
 
-    Provenance is NOT determined by inspectable string fields. The issuing
-    provider maintains a private registry of the assertion objects it has
-    minted; AuthVerifier only accepts assertions whose object identity is in
-    that registry. A VerifiedAssertion constructed by any path other than
-    ``TrustedAuthorizationProvider.issue_assertion`` — including any manual
-    copy, even one that copies ``_auth``, ``_provider``, and
-    ``_mint_capability`` from a legitimately-issued assertion — is not in
-    the registry and therefore has no provenance.
+    The object is payload-bound and immutable: it embeds a frozen
+    ``AuthContext`` at issuance time. After issuance:
+
+      * the bound payload cannot be replaced (the object is frozen), and
+      * the payload itself cannot be mutated (``AuthContext`` is frozen),
+        so a modified or re-bound object can never still pass verification.
+
+    There is deliberately no separate "proof" object: the trusted ingress
+    produces the fully-bound trusted object in a single step, so a proof
+    minted for Auth A cannot be replayed to authorize Auth B.
     """
 
     def __init__(
         self,
         _auth: "AuthContext",
         _provider: "TrustedAuthorizationProvider",
-        _mint_capability: POMintCapability,
     ):
-        self._auth = _auth
-        self._provider = _provider
-        self._mint_capability = _mint_capability
+        # Issued objects are frozen after construction. The initial payload
+        # binding bypasses __setattr__ on purpose; every later assignment is
+        # rejected.
+        object.__setattr__(self, "_auth", _auth)
+        object.__setattr__(self, "_provider", _provider)
 
     @property
     def auth(self) -> "AuthContext":
         return self._auth
+
+    def __setattr__(self, name, value):
+        # Frozen after construction: no field may be reassigned post-issuance.
+        raise AttributeError(
+            f"VerifiedAssertion is immutable after issuance; cannot set {name!r}"
+        )
+
+    def __eq__(self, other):
+        # Identity equality: two distinct objects are never equal, even if
+        # they carry identical payload fields. This keeps the provider's
+        # WeakSet registry membership strictly identity-based.
+        return self is other
+
+    def __hash__(self):
+        return id(self)
 
 
 class TrustedAuthorizationProvider:
     """
     Sole issuer of VerifiedAssertion objects.
 
-    ``issue_assertion`` requires a POMintCapability from the trusted
-    ingress (``trusted_po_ingress``), which in turn requires a PO-signed
-    envelope produced by ``po_sign_envelope``. Ordinary callers — including
-    those that have discovered or hold a reference to this provider via the
-    AuthVerifier — cannot mint assertions because they cannot satisfy the
-    ingress check.
+    The trusted ingress is the private ``_mint`` method. It is the only
+    path that creates and registers a VerifiedAssertion, and it binds the
+    AuthContext into the trusted object in one step.
 
-    In production the ingress would verify a real cryptographic signature
-    against the PO's registered public key. For the AGE-5 isolated
-    reference model, the structural separation between
-    ``po_sign_envelope`` and ``trusted_po_ingress`` and the provider's
-    requirement for a POMintCapability express the boundary.
+    ``_mint`` is deliberately private. The AuthVerifier is created via
+    ``create_verifier()`` and does NOT hold a reference to this provider,
+    so ordinary action/runtime code that only sees the verifier cannot
+    reach the minting path. In production this private method would be a
+    sealed capability (for example, backed by a cryptographic signature
+    over the AuthContext); for the AGE-5 isolated reference model, the
+    private trusted ingress is the expression of the boundary.
     """
 
-    def __init__(
-        self,
-        ingress: typing.Callable[[_POSignedEnvelope], POMintCapability] = trusted_po_ingress,
-    ):
+    def __init__(self):
         self._issued: "weakref.WeakSet[VerifiedAssertion]" = weakref.WeakSet()
-        self._ingress = ingress
 
-    def issue_assertion(
-        self,
-        auth: AuthContext,
-        po_signed_envelope: _POSignedEnvelope,
-    ) -> VerifiedAssertion:
-        # Issuer-side trust boundary: must obtain a mint capability from the
-        # trusted ingress. Ordinary callers cannot satisfy this because they
-        # cannot produce envelopes the ingress accepts.
-        mint_capability = self._ingress(po_signed_envelope)
-        assertion = VerifiedAssertion(
-            _auth=auth,
-            _provider=self,
-            _mint_capability=mint_capability,
-        )
+    def _mint(self, auth: "AuthContext") -> "VerifiedAssertion":
+        # Trusted ingress: the only path that creates a VerifiedAssertion.
+        # The payload is bound immutably at this point. There is no separate
+        # proof object that could be attached to a different AuthContext.
+        assertion = VerifiedAssertion(_auth=auth, _provider=self)
         self._issued.add(assertion)
         return assertion
 
-    def is_valid_assertion(self, assertion: VerifiedAssertion) -> bool:
-        # Trust boundary on the consumer side: only objects this provider
-        # actually minted are valid. Manual construction — even with
-        # copied fields, a real provider reference, and a real mint
-        # capability — fails closed because the forged object is not in
-        # this registry.
+    def is_valid_assertion(self, assertion: typing.Any) -> bool:
+        # Consumer-side trust boundary: only objects this provider actually
+        # minted are valid. A manually constructed or field-copied object —
+        # even one referencing this provider — is not in the registry and
+        # therefore fails closed. Non-assertion inputs also fail closed.
         return (
-            assertion is not None
+            isinstance(assertion, VerifiedAssertion)
             and assertion._provider is self
             and assertion in self._issued
         )
+
+    def create_verifier(self) -> "AuthVerifier":
+        # Returns a verifier that can only check provider-issued assertions.
+        # The verifier does not retain a public reference to this provider,
+        # so holding the verifier grants no path to minting.
+        return AuthVerifier(checker=self.is_valid_assertion)
 
 
 @dataclass
@@ -221,34 +139,33 @@ class ActionRequest:
 
 class AuthVerifier:
     """
-    Pure verifier of provider-issued assertions. Does NOT expose any path
-    to minting a VerifiedAssertion.
+    Pure verifier of provider-issued assertions.
 
-    The verifier holds a reference to the provider only so it can call
-    ``is_valid_assertion`` to confirm provenance. The provider's
-    ``issue_assertion`` still requires a POMintCapability from the trusted
-    ingress — which is NOT obtainable through this verifier.
+    Constructed from the provider's check function only. It does NOT hold a
+    reference to ``TrustedAuthorizationProvider``, exposes no mint path, and
+    cannot turn an arbitrary AuthContext into a trusted authorization.
 
-    No method on this class creates a VerifiedAssertion. ``grant_authorization``
-    only registers an already-issued assertion that has passed
-    ``is_valid_assertion``; it is a registration step, not a mint step.
+    Only assertions that pass the provider's ``is_valid_assertion`` (that
+    is, objects the provider actually minted) can be granted.
+    ``grant_authorization`` is a registration step, not a mint step: it
+    takes an already-issued trusted object and stores it under the
+    request_id bound in its payload.
     """
 
-    def __init__(self, trusted_provider: TrustedAuthorizationProvider):
+    def __init__(self, checker: typing.Callable[[typing.Any], bool]):
         self.auth_store: typing.Dict[str, VerifiedAssertion] = {}
-        self.trusted_provider = trusted_provider
+        self._checker = checker
+        # Runtime consumption state for one-time authorizations. Kept OUT of
+        # the trusted payload: consumption is verifier runtime state, not
+        # part of the immutable authorization.
+        self._consumed: typing.Set[str] = set()
         self._lock = threading.Lock()  # Model for transaction safety
 
-    # NOTE: AuthVerifier exposes NO method that creates a VerifiedAssertion.
-    # To mint an assertion, a caller must use:
-    #   po_sign_envelope(auth) → trusted_po_ingress(envelope) → provider.issue_assertion(auth, envelope)
-    # None of those three functions is reachable through this verifier.
-
     def grant_authorization(self, assertion: VerifiedAssertion):
-        # 1. Trusted provenance: confirm the assertion was actually issued by
-        #    the configured provider via its private registry. There is no
-        #    caller-visible token to forge.
-        if not self.trusted_provider.is_valid_assertion(assertion):
+        # Trusted provenance: confirm the assertion was actually issued by
+        # the configured provider via its private registry. There is no
+        # caller-visible token or separate proof to forge.
+        if not self._checker(assertion):
             raise ValueError("Untrusted assertion provenance. Cannot grant authorization.")
 
         auth = assertion.auth
@@ -273,22 +190,22 @@ class AuthVerifier:
 
             # Re-check provenance on every verify: enforce the trust boundary
             # uniformly and defend against store tampering.
-            if not self.trusted_provider.is_valid_assertion(assertion):
+            if not self._checker(assertion):
                 return False
 
             auth = assertion.auth
 
-            # 2. Revocation & Expiry
+            # Revocation & Expiry
             if auth.revoked:
                 return False
             if time.time() > auth.expiry:
                 return False
 
-            # 3. One-time consumption check
-            if auth.is_one_time and auth.consumed:
+            # One-time consumption check
+            if auth.is_one_time and action.request_id in self._consumed:
                 return False
 
-            # 4. Identity & Binding matches
+            # Identity & Binding matches
             if auth.task_id != action.task_id:
                 return False
             if auth.repository != action.repository:
@@ -300,13 +217,13 @@ class AuthVerifier:
             if auth.target_sha != action.target_sha:
                 return False
 
-            # 5. Scope, Operation & Action match
+            # Scope, Operation & Action match
             if action.operation not in auth.allowed_operations:
                 return False
             if action.action_type not in auth.allowed_action_types:
                 return False
 
-            # 6. Path validation (strict exact or prefix match, no wildcards, no path traversal)
+            # Path validation (strict exact or prefix match, no wildcards, no path traversal)
             if not action.target_paths:
                 return False  # Fails closed if empty
             for path in action.target_paths:
@@ -319,6 +236,7 @@ class AuthVerifier:
         """
         Explicitly consume a one-time authorization safely.
         Modeled with a threading.Lock to represent atomic transaction safety.
+        Consumption state is kept in the verifier, never in the payload.
         """
         with self._lock:
             assertion = self.auth_store.get(request_id)
@@ -326,17 +244,16 @@ class AuthVerifier:
                 return False
 
             # Re-check provenance on every consume: defend against store tampering.
-            if not self.trusted_provider.is_valid_assertion(assertion):
+            if not self._checker(assertion):
                 return False
 
-            auth = assertion.auth
-            if auth.is_one_time:
-                if auth.consumed:
+            if assertion.auth.is_one_time:
+                if request_id in self._consumed:
                     return False
-                auth.consumed = True
+                self._consumed.add(request_id)
             return True
 
-    def _is_path_allowed(self, path: str, allowed: typing.List[str]) -> bool:
+    def _is_path_allowed(self, path: str, allowed: typing.Iterable[str]) -> bool:
         # Prevent directory traversal bypass
         normalized_path = os.path.normpath(path)
         if ".." in normalized_path.split(os.sep) or normalized_path.startswith("/"):

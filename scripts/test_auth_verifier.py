@@ -1,47 +1,47 @@
 import unittest
 import time
 import threading
+from dataclasses import FrozenInstanceError
 from auth_verifier import (
     ActionRequest,
     AuthContext,
-    AuthVerifier,
-    POMintCapability,
     TrustedAuthorizationProvider,
     VerifiedAssertion,
-    _POSignedEnvelope,
-    po_sign_envelope,
 )
+
+
+def make_auth(**overrides) -> AuthContext:
+    """Build an AuthContext for tests. Pass overrides to vary one field."""
+    base = dict(
+        request_id="req-123",
+        task_id="task-456",
+        repository="owner/repo",
+        branch="feature/AGE-5",
+        base_sha="abcdef1",
+        target_sha="abcdef2",
+        allowed_paths=("docs/",),
+        allowed_operations=("write_file",),
+        allowed_action_types=("commit", "push"),
+        expiry=time.time() + 3600,
+        revoked=False,
+        is_one_time=True,
+    )
+    base.update(overrides)
+    return AuthContext(**base)
 
 
 class TestAuthVerifier(unittest.TestCase):
     def setUp(self):
         self.provider = TrustedAuthorizationProvider()
-        self.verifier = AuthVerifier(self.provider)
-        self.valid_expiry = time.time() + 3600
+        # The verifier is created via the provider but does NOT hold a
+        # reference back to it: no public path to minting.
+        self.verifier = self.provider.create_verifier()
 
-        self.base_auth = AuthContext(
-            request_id="req-123",
-            task_id="task-456",
-            repository="owner/repo",
-            branch="feature/AGE-5",
-            base_sha="abcdef1",
-            target_sha="abcdef2",
-            allowed_paths=["docs/"],
-            allowed_operations=["write_file"],
-            allowed_action_types=["commit", "push"],
-            expiry=self.valid_expiry,
-            revoked=False,
-            is_one_time=True,
-            consumed=False,
-        )
+        self.base_auth = make_auth()
 
-        # Legitimate issuance path:
-        #   po_sign_envelope → trusted_po_ingress (inside provider) → issue_assertion
-        # None of these three steps is reachable via the AuthVerifier.
-        self.valid_envelope = po_sign_envelope(self.base_auth)
-        self.valid_assertion = self.provider.issue_assertion(
-            self.base_auth, self.valid_envelope
-        )
+        # Legitimate issuance through the private trusted ingress (_mint).
+        # This is the trusted PO channel in the reference model.
+        self.valid_assertion = self.provider._mint(self.base_auth)
 
         self.valid_action = ActionRequest(
             request_id="req-123",
@@ -56,91 +56,51 @@ class TestAuthVerifier(unittest.TestCase):
         )
 
     # ------------------------------------------------------------------
-    # A. Issuer-side trust boundary
+    # A. Issuer-side trust boundary — single-step payload-bound issuance
     # ------------------------------------------------------------------
 
-    def test_legitimate_trusted_issuance_succeeds(self):
-        """Full trusted pipeline: po_sign_envelope → ingress → issue_assertion → grant → verify."""
+    def test_legitimate_trusted_fixture_passes(self):
+        """A legitimately issued trusted object (via the private trusted ingress) verifies normally."""
         self.verifier.grant_authorization(self.valid_assertion)
         self.assertTrue(self.verifier.verify(self.valid_action))
 
-    def test_fail_auth_verifier_does_not_expose_mint(self):
-        """AuthVerifier must not expose any method that mints a VerifiedAssertion.
-
-        The verifier is a verifier only. Even its public attribute
-        ``trusted_provider`` must not be a usable minting authority on
-        its own — issuing requires a PO-signed envelope the verifier
-        does not produce.
-        """
-        forbidden_tokens = ("issue_", "mint_", "create_assertion", "new_assertion", "sign_")
-        leaked = sorted(
-            name
-            for name in vars(self.verifier).keys()
-            if any(token in name.lower() for token in forbidden_tokens)
-        )
-        self.assertEqual(
-            leaked,
-            [],
-            f"AuthVerifier exposes mint-like attributes: {leaked}",
+    def test_fail_arbitrary_auth_cannot_be_authorized_via_public_api(self):
+        """No public verifier/provider API can turn an arbitrary AuthContext into a trusted authorization."""
+        arbitrary_auth = make_auth(
+            request_id="req-evil",
+            task_id="task-evil",
+            branch="main",
+            allowed_operations=("delete_file",),
+            allowed_action_types=("deploy",),
         )
 
-        # No public method either.
-        method_leaked = sorted(
-            name
-            for name in dir(self.verifier)
-            if callable(getattr(self.verifier, name, None))
-            and not name.startswith("_")
-            and any(token in name.lower() for token in forbidden_tokens)
+        # 1. The verifier exposes no reference to the provider (no mint surface).
+        self.assertFalse(
+            hasattr(self.verifier, "trusted_provider"),
+            "AuthVerifier must not expose the provider",
         )
-        self.assertEqual(
-            method_leaked,
-            [],
-            f"AuthVerifier exposes mint-like public methods: {method_leaked}",
-        )
+        for name in ("issue_assertion", "mint", "create_assertion", "sign"):
+            self.assertFalse(
+                hasattr(self.verifier, name),
+                f"AuthVerifier must not expose a mint-like attribute {name!r}",
+            )
 
-    def test_fail_provider_reference_does_not_grant_mint(self):
-        """Holding the provider reference (even via the verifier) is not sufficient to mint.
+        # 2. grant_authorization cannot accept a raw AuthContext.
+        with self.assertRaises(ValueError):
+            self.verifier.grant_authorization(arbitrary_auth)
 
-        Even with the provider, ``issue_assertion`` requires a PO-signed
-        envelope produced by ``po_sign_envelope``. An unsigned envelope
-        is rejected by the trusted ingress.
-        """
-        # Caller obtains provider reference from the verifier
-        provider_via_verifier = self.verifier.trusted_provider
-        # An envelope constructed directly (not via po_sign_envelope) lacks
-        # the PO signature marker.
-        unsigned_envelope = _POSignedEnvelope(self.base_auth)
+        # 3. grant_authorization cannot accept a manually constructed object,
+        #    even one carrying the arbitrary AuthContext and a provider ref.
+        forged = VerifiedAssertion(_auth=arbitrary_auth, _provider=self.provider)
         with self.assertRaises(ValueError):
-            provider_via_verifier.issue_assertion(self.base_auth, unsigned_envelope)
+            self.verifier.grant_authorization(forged)
 
-    def test_fail_non_envelope_rejected_at_ingress(self):
-        """Non-envelope inputs (raw auth context, strings, None) are rejected by the ingress."""
-        with self.assertRaises(ValueError):
-            self.provider.issue_assertion(self.base_auth, self.base_auth)
-        with self.assertRaises(ValueError):
-            self.provider.issue_assertion(self.base_auth, "not an envelope")
-        with self.assertRaises(ValueError):
-            self.provider.issue_assertion(self.base_auth, None)
-        # A raw POMintCapability is also not an envelope — the ingress
-        # only accepts PO-signed envelopes, not pre-minted capabilities.
-        with self.assertRaises(ValueError):
-            self.provider.issue_assertion(self.base_auth, POMintCapability())
-
-    def test_fail_unsigned_envelope_rejected_at_ingress(self):
-        """An envelope constructed directly (not via po_sign_envelope) fails the ingress."""
-        forged_envelope = _POSignedEnvelope(self.base_auth)
-        # forged_envelope._signed_by_po is False by default
-        with self.assertRaises(ValueError):
-            self.provider.issue_assertion(self.base_auth, forged_envelope)
-
-    def test_fail_arbitrary_auth_context_unauthorized(self):
-        """An arbitrary AuthContext with no trusted issuance cannot be authorized."""
-        # No grant has happened for this arbitrary request_id.
+        # 4. verify() for the arbitrary context is never authorized.
         arbitrary_action = ActionRequest(
-            request_id="req-arbitrary",
-            task_id="task-456",
+            request_id="req-evil",
+            task_id="task-evil",
             repository="owner/repo",
-            branch="feature/AGE-5",
+            branch="main",
             base_sha="abcdef1",
             target_sha="abcdef2",
             target_paths=["docs/x.md"],
@@ -149,50 +109,79 @@ class TestAuthVerifier(unittest.TestCase):
         )
         self.assertFalse(self.verifier.verify(arbitrary_action))
 
-        # And even if we tried to bypass by constructing a VerifiedAssertion
-        # manually with a real provider reference and a real POMintCapability,
-        # it is still not in the provider's issuance registry and therefore
-        # not authorized.
-        forged = VerifiedAssertion(
-            _auth=self.base_auth,
-            _provider=self.provider,
-            _mint_capability=POMintCapability(),
+    def test_fail_assertion_for_a_cannot_authorize_b(self):
+        """A trusted object minted for Auth A cannot be used to authorize Auth B."""
+        auth_b = make_auth(request_id="req-B", task_id="task-B")
+        assertion_a = self.valid_assertion  # bound to Auth A (req-123)
+        self.verifier.grant_authorization(assertion_a)
+
+        # An action for B must not be authorized by A's trusted object.
+        action_b = ActionRequest(
+            request_id="req-B",
+            task_id="task-B",
+            repository="owner/repo",
+            branch="feature/AGE-5",
+            base_sha="abcdef1",
+            target_sha="abcdef2",
+            target_paths=["docs/x.md"],
+            operation="write_file",
+            action_type="commit",
         )
+        self.assertFalse(self.verifier.verify(action_b))
+
+        # Rebinding A's trusted object to B's payload is rejected: the object
+        # is immutable after issuance.
+        with self.assertRaises(AttributeError):
+            assertion_a._auth = auth_b  # type: ignore[misc]
+
+        # A forged object carrying B's payload is not in the registry.
+        forged = VerifiedAssertion(_auth=auth_b, _provider=self.provider)
         with self.assertRaises(ValueError):
             self.verifier.grant_authorization(forged)
 
+    def test_fail_payload_modification_after_issuance(self):
+        """Payload cannot be replaced or modified after trusted issuance."""
+        assertion = self.provider._mint(self.base_auth)
+        self.verifier.grant_authorization(assertion)
+        self.assertTrue(self.verifier.verify(self.valid_action))
+
+        # Replace the whole payload object -> object is immutable.
+        other_auth = make_auth(request_id="req-other")
+        with self.assertRaises(AttributeError):
+            assertion._auth = other_auth  # type: ignore[misc]
+
+        # Mutate a payload field -> AuthContext is frozen.
+        with self.assertRaises(FrozenInstanceError):
+            assertion._auth.revoked = True  # type: ignore[misc]
+
+        # Replace a collection payload field -> AuthContext is frozen.
+        with self.assertRaises(FrozenInstanceError):
+            assertion._auth.allowed_paths = ("src/",)  # type: ignore[misc]
+
+        # The verifier still sees the ORIGINAL payload and authorizes normally.
+        self.assertTrue(self.verifier.verify(self.valid_action))
+
     # ------------------------------------------------------------------
-    # Object-identity / provider-held registry (consumer-side boundary)
+    # Consumer-side boundary — provider-held registry (object identity)
     # ------------------------------------------------------------------
 
     def test_fail_manually_constructed_assertion(self):
-        """VerifiedAssertion constructed outside issue_assertion must fail closed."""
-        forged = VerifiedAssertion(
-            _auth=self.base_auth,
-            _provider=self.provider,
-            _mint_capability=POMintCapability(),
-        )
+        """VerifiedAssertion constructed outside the trusted ingress must fail closed."""
+        forged = VerifiedAssertion(_auth=self.base_auth, _provider=self.provider)
         with self.assertRaises(ValueError):
             self.verifier.grant_authorization(forged)
         self.assertNotIn("req-123", self.verifier.auth_store)
 
     def test_fail_copied_assertion_fields(self):
-        """Field-by-field copy of a legitimate assertion must fail closed.
-
-        Even when the forged object references the exact same provider
-        instance and carries a copy of every field of a legitimate
-        assertion, it is not in the provider's issuance registry and
-        therefore has no provenance.
-        """
+        """Field-by-field copy of a legitimate assertion must fail closed."""
         # Sanity: the legitimate path works first.
         self.verifier.grant_authorization(self.valid_assertion)
         self.assertTrue(self.verifier.verify(self.valid_action))
 
-        # Forge a clone by copying the three fields of a legitimate assertion.
+        # Forge a clone by copying the two fields of a legitimate assertion.
         forged = VerifiedAssertion(
             _auth=self.valid_assertion._auth,
             _provider=self.valid_assertion._provider,
-            _mint_capability=self.valid_assertion._mint_capability,
         )
         with self.assertRaises(ValueError):
             self.verifier.grant_authorization(forged)
@@ -200,23 +189,8 @@ class TestAuthVerifier(unittest.TestCase):
     def test_fail_assertion_from_unrelated_provider(self):
         """An assertion issued by a different provider must fail closed on our verifier."""
         other_provider = TrustedAuthorizationProvider()
-        other_auth = AuthContext(
-            request_id="req-other",
-            task_id="task-456",
-            repository="owner/repo",
-            branch="feature/AGE-5",
-            base_sha="abcdef1",
-            target_sha="abcdef2",
-            allowed_paths=["docs/"],
-            allowed_operations=["write_file"],
-            allowed_action_types=["commit", "push"],
-            expiry=self.valid_expiry,
-            revoked=False,
-            is_one_time=False,
-            consumed=False,
-        )
-        other_envelope = po_sign_envelope(other_auth)
-        other_assertion = other_provider.issue_assertion(other_auth, other_envelope)
+        other_auth = make_auth(request_id="req-other", is_one_time=False)
+        other_assertion = other_provider._mint(other_auth)
         with self.assertRaises(ValueError):
             self.verifier.grant_authorization(other_assertion)
         self.assertNotIn("req-other", self.verifier.auth_store)
@@ -248,18 +222,21 @@ class TestAuthVerifier(unittest.TestCase):
         # Setting '*' as the allowed path should literally mean a directory
         # named '*', since wildcard logic was removed. It cannot authorize
         # any other path.
-        auth = self.base_auth
-        auth.request_id = "req-999"
-        auth.allowed_paths = ["*"]
-        envelope = po_sign_envelope(auth)
-        assertion = self.provider.issue_assertion(auth, envelope)
+        auth = make_auth(request_id="req-999", allowed_paths=("*",))
+        assertion = self.provider._mint(auth)
         self.verifier.grant_authorization(assertion)
 
-        action = self.valid_action
-        action.request_id = "req-999"
-        action.target_paths = ["src/main.py"]
-        # Will fail because "*" is treated literally and does not match
-        # "src/main.py".
+        action = ActionRequest(
+            request_id="req-999",
+            task_id="task-456",
+            repository="owner/repo",
+            branch="feature/AGE-5",
+            base_sha="abcdef1",
+            target_sha="abcdef2",
+            target_paths=["src/main.py"],
+            operation="write_file",
+            action_type="commit",
+        )
         self.assertFalse(self.verifier.verify(action))
 
     def test_fail_path_traversal(self):
@@ -297,13 +274,15 @@ class TestAuthVerifier(unittest.TestCase):
         self.assertFalse(self.verifier.verify(self.valid_action))
 
     def test_fail_revoked(self):
-        self.base_auth.revoked = True
-        self.verifier.grant_authorization(self.valid_assertion)
+        auth = make_auth(revoked=True)
+        assertion = self.provider._mint(auth)
+        self.verifier.grant_authorization(assertion)
         self.assertFalse(self.verifier.verify(self.valid_action))
 
     def test_fail_expired(self):
-        self.base_auth.expiry = time.time() - 100
-        self.verifier.grant_authorization(self.valid_assertion)
+        auth = make_auth(expiry=time.time() - 100)
+        assertion = self.provider._mint(auth)
+        self.verifier.grant_authorization(assertion)
         self.assertFalse(self.verifier.verify(self.valid_action))
 
     def test_fail_repo_branch_sha_mismatch(self):
