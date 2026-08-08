@@ -284,7 +284,7 @@ class CdpSession:
             msg["sessionId"] = session
         await self._ws.send(json.dumps(msg))
         while True:
-            raw = await asyncio.wait_for(self._ws.recv(), timeout=30)
+            raw = await asyncio.wait_for(self._ws.recv(), timeout=90)
             data = json.loads(raw)
             if data.get("id") == mid:
                 return data
