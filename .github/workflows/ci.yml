@@ -49,3 +49,16 @@ jobs:
           else
             echo "tools/neutral-relay/neutral_relay.py not found. Skipping neutral_relay tests."
           fi
+
+      - name: Run agentops_runtime (AUTO/MANUAL loop) tests
+        run: |
+          if [ -d tools/agentops_runtime ]; then
+            if [ ! -f tools/agentops_runtime/tests/test_agentops_runtime.py ]; then
+              echo "agentops_runtime exists but test file tools/agentops_runtime/tests/test_agentops_runtime.py is missing! Failing."
+              exit 1
+            fi
+            python -m py_compile tools/agentops_runtime/*.py
+            python -m unittest discover -s tools/agentops_runtime/tests
+          else
+            echo "tools/agentops_runtime not found. Skipping agentops_runtime tests."
+          fi
