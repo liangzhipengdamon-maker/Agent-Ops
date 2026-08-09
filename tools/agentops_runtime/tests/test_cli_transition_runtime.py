@@ -101,6 +101,35 @@ class TestCliTransitionRuntimePath(unittest.TestCase):
         self.assertEqual(route_decision("MEDIUM", "PASS").route, "GPT_DECISION_REQUIRED")
 
 
+class TestReportCommand(unittest.TestCase):
+    """Guaranteed completion-report enforcer: `report` sends to GPT Web."""
+
+    def test_report_command_sends_and_confirms(self):
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch("agentops_runtime.__main__.read_pr_head",
+                            return_value="abcd1234"), \
+                 mock.patch("agentops_runtime.__main__.NeutralRelayNotifier") as MockNotif, \
+                 mock.patch("agentops_runtime.__main__.GptWebContextReadback") as MockRb:
+                notif_inst = MockNotif.return_value
+                notif_inst.send.return_value = DeliveryResult(
+                    correlation_id="rpt", delivered=False, exit_code=1,
+                    ack_captured=False, readback_confirmed=True,
+                    readback_checks={}, details="readback ok")
+                rb_inst = MockRb.return_value
+                rb_inst.verify.return_value = DeliveryResult(
+                    correlation_id="rpt", delivered=True, exit_code=0,
+                    ack_captured=False, readback_confirmed=True,
+                    readback_checks={}, details="ok")
+                rc = cli.main(["report", "--repo", "o/r", "--pr", "7",
+                               "--task-id", "AGE-X",
+                               "--deliverable-path", "docs/plans/X.md",
+                               "--deliverable-url", "https://g",
+                               "--output-dir", td])
+            self.assertEqual(rc, 0)
+            notif_inst.send.assert_called_once()
+            rb_inst.verify.assert_called_once()
+
+
 class TestDeliveryFailClosed(unittest.TestCase):
     """P0: fail-closed delivery — WAITING_PO_AUTH must NOT be recorded when
     the PO notification was not confirmed delivered."""

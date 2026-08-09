@@ -27,7 +27,9 @@ import sys
 
 from .transition_controller import (
     route_decision, query_live_pr_head, transition_with_po_notify,
+    build_completion_report, NeutralRelayNotifier, GptWebContextReadback,
 )
+from .github_poller import read_pr_head
 
 
 def _transition(risk, review, args, sections=None):
@@ -180,6 +182,16 @@ def main(argv=None):
     p_watch.add_argument("--state-dir", default=None)
     p_watch.add_argument("--interval", type=int, default=600)
 
+    p_rep = sub.add_parser("report", help="Send a concise Completion Report to GPT Web via Neutral Relay (guaranteed enforcer)")
+    p_rep.add_argument("--task-id", default=None)
+    p_rep.add_argument("--repo", default=None)
+    p_rep.add_argument("--pr", default=None)
+    p_rep.add_argument("--head", default=None)
+    p_rep.add_argument("--deliverable-path", default=None)
+    p_rep.add_argument("--deliverable-url", default=None)
+    p_rep.add_argument("--sections-json", default=None)
+    p_rep.add_argument("--output-dir", default=None)
+
     args = parser.parse_args(argv)
 
     if args.command == "risk-evaluate":
@@ -238,6 +250,41 @@ def main(argv=None):
         )
         ok = watcher.run_forever()
         return 0 if ok else 1
+
+    if args.command == "report":
+        # Guaranteed completion-report enforcer: send a concise Completion
+        # Report to GPT Web via the existing Neutral Relay for ANY task
+        # completion, independent of the watcher. This is the mechanism that
+        # ensures every task reports to GPT Web (not reliant on memory).
+        head = args.head or read_pr_head(args.repo, args.pr) or ""
+        sections = {}
+        if getattr(args, "sections_json", None):
+            with open(args.sections_json) as f:
+                sections = json.load(f)
+        report = build_completion_report(
+            task_id=args.task_id or "AGE-UNKNOWN",
+            repo=args.repo, pr=args.pr, head=head,
+            deliverable_path=args.deliverable_path or "",
+            deliverable_url=args.deliverable_url or "",
+            sections=sections,
+        )
+        out_dir = args.output_dir or "/tmp/agentops_runtime_report"
+        os.makedirs(out_dir, exist_ok=True)
+        notifier = NeutralRelayNotifier()
+        delivery = notifier.send(report, out_dir)
+        readback = GptWebContextReadback()
+        rb = readback.verify(report)
+        confirmed = delivery.ack_captured or rb.readback_confirmed
+        result = {
+            "report": report.correlation_id,
+            "delivered": confirmed,
+            "status": "DELIVERED" if confirmed else "DELIVERY_FAILED",
+            "head": head,
+            "pr": args.pr,
+            "readback_confirmed": rb.readback_confirmed,
+        }
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0
 
     parser.print_help()
     return 1
