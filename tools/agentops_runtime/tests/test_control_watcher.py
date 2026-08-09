@@ -55,12 +55,15 @@ class TestControlWatcher(unittest.TestCase):
             w.release()
 
     def test_routing_high_stays_waiting(self):
+        # HIGH + review PASS -> WAITING_PO_AUTH (PO decision on merge/deploy).
         w = self._watcher("/tmp")
         w.runtime = WatcherRuntimeState(
             task_id="AGE-T", repo="o/r", pr="7", head="abc", pid=1,
             started_at="x", last_github=None, last_linear=None,
             last_route="WAITING_PO_AUTH", last_notify_at=None)
-        with mock.patch.object(w, "_should_notify", return_value=False), \
+        with mock.patch.object(cw, "read_github_pr",
+                               return_value=mock.Mock(decision="PASS")), \
+             mock.patch.object(w, "_should_notify", return_value=False), \
              mock.patch.object(w, "_notify") as mock_notify:
             result = w._handle_change({
                 "github": {"state": "OPEN", "head": "abc"},
@@ -70,18 +73,42 @@ class TestControlWatcher(unittest.TestCase):
         mock_notify.assert_not_called()
 
     def test_routing_high_notifies_on_change(self):
+        # HIGH + review PASS -> WAITING_PO_AUTH; notify on change.
         w = self._watcher("/tmp")
         w.runtime = WatcherRuntimeState(
             task_id="AGE-T", repo="o/r", pr="7", head="abc", pid=1,
             started_at="x", last_github={"state": "OPEN", "head": "abc"},
             last_linear=None, last_route="WAITING_PO_AUTH", last_notify_at=None)
-        with mock.patch.object(w, "_should_notify", return_value=True), \
+        with mock.patch.object(cw, "read_github_pr",
+                               return_value=mock.Mock(decision="PASS")), \
+             mock.patch.object(w, "_should_notify", return_value=True), \
              mock.patch.object(w, "_notify") as mock_notify:
             result = w._handle_change({
                 "github": {"state": "OPEN", "head": "def"},
                 "linear": None,
             })
         self.assertEqual(result, "WAITING_PO_AUTH")
+        mock_notify.assert_called_once()
+
+    def test_routing_high_comment_routes_wait_review(self):
+        # HIGH + COMMENTED review -> WAIT_REVIEW (await reviewer opinion),
+        # NOT WAITING_PO_AUTH. This is the corrected semantics.
+        w = self._watcher("/tmp")
+        w.runtime = WatcherRuntimeState(
+            task_id="AGE-T", repo="o/r", pr="7", head="abc", pid=1,
+            started_at="x", last_github={"state": "OPEN", "head": "abc"},
+            last_linear=None, last_route="WAITING_PO_AUTH", last_notify_at=None)
+        with mock.patch.object(cw, "read_github_pr",
+                               return_value=mock.Mock(decision="COMMENTED")), \
+             mock.patch.object(w, "_should_notify", return_value=True), \
+             mock.patch.object(w, "_notify") as mock_notify, \
+             mock.patch.object(cw.github_poller, "read_pr_head",
+                               return_value="def"):
+            result = w._handle_change({
+                "github": {"state": "OPEN", "head": "def"},
+                "linear": None,
+            })
+        self.assertEqual(result, "WAIT_REVIEW")
         mock_notify.assert_called_once()
 
     def test_should_notify_compares_prev_snapshot(self):
@@ -209,8 +236,9 @@ class TestDynamicRisk(unittest.TestCase):
             self.assertEqual(wake["head"], "def")
 
     def test_high_review_change_emits_builder_wake(self):
-        # Even on a HIGH task, a new COMMENTED/CHANGES_REQUESTED review
-        # change must emit a Builder wake so the Builder can fix P0s.
+        # Even on a HIGH task, a new COMMENTED review change routes to
+        # WAIT_REVIEW (await reviewer opinion) and emits a Builder wake so
+        # the Builder can read the review and fix.
         with tempfile.TemporaryDirectory() as td:
             w = ControlWatcher(
                 task_id="AGE-T", repo="o/r", pr="7", head="abc",
@@ -231,7 +259,7 @@ class TestDynamicRisk(unittest.TestCase):
                     "github": {"state": "OPEN", "head": "def"},
                     "linear": {"state_name": "In Review", "state_type": "started"},
                 })
-            self.assertEqual(result, "WAITING_PO_AUTH")
+            self.assertEqual(result, "WAIT_REVIEW")
             wake_path = os.path.join(td, "wake_AGE-T.json")
             self.assertTrue(os.path.exists(wake_path))
             with open(wake_path) as f:

@@ -59,6 +59,24 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _waiting_text(route: str) -> str:
+    """Route-aware waiting description. A non-PASS review is NEVER reported
+    as 'awaiting PO merge authorization'."""
+    if route == "WAITING_PO_AUTH":
+        return "WAITING_PO_AUTH: review PASS on high risk; awaiting PO decision (merge/deploy)."
+    if route == "FOLLOW_UP_REQUIRED":
+        return "FOLLOW_UP_REQUIRED: review asked for changes; Builder fixing, then re-review."
+    if route == "WAIT_REVIEW":
+        return "WAIT_REVIEW: awaiting reviewer opinion (not yet PASS)."
+    if route == "GPT_DECISION_REQUIRED":
+        return "GPT_DECISION_REQUIRED: awaiting GPT Web decision on medium risk."
+    if route == "AUTO_CONTINUE":
+        return "AUTO_CONTINUE: low risk, resuming execution."
+    if route == "DELIVERY_FAILED":
+        return "DELIVERY_FAILED: PO notification not confirmed; not in WAITING_PO_AUTH."
+    return f"awaiting next step ({route or 'unknown'})"
+
+
 @dataclasses.dataclass
 class WatcherRuntimeState:
     task_id: str
@@ -227,15 +245,33 @@ class ControlWatcher:
         if route == "AUTO_CONTINUE":
             print(f"WATCHER_ROUTE: AUTO_CONTINUE (task {self.task_id}, risk={risk})")
             self._emit_builder_wake("resume", route, review_decision)
-            self._notify("resume")
+            self._notify("resume", route)
             return "AUTO_CONTINUE"
 
         if route == "GPT_DECISION_REQUIRED":
             print(f"WATCHER_ROUTE: GPT_DECISION_REQUIRED (task {self.task_id}, "
                   f"risk={risk})")
             self._emit_builder_wake("gpt_decision_follow_up", route, review_decision)
-            self._notify("gpt_decision")
+            self._notify("gpt_decision", route)
             return "GPT_DECISION_REQUIRED"
+
+        if route == "FOLLOW_UP_REQUIRED":
+            # Review said CHANGES_REQUESTED (even on HIGH): the Builder must
+            # fix, then the task re-enters the review loop. NOT awaiting merge.
+            print(f"WATCHER_ROUTE: FOLLOW_UP_REQUIRED (task {self.task_id}, "
+                  f"risk={risk}, review={review_decision})")
+            self._emit_builder_wake("review_follow_up", route, review_decision)
+            self._notify("review_follow_up", route)
+            return "FOLLOW_UP_REQUIRED"
+
+        if route == "WAIT_REVIEW":
+            # Review opinion is not yet PASS (COMMENTED/BLOCKED/INCOMPLETE):
+            # await the reviewer opinion, then the Builder acts.
+            print(f"WATCHER_ROUTE: WAIT_REVIEW (task {self.task_id}, "
+                  f"risk={risk}, review={review_decision})")
+            self._emit_builder_wake("await_review_opinion", route, review_decision)
+            self._notify("await_review_opinion", route)
+            return "WAIT_REVIEW"
 
         if route == "WAITING_PO_AUTH":
             # HIGH: stay; notify GPT/PO only when new info actually changed
@@ -248,7 +284,7 @@ class ControlWatcher:
                 # HIGH task means the Builder must read GitHub and fix.
                 self._emit_builder_wake(
                     "high_state_change", route, review_decision)
-                self._notify("high_state_change")
+                self._notify("high_state_change", route)
             return "WAITING_PO_AUTH"
 
         print(f"WATCHER_ROUTE: {route} (task {self.task_id}, "
@@ -288,13 +324,16 @@ class ControlWatcher:
             json.dump(wake, f, indent=2, ensure_ascii=False)
         print(f"WATCHER_BUILDER_WAKE: {wake_path}")
 
-    def _notify(self, reason: str):
+    def _notify(self, reason: str, route: str = ""):
         if not self.deliverable_path:
             return
         # Bind the notify to the CURRENT live PR HEAD, not the launch-time
         # head: the PR may have advanced while the task sat at
         # WAITING_PO_AUTH. This keeps the Completion Report exact.
         live_head = github_poller.read_pr_head(self.repo, self.pr) or self.head
+        # Waiting text is route-aware, not hardcoded. A non-PASS review must
+        # NOT be reported as "awaiting PO merge authorization".
+        waiting_text = _waiting_text(route or reason)
         sections = {
             "Task": f"{self.task_id}",
             "Status": f"Control Watcher detected a change and routed: {reason}",
@@ -307,7 +346,7 @@ class ControlWatcher:
             "Deliverable": f"{self.deliverable_path}",
             "Deliverable URL": self.deliverable_url,
             "Boundaries": "No merge, no deploy, no PO bypass.",
-            "Waiting": "WAITING_PO_AUTH (HIGH) or next route.",
+            "Waiting": waiting_text,
         }
         report = build_completion_report(
             task_id=self.task_id, repo=self.repo, pr=self.pr, head=live_head,

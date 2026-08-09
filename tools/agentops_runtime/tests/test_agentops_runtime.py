@@ -149,6 +149,20 @@ class TestTransitionController(unittest.TestCase):
         o = route_decision("HIGH", "PASS")
         self.assertEqual(o.route, "WAITING_PO_AUTH")
 
+    def test_high_changes_requested_routes_follow_up(self):
+        # P0: a HIGH task with CHANGES_REQUESTED must route to FOLLOW_UP
+        # (fix then re-review), NOT WAITING_PO_AUTH / "awaiting merge".
+        o = route_decision("HIGH", "CHANGES_REQUESTED")
+        self.assertEqual(o.route, "FOLLOW_UP_REQUIRED")
+
+    def test_high_comment_routes_wait_review(self):
+        # P0: a HIGH task with COMMENTED/INCOMPLETE review must WAIT_REVIEW
+        # (await reviewer opinion), NOT WAITING_PO_AUTH.
+        o = route_decision("HIGH", "COMMENTED")
+        self.assertEqual(o.route, "WAIT_REVIEW")
+        o2 = route_decision("HIGH", "INCOMPLETE")
+        self.assertEqual(o2.route, "WAIT_REVIEW")
+
     def test_medium_routes_gpt(self):
         o = route_decision("MEDIUM", "PASS")
         self.assertEqual(o.route, "GPT_DECISION_REQUIRED")

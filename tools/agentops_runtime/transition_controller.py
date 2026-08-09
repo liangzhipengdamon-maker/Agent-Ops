@@ -67,11 +67,30 @@ class TransitionOutcome:
 
 
 def route_decision(risk_level: str, review_decision: str) -> TransitionOutcome:
-    """Pure routing function (no side effects)."""
+    """Pure routing function (no side effects).
+
+    HIGH risk does NOT automatically mean "await PO merge auth". It means
+    no auto-merge/deploy. The review decision still governs the loop:
+
+      HIGH + PASS             -> WAITING_PO_AUTH (PO decision on merge/deploy)
+      HIGH + CHANGES_REQUESTED -> FOLLOW_UP_REQUIRED (fix then re-review)
+      HIGH + COMMENTED/BLOCKED/INCOMPLETE -> WAIT_REVIEW (await review opinion)
+
+    A non-PASS review on a HIGH task must return to the review loop, NOT be
+    reported as "awaiting merge authorization".
+    """
     if risk_level == "HIGH":
+        if review_decision == "PASS":
+            return TransitionOutcome(
+                route="WAITING_PO_AUTH", risk=risk_level, review=review_decision,
+                reason="high_risk_review_pass_requires_po_authorization")
+        if review_decision == "CHANGES_REQUESTED":
+            return TransitionOutcome(
+                route="FOLLOW_UP_REQUIRED", risk=risk_level, review=review_decision,
+                reason="high_risk_review_changes_requested")
         return TransitionOutcome(
-            route="WAITING_PO_AUTH", risk=risk_level, review=review_decision,
-            reason="high_risk_requires_po_authorization")
+            route="WAIT_REVIEW", risk=risk_level, review=review_decision,
+            reason=f"high_risk_await_review_opinion_{review_decision}")
     if risk_level == "MEDIUM":
         return TransitionOutcome(
             route="GPT_DECISION_REQUIRED", risk=risk_level, review=review_decision,
