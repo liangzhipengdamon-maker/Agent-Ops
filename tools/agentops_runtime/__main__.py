@@ -14,6 +14,9 @@ Commands:
   po-decision --repo R --pr N --head H --decision APPROVE|REJECT|CHANGES
              Write a PO decision to the bridge so a WAITING_PO_AUTH loop
              resumes at the named MANUAL checkpoint (P0-2).
+  complete   --repo R --pr N --head H
+             Write accepted-completion evidence to the bridge (Builder writes
+             only when acceptance is satisfied; drives COMPLETE).
 
 Durable state is LoopX's job; GPT Web transport is the existing Neutral
 Relay's job. This is only the AUTO/MANUAL control glue.
@@ -41,6 +44,23 @@ def cmd_po_decision(args):
     with open(os.path.join(bd, "po_decision.json"), "w") as f:
         json.dump(decision, f, indent=2)
     print(json.dumps({"written": True, "decision": decision}, indent=2))
+    return 0
+
+
+def cmd_complete(args):
+    """Write accepted-completion evidence to the bridge (R5-P0-1). The
+    Builder writes this ONLY when the task's acceptance criteria are
+    satisfied; runtime_loop._accepted_completion requires the exact PR+HEAD
+    binding before producing COMPLETE. Bare PASS never becomes COMPLETE."""
+    import os
+    from .runtime_loop import _bridge_dir
+    bd = _bridge_dir()
+    os.makedirs(bd, exist_ok=True)
+    completion = {"repo": args.repo, "pr": str(args.pr), "head": args.head,
+                  "completion": "COMPLETE"}
+    with open(os.path.join(bd, "completion.json"), "w") as f:
+        json.dump(completion, f, indent=2)
+    print(json.dumps({"written": True, "completion": completion}, indent=2))
     return 0
 
 
@@ -99,6 +119,11 @@ def main(argv=None):
     p.add_argument("--decision", required=True,
                    choices=["APPROVE", "REJECT", "CHANGES"])
 
+    p = sub.add_parser("complete")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--pr", required=True)
+    p.add_argument("--head", required=True)
+
     args = parser.parse_args(argv)
 
     if args.command in ("run-auto", "run-manual"):
@@ -109,6 +134,8 @@ def main(argv=None):
         return cmd_report(args)
     if args.command == "po-decision":
         return cmd_po_decision(args)
+    if args.command == "complete":
+        return cmd_complete(args)
     parser.print_help()
     return 1
 

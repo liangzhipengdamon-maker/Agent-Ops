@@ -21,7 +21,7 @@ import time
 from typing import Optional
 
 from . import linear_adapter
-from .task_intake import spec_from_linear
+from .task_intake import spec_from_linear, evaluate_checkpoint
 from .review_intake import read_github_pr, read_pr_head
 from . import relay_client
 
@@ -109,16 +109,44 @@ def _po_decision(task_id: str, repo: str, pr: str, head: str,
     return None
 
 
-def _checkpoint_reached(spec, review, repo, pr, head, reviews) -> bool:
+def _checkpoint_reached(spec, review) -> bool:
     """P0-2: MANUAL pauses only at the task's NAMED checkpoint, evaluated as
-    a real condition. The checkpoint is a named PO gate in the task. It is
-    reached when the current-HEAD review is PASS (the in-scope work is done
-    up to that gate). A missing/unevaluable checkpoint does NOT pause."""
+    a real condition against an explicit runtime stage. The checkpoint text
+    must map to a supported stage (e.g. REVIEW_PASS) AND the current-HEAD
+    review must be PASS. Unevaluable checkpoint text fails closed as BLOCKED
+    (caller), never silently treated as reached."""
     if not spec.checkpoint:
         return False
-    if review.decision != "PASS":
+    if evaluate_checkpoint(spec.checkpoint) != "REVIEW_PASS":
         return False
-    return True
+    return review.decision == "PASS"
+
+
+def _checkpoint_evaluable(spec) -> bool:
+    """True when the named checkpoint maps to a supported runtime stage."""
+    return evaluate_checkpoint(spec.checkpoint) is not None
+
+
+def _accepted_completion(repo: str, pr: str, head: str) -> bool:
+    """Accepted-completion evidence from the bridge: a completion.json bound
+    to the exact PR+HEAD (written by the Builder when acceptance is
+    satisfied) or a status.json in state DONE/COMPLETE for this exact
+    PR+HEAD. P0-1: PASS/APPROVE produces COMPLETE only from evidence, not
+    from a bare verdict."""
+    bd = _bridge_dir()
+    for fname, key in (("completion.json", "completion"),
+                       ("status.json", "state")):
+        p = os.path.join(bd, fname)
+        try:
+            with open(p) as f:
+                d = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (d.get("repo") == repo and str(d.get("pr")) == str(pr)
+                and d.get("head") == head
+                and str(d.get(key, "")).upper() in ("DONE", "COMPLETE")):
+            return True
+    return False
 
 
 def decide(task_id: str, repo: str, pr: str) -> dict:
@@ -178,12 +206,26 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
             task_id, repo, pr, head, "BUILDER_FIXING", review.findings)
     elif review.decision == "PASS":
         if spec.mode == "MANUAL":
-            if _checkpoint_reached(spec, review, repo, pr, head, reviews):
+            if not _checkpoint_evaluable(spec):
+                # P0-2: unevaluable checkpoint -> fail closed, do not pause.
+                outcome["phase"] = "BLOCKED"
+                outcome["review_decision"] = "CHECKPOINT_UNEVALUABLE"
+                outcome["decision_request"] = (
+                    f"MANUAL checkpoint '{spec.checkpoint}' cannot be "
+                    "evaluated; name a supported stage (e.g. review "
+                    "approval)")
+            elif _checkpoint_reached(spec, review):
                 outcome["checkpoint_reached"] = True
                 po = _po_decision(task_id, repo, pr, head, reviews)
                 if po == "APPROVE":
-                    outcome["phase"] = "PASSED"   # resume after PO decision
-                    outcome["po_decision"] = "APPROVE"
+                    # P0-1: resume and wake the Builder to continue.
+                    if _accepted_completion(repo, pr, head):
+                        outcome["phase"] = "COMPLETE"
+                    else:
+                        outcome["phase"] = "PASSED"
+                        outcome["po_decision"] = "APPROVE"
+                        outcome["builder"] = builder_handoff(
+                            task_id, repo, pr, head, "CONTINUE", [])
                 elif po in ("REJECT", "CHANGES", "CHANGES_REQUESTED"):
                     outcome["phase"] = "FIX"
                     outcome["po_decision"] = po
@@ -195,8 +237,17 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
                     outcome["phase"] = "WAITING_PO_AUTH"
             else:
                 outcome["phase"] = "PASSED"  # checkpoint not reached; continue
+                outcome["builder"] = builder_handoff(
+                    task_id, repo, pr, head, "CONTINUE", [])
         else:
-            outcome["phase"] = "PASSED"   # AUTO: continue until acceptance
+            # P0-1: AUTO PASS wakes the Builder to continue in scope; accepted
+            # completion is derived from evidence, not a bare PASS.
+            if _accepted_completion(repo, pr, head):
+                outcome["phase"] = "COMPLETE"
+            else:
+                outcome["phase"] = "PASSED"
+                outcome["builder"] = builder_handoff(
+                    task_id, repo, pr, head, "CONTINUE", [])
 
     outcome["loopx"] = _loopx_refresh(task_id, outcome["phase"], pr)
     return outcome

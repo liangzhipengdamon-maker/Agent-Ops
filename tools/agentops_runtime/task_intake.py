@@ -51,6 +51,30 @@ def extract_checkpoint(description: str) -> Optional[str]:
     return None
 
 
+# Explicit runtime stages a MANUAL checkpoint can name. A checkpoint maps to
+# exactly one stage; any other text is unevaluable and must fail closed.
+_CHECKPOINT_STAGES = {
+    "REVIEW_PASS": ("review", "approval", "approve", "sign-off", "signoff",
+                    "acceptance", "final approval", "po approval",
+                    "po gate", "gate"),
+    "DEPLOY": ("deploy", "deployment", "release", "go-live", "golive"),
+}
+
+
+def evaluate_checkpoint(checkpoint: Optional[str]) -> Optional[str]:
+    """Map a named MANUAL checkpoint to an explicit runtime stage token
+    (REVIEW_PASS | DEPLOY) or None if unevaluable. R5-P0-2: the checkpoint
+    text must be matched to a real stage; unsupported text is not silently
+    treated as reached."""
+    if not checkpoint:
+        return None
+    text = checkpoint.strip().lower()
+    for stage, keys in _CHECKPOINT_STAGES.items():
+        if any(k in text for k in keys):
+            return stage
+    return None
+
+
 def parse_acceptance_criteria(description: str) -> list:
     if not description:
         return []

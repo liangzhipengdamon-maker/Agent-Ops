@@ -235,7 +235,9 @@ class TestRuntimeLoopDecide(unittest.TestCase):
                             "COMMENTED", "PASS", "o/r", 7, "abc", [])), \
              mock.patch("agentops_runtime.runtime_loop.read_pr_head",
                         return_value="abc"), \
-             self._reviews(), \
+             self._reviews(), self._bridge(), self._builder(), \
+             mock.patch("agentops_runtime.runtime_loop._accepted_completion",
+                        return_value=False), \
              mock.patch("agentops_runtime.runtime_loop._loopx_refresh"):
             out = decide("AGE-X", "o/r", "7")
         self.assertEqual(out["phase"], "PASSED")
@@ -259,7 +261,8 @@ class TestRuntimeLoopDecide(unittest.TestCase):
         self.assertTrue(out["checkpoint_reached"])
 
     def test_manual_resume_after_po_approve(self):
-        # P0-2: a PO APPROVE decision at the exact HEAD resumes the loop.
+        # P0-2/R5-P0-1: a PO APPROVE decision at the exact HEAD resumes the
+        # loop and wakes the Builder to continue (no completion evidence yet).
         with self._open_pr(), \
              mock.patch("agentops_runtime.runtime_loop.spec_from_linear",
                         return_value=TaskSpec("AGE-X", "MANUAL",
@@ -269,16 +272,57 @@ class TestRuntimeLoopDecide(unittest.TestCase):
                             "COMMENTED", "PASS", "o/r", 7, "abc", [])), \
              mock.patch("agentops_runtime.runtime_loop.read_pr_head",
                         return_value="abc"), \
-             self._reviews(), self._bridge(), \
+             self._reviews(), self._bridge(), self._builder(), \
              mock.patch("agentops_runtime.runtime_loop._po_decision",
                         return_value="APPROVE"), \
+             mock.patch("agentops_runtime.runtime_loop._accepted_completion",
+                        return_value=False), \
              mock.patch("agentops_runtime.runtime_loop._loopx_refresh"):
             out = decide("AGE-X", "o/r", "7")
         self.assertEqual(out["phase"], "PASSED")
         self.assertEqual(out["po_decision"], "APPROVE")
+        self.assertEqual(out["builder"]["ok"], True)
 
-    def test_manual_no_checkpoint_does_not_pause(self):
-        # MANUAL without a named checkpoint must not pause.
+    def test_auto_pass_complete_from_evidence(self):
+        # R5-P0-1: AUTO PASS produces COMPLETE only from accepted-completion
+        # evidence, not from a bare verdict.
+        with self._open_pr(), \
+             mock.patch("agentops_runtime.runtime_loop.spec_from_linear",
+                        return_value=TaskSpec("AGE-X", "AUTO", None, [])), \
+             mock.patch("agentops_runtime.runtime_loop.read_github_pr",
+                        return_value=ReviewOutcome(
+                            "COMMENTED", "PASS", "o/r", 7, "abc", [])), \
+             mock.patch("agentops_runtime.runtime_loop.read_pr_head",
+                        return_value="abc"), \
+             self._reviews(), \
+             mock.patch("agentops_runtime.runtime_loop._accepted_completion",
+                        return_value=True), \
+             mock.patch("agentops_runtime.runtime_loop._loopx_refresh"):
+            out = decide("AGE-X", "o/r", "7")
+        self.assertEqual(out["phase"], "COMPLETE")
+
+    def test_auto_pass_wakes_builder_to_continue(self):
+        # R5-P0-1: AUTO PASS without completion evidence wakes the Builder
+        # (CONTINUE) instead of being terminal.
+        with self._open_pr(), \
+             mock.patch("agentops_runtime.runtime_loop.spec_from_linear",
+                        return_value=TaskSpec("AGE-X", "AUTO", None, [])), \
+             mock.patch("agentops_runtime.runtime_loop.read_github_pr",
+                        return_value=ReviewOutcome(
+                            "COMMENTED", "PASS", "o/r", 7, "abc", [])), \
+             mock.patch("agentops_runtime.runtime_loop.read_pr_head",
+                        return_value="abc"), \
+             self._reviews(), self._bridge(), self._builder(), \
+             mock.patch("agentops_runtime.runtime_loop._accepted_completion",
+                        return_value=False), \
+             mock.patch("agentops_runtime.runtime_loop._loopx_refresh"):
+            out = decide("AGE-X", "o/r", "7")
+        self.assertEqual(out["phase"], "PASSED")
+        self.assertEqual(out["builder"]["ok"], True)
+
+    def test_manual_no_checkpoint_fails_closed(self):
+        # P0-2: a MANUAL task without an evaluable named checkpoint is
+        # malformed -> BLOCKED/decision request, not silently PASSED.
         with self._open_pr(), \
              mock.patch("agentops_runtime.runtime_loop.spec_from_linear",
                         return_value=TaskSpec("AGE-X", "MANUAL", None, [])), \
@@ -290,7 +334,25 @@ class TestRuntimeLoopDecide(unittest.TestCase):
              self._reviews(), \
              mock.patch("agentops_runtime.runtime_loop._loopx_refresh"):
             out = decide("AGE-X", "o/r", "7")
-        self.assertEqual(out["phase"], "PASSED")
+        self.assertEqual(out["phase"], "BLOCKED")
+        self.assertEqual(out["review_decision"], "CHECKPOINT_UNEVALUABLE")
+
+    def test_manual_unevaluable_checkpoint_fails_closed(self):
+        # P0-2: a named checkpoint that does not map to a supported runtime
+        # stage must not silently pause at PASS.
+        with self._open_pr(), \
+             mock.patch("agentops_runtime.runtime_loop.spec_from_linear",
+                        return_value=TaskSpec("AGE-X", "MANUAL",
+                                              "after tax filing", [])), \
+             mock.patch("agentops_runtime.runtime_loop.read_github_pr",
+                        return_value=ReviewOutcome(
+                            "COMMENTED", "PASS", "o/r", 7, "abc", [])), \
+             mock.patch("agentops_runtime.runtime_loop.read_pr_head",
+                        return_value="abc"), \
+             self._reviews(), \
+             mock.patch("agentops_runtime.runtime_loop._loopx_refresh"):
+            out = decide("AGE-X", "o/r", "7")
+        self.assertEqual(out["phase"], "BLOCKED")
 
     def test_unreadable_remote_blocked(self):
         with mock.patch("agentops_runtime.runtime_loop._pr_state",
@@ -404,6 +466,26 @@ class TestRelayClientACK(unittest.TestCase):
             res = self._send(payload, td, output)
         self.assertFalse(res["delivered"])
 
+    def test_ack_report_id_alias_not_accepted(self):
+        # R5-P0-3: REPORT_ID is NOT an alias for REVIEW_REQUEST_ID.
+        payload = ("REVIEW_REQUEST_ID: req-1\nREPO: o/r\nPR: 7\nHEAD: h1\n"
+                   "REQUEST: status_report\n")
+        output = ("REPORT_ID: req-1\nREPO: o/r\nPR: 7\nHEAD: h1\n"
+                  "ACK: status_report_received\n")
+        with tempfile.TemporaryDirectory() as td:
+            res = self._send(payload, td, output)
+        self.assertFalse(res["delivered"])
+
+    def test_ack_missing_field_not_delivered(self):
+        # R5-P0-3: missing one canonical field -> not delivered.
+        payload = ("REVIEW_REQUEST_ID: req-1\nREPO: o/r\nPR: 7\nHEAD: h1\n"
+                   "REQUEST: status_report\n")
+        output = ("REVIEW_REQUEST_ID: req-1\nREPO: o/r\nPR: 7\n"
+                  "ACK: status_report_received\n")
+        with tempfile.TemporaryDirectory() as td:
+            res = self._send(payload, td, output)
+        self.assertFalse(res["delivered"])
+
 
 class TestCLIEntrypoint(unittest.TestCase):
     def test_run_auto_mode_missing_surfaces_decision(self):
@@ -450,6 +532,19 @@ class TestCLIEntrypoint(unittest.TestCase):
                 d = _json.load(f)
         self.assertEqual(rc, 0)
         self.assertEqual(d["decision"], "APPROVE")
+        self.assertEqual(d["head"], "abc")
+
+    def test_complete_writes_bridge_file(self):
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch("agentops_runtime.runtime_loop._bridge_dir",
+                        return_value=td):
+            rc = cli.main(["complete", "--repo", "o/r", "--pr", "7",
+                           "--head", "abc"])
+            with open(os.path.join(td, "completion.json")) as f:
+                import json as _json
+                d = _json.load(f)
+        self.assertEqual(rc, 0)
+        self.assertEqual(d["completion"], "COMPLETE")
         self.assertEqual(d["head"], "abc")
 
 
