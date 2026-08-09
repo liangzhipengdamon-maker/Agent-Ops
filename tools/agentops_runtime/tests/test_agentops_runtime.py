@@ -314,10 +314,49 @@ class TestRuntimeLoopDecide(unittest.TestCase):
              self._reviews(), self._bridge(), \
              mock.patch("agentops_runtime.runtime_loop._po_decision",
                         return_value=None), \
+             mock.patch("agentops_runtime.runtime_loop._gate_status_report",
+                        return_value={"sent": True, "delivered": True,
+                                      "duplicate": False}), \
              mock.patch("agentops_runtime.runtime_loop._loopx_refresh"):
             out = decide("AGE-X", "o/r", "7")
         self.assertEqual(out["phase"], "WAITING_PO_AUTH")
         self.assertTrue(out["checkpoint_reached"])
+        self.assertTrue(out["gate_report"]["delivered"])
+
+    def test_gate_status_report_idempotent(self):
+        # MANUAL E2E: entering WAITING_PO_AUTH auto-sends ONE gate status
+        # report via the existing Neutral Relay, idempotent per exact PR+HEAD.
+        from agentops_runtime.runtime_loop import _gate_status_report
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch("agentops_runtime.runtime_loop._bridge_dir",
+                        return_value=td), \
+             mock.patch("agentops_runtime.runtime_loop.relay_client"
+                        ".send_status_report",
+                        return_value={"delivered": True,
+                                      "correlation_id": "c1"}):
+            first = _gate_status_report("AGE-X", "o/r", "7", "abc")
+            second = _gate_status_report("AGE-X", "o/r", "7", "abc")
+        self.assertTrue(first["delivered"])
+        self.assertTrue(second["duplicate"])
+        self.assertEqual(second["correlation_id"], "c1")
+
+    def test_gate_status_report_not_sent_for_other_head(self):
+        # A gate report bound to a different exact PR+HEAD must send anew.
+        from agentops_runtime.runtime_loop import _gate_status_report
+        sent = []
+        def _fake_send(payload, _out):
+            sent.append(1)
+            return {"delivered": True, "correlation_id": "c2"}
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch("agentops_runtime.runtime_loop._bridge_dir",
+                        return_value=td), \
+             mock.patch("agentops_runtime.runtime_loop.relay_client"
+                        ".send_status_report", side_effect=_fake_send):
+            first = _gate_status_report("AGE-X", "o/r", "7", "abc")
+            other = _gate_status_report("AGE-X", "o/r", "7", "other")
+        self.assertFalse(first["duplicate"])
+        self.assertFalse(other["duplicate"])
+        self.assertEqual(len(sent), 2)
 
     def test_manual_resume_after_po_approve(self):
         # P0-2/R5-P0-1: a PO APPROVE decision at the exact HEAD resumes the

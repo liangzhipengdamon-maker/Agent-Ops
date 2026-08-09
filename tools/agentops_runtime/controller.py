@@ -56,6 +56,11 @@ class ControlWatcher:
                 if builder.get("ok") is False:
                     print(f"WATCHER_BUILDER_HANDOFF_FAILED: "
                           f"{builder.get('detail')}")
+                gate = outcome.get("gate_report") or {}
+                if gate.get("sent") and not gate.get("delivered"):
+                    print(f"WATCHER_GATE_REPORT_FAILED: "
+                          f"delivered={gate.get('delivered')} "
+                          f"corr={gate.get('correlation_id')}")
                 if phase in ("COMPLETE", "TERMINAL"):
                     print(f"WATCHER_EXIT: {phase}")
                     break

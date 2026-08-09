@@ -77,6 +77,47 @@ def _loopx_refresh(task_id: str, phase: str, pr: str) -> dict:
         return {"ok": False, "detail": f"loopx unavailable: {e}"}
 
 
+def _gate_status_report(task_id: str, repo: str, pr: str, head: str) -> dict:
+    """Auto-send ONE Gate status_report via the existing Neutral Relay when
+    the loop enters WAITING_PO_AUTH (MANUAL checkpoint reached). Idempotent
+    per exact PR+HEAD via a bridge `gate_report.json` marker. Fail-closed:
+    `delivered` is true only when the exact 5-line ACK envelope binds the
+    same REVIEW_REQUEST_ID/REPO/PR/HEAD. Uses the existing relay_client;
+    never a manual copy/paste bypass."""
+    marker = os.path.join(_bridge_dir(), "gate_report.json")
+    try:
+        with open(marker) as f:
+            d = json.load(f)
+        if (d.get("repo") == repo and str(d.get("pr")) == str(pr)
+                and d.get("head") == head and d.get("sent")):
+            return {"sent": True, "delivered": d.get("delivered", False),
+                    "duplicate": True, "correlation_id": d.get("correlation_id")}
+    except (OSError, json.JSONDecodeError):
+        pass
+    import uuid
+    req_id = f"GATE_{uuid.uuid4().hex[:12]}"
+    payload = (f"REVIEW_REQUEST_ID: {req_id}\n"
+               f"REPO: {repo}\n"
+               f"PR: {pr}\n"
+               f"HEAD: {head}\n"
+               f"REQUEST: status_report\n"
+               f"STATE: WAITING_PO_AUTH\n"
+               f"SUMMARY: MANUAL checkpoint reached; waiting for PO decision\n"
+               f"UNAUTHORIZED_ACTIONS: NONE\n")
+    out = relay_client.send_status_report(payload, "/tmp/agentops_runtime_report")
+    try:
+        os.makedirs(_bridge_dir(), exist_ok=True)
+        with open(marker, "w") as f:
+            json.dump({"repo": repo, "pr": str(pr), "head": head,
+                       "sent": True, "delivered": out.get("delivered", False),
+                       "correlation_id": out.get("correlation_id")}, f)
+    except OSError:
+        pass
+    return {"sent": True, "delivered": out.get("delivered", False),
+            "duplicate": False,
+            "correlation_id": out.get("correlation_id")}
+
+
 def _po_decision(task_id: str, repo: str, pr: str, head: str,
                  reviews: list) -> Optional[str]:
     """PO decision intake at a MANUAL checkpoint. The decision is a formal
@@ -241,6 +282,8 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
                          f"{spec.checkpoint}"])
                 else:
                     outcome["phase"] = "WAITING_PO_AUTH"
+                    outcome["gate_report"] = _gate_status_report(
+                        task_id, repo, pr, head)
             else:
                 outcome["phase"] = "PASSED"  # checkpoint not reached; continue
                 outcome["builder"] = builder_handoff(
