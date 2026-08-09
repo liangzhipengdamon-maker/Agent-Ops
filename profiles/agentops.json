@@ -24,6 +24,7 @@
     "capabilities": ["independent_review", "status_report"],
     "required_gates": ["WAITING_PO_AUTH", "CHANGES_REQUESTED", "BLOCKED", "NEEDS_OWNER_DECISION"],
     "protected_project": true,
-    "cross_project_allowed": false
+    "cross_project_allowed": false,
+    "trusted_reviewers": ["liangzhipengdamon-maker"]
   }
 }

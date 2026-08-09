@@ -58,10 +58,11 @@ def send_status_report(payload: str, output_dir: str,
         return {"correlation_id": corr, "delivered": False,
                 "exit_code": exit_code, "detail": detail}
 
-    # P0-3: the retained status_report ACK contract is the exact five-line
-    # envelope `REVIEW_REQUEST_ID / REPO / PR / HEAD / ACK`. No aliases. The
-    # ACK must bind the SAME REVIEW_REQUEST_ID / REPO / PR / HEAD that was
-    # sent and carry the exact `ACK: status_report_received` marker.
+    # P0-3/R6-P1: the retained status_report ACK contract is the exact
+    # five-line envelope `REVIEW_REQUEST_ID / REPO / PR / HEAD / ACK`. No
+    # aliases, no extra lines. Parse the output; delivery is confirmed only
+    # when the file contains EXACTLY those five lines, the canonical fields
+    # match the sent payload, and the ACK is exactly `status_report_received`.
     ack = False
     detail = "no ack captured"
     if os.path.exists(out):
@@ -73,18 +74,18 @@ def send_status_report(payload: str, output_dir: str,
             "PR": _field(payload, "PR"),
             "HEAD": _field(payload, "HEAD"),
         }
-        got = {}
-        for line in content.splitlines():
-            line = line.strip()
-            if line.startswith("ACK:"):
-                got["_ACK"] = line.split("ACK:", 1)[1].strip()
-                continue
-            for key in sent:
-                if line.startswith(key + ":"):
-                    got[key] = line.split(":", 1)[1].strip()
-        if got.get("_ACK") == "status_report_received" and all(
-                sent.get(k) and sent[k] == got.get(k) for k in sent):
-            ack = True
-            detail = "relay ack captured with exact binding"
+        lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+        if len(lines) == 5:
+            got = {}
+            for line in lines:
+                key, _, value = line.partition(":")
+                got[key.strip()] = value.strip()
+            if (list(got.keys()) == ["REVIEW_REQUEST_ID", "REPO", "PR",
+                                     "HEAD", "ACK"]
+                    and got.get("ACK") == "status_report_received"
+                    and all(sent.get(k) and sent[k] == got.get(k)
+                            for k in sent)):
+                ack = True
+                detail = "relay ack captured with exact binding"
     return {"correlation_id": corr, "delivered": ack,
             "exit_code": exit_code, "detail": detail}

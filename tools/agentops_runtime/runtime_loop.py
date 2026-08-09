@@ -21,6 +21,7 @@ import time
 from typing import Optional
 
 from . import linear_adapter
+from . import review_intake
 from .task_intake import spec_from_linear, evaluate_checkpoint
 from .review_intake import read_github_pr, read_pr_head
 from . import relay_client
@@ -79,13 +80,18 @@ def _loopx_refresh(task_id: str, phase: str, pr: str) -> dict:
 def _po_decision(task_id: str, repo: str, pr: str, head: str,
                  reviews: list) -> Optional[str]:
     """PO decision intake at a MANUAL checkpoint. The decision is a formal
-    review at the exact current HEAD carrying `PO_DECISION: <APPROVE|REJECT|CHANGES>`
-    or a `po_decision.json` bridge file. Returns None when no decision for
-    this exact PR+HEAD exists (loop stays in WAITING_PO_AUTH)."""
+    review at the exact current HEAD from a TRUSTED author carrying
+    `PO_DECISION: <APPROVE|REJECT|CHANGES>` or a `po_decision.json` bridge
+    file. Returns None when no decision for this exact PR+HEAD exists (loop
+    stays in WAITING_PO_AUTH). R6-P0-1: untrusted author -> ignored."""
     for r in reviews or []:
         body = r.get("body") or ""
         if "PO_DECISION:" not in body:
             continue
+        login = ((r.get("author") or {}).get("login") or "").strip()
+        trusted = login and login in review_intake.trusted_reviewers()
+        if not trusted:
+            continue  # untrusted identity cannot inject a PO decision
         m = re.search(r"HEAD:\s*(\S+)", body)
         binds = (m and m.group(1).strip().lower() == head.lower())
         commit = (r.get("commit_id") or "").lower()

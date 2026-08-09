@@ -18,9 +18,54 @@ formal reviews the LATEST (by submittedAt) wins.
 
 import dataclasses
 import json
+import os
 import re
 import subprocess
 from typing import Optional
+
+
+def _profile_path() -> Optional[str]:
+    """Locate profiles/agentops.json from the repo root (walk up from CWD or
+    the module location)."""
+    import pathlib
+    here = pathlib.Path(__file__).resolve().parent
+    for base in (pathlib.Path.cwd(), here, here.parent, here.parent.parent,
+                 here.parent.parent.parent):
+        p = base / "profiles" / "agentops.json"
+        if p.exists():
+            return str(p)
+    return None
+
+
+def trusted_reviewers() -> set:
+    """Configured trusted reviewer/PO identities (exact GitHub logins).
+
+    Source: AGENTOPS_TRUSTED_REVIEWERS env (comma-separated), else the
+    project profile governance.trusted_reviewers. An EMPTY set fails closed:
+    no review/PO signal is executable. R6-P0-1: executable control signals
+    are trusted-author bound; an untrusted account cannot inject PASS /
+    CHANGES_REQUESTED / PO decision into the control loop.
+    """
+    env = os.environ.get("AGENTOPS_TRUSTED_REVIEWERS", "").strip()
+    if env:
+        return {x.strip() for x in env.split(",") if x.strip()}
+    path = _profile_path()
+    if not path:
+        return set()
+    try:
+        with open(path) as f:
+            prof = json.load(f)
+        return set((prof.get("governance") or {})
+                   .get("trusted_reviewers") or [])
+    except (OSError, json.JSONDecodeError):
+        return set()
+
+
+def _author_trusted(r: dict) -> bool:
+    """True when the review's submitting identity is in the trusted set.
+    Missing author -> untrusted (fail closed)."""
+    login = ((r.get("author") or {}).get("login") or "").strip()
+    return bool(login) and login in trusted_reviewers()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -74,18 +119,26 @@ def _review_has_any_binding(r: dict) -> bool:
 
 
 def _latest_bound_review(reviews, expected_head: str):
-    """Deterministically select the LATEST current-HEAD formal review by
-    submittedAt (falling back to review id). P1-2: multiple formal reviews on
-    the same HEAD must not let an older verdict win via API ordering."""
+    """Deterministically select the LATEST current-HEAD TRUSTED formal review
+    by submittedAt (falling back to review id). R6-P0-1: only reviews
+    submitted by a trusted reviewer identity are executable; P1-2 keeps the
+    latest-wins rule among them."""
     bound = [r for r in reviews
              if r.get("state") == "COMMENTED"
              and "AGENTOPS_REVIEW" in (r.get("body") or "")
+             and _author_trusted(r)
              and _review_binds_head(r, expected_head)]
     if not bound:
         return None
     bound.sort(key=lambda r: (r.get("submittedAt") or "",
                               str(r.get("id") or "")), reverse=True)
     return bound[0]
+
+
+def _any_trusted_formal(reviews) -> bool:
+    """Any formal AGENTOPS_REVIEW review from a trusted author."""
+    return any("AGENTOPS_REVIEW" in (r.get("body") or "")
+               and _author_trusted(r) for r in reviews)
 
 
 def review_from_github(repo: str, pr: int, expected_head: str,
@@ -126,19 +179,18 @@ def review_from_github(repo: str, pr: int, expected_head: str,
                                      [body])
             return ReviewOutcome("COMMENTED", verdict, repo, pr, head,
                                  [body])
-    # A formal AGENTOPS_REVIEW review exists but none binds this exact HEAD:
-    # stale/missing/ambiguous -> fail closed.
-    if any("AGENTOPS_REVIEW" in (r.get("body") or "")
-           for r in reviews if r.get("state") == "COMMENTED"):
+    # A formal AGENTOPS_REVIEW review exists (trusted) but none binds this
+    # exact HEAD: stale/missing/ambiguous -> fail closed.
+    if _any_trusted_formal(reviews):
         return ReviewOutcome("INCOMPLETE", "INCOMPLETE", repo, pr, head,
                              [], fail_closed=True)
 
     # GitHub native reviewDecision (used when an independent reviewer
     # approves/changes on GitHub directly). Only a native verdict whose
-    # review is bound to THIS exact HEAD is executable; a stale native
-    # review for an older HEAD is INCOMPLETE.
+    # review is from a TRUSTED author AND bound to THIS exact HEAD is
+    # executable; a stale or untrusted native review is INCOMPLETE.
     if rd == "APPROVED" and mergeable in ("MERGEABLE", None):
-        if any(r.get("state") == "APPROVED"
+        if any(r.get("state") == "APPROVED" and _author_trusted(r)
                and _review_binds_head(r, expected_head) for r in reviews):
             return ReviewOutcome("APPROVED", "PASS", repo, pr, head, [])
         return ReviewOutcome("INCOMPLETE", "INCOMPLETE", repo, pr, head,
@@ -149,7 +201,7 @@ def review_from_github(repo: str, pr: int, expected_head: str,
         bound = False
         for r in reviews:
             if r.get("state") == "CHANGES_REQUESTED" and r.get("body"):
-                if _review_binds_head(r, expected_head):
+                if _author_trusted(r) and _review_binds_head(r, expected_head):
                     bound = True
                     findings.append(r["body"])
         if bound and findings:
