@@ -93,6 +93,10 @@ class FakeProbe:
     async def conversation(self):
         return dict(self.conv_state)
 
+    async def assistant_turns(self):
+        asst = self.conv_state.get("asst") or []
+        return [{"text": t, "id": f"turn-{i}"} for i, t in enumerate(asst)]
+
     async def focus_composer(self):
         self.focus_count += 1
         if any(c.get("vis") for c in self.composer_state):
@@ -491,6 +495,114 @@ class TestSendFlow(unittest.TestCase):
         result = asyncio.run(flow.run(env, make_request_text(env)))
         self.assertIn("new", result)
         self.assertNotIn("old", result)
+
+
+class TestResponseSettling(unittest.TestCase):
+    """Canary-exposed timing fix: wait for the FULL exact envelope and DOM
+    stability on the LOCKED response turn before strict correlation."""
+
+    URL = "https://chatgpt.com/c/6a74f5c0-a240-83ec-9cff-198ffab1140e"
+    HEAD = "b054cbd8d867a559b263640514b0afbead566fb5"
+
+    def _full(self, env):
+        return (f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\n"
+                f"REPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\n"
+                f"ACK: status_report_received")
+
+    def _partial36(self, env):
+        # Exactly the 36-char partial ACK observed in production.
+        return f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID'][:10]}_"
+
+    def _wait(self, env, reader, **kw):
+        probe = FakeProbe()
+        probe.conversation = reader
+        flow = SendFlow(probe, reviewer_url=self.URL,
+                        settle_poll_interval=kw.pop("settle_poll_interval", 0.01),
+                        settle_stable_reads=kw.pop("settle_stable_reads", 2),
+                        timeout=kw.pop("timeout", 5), **kw)
+        return asyncio.run(flow._wait_for_response(env))
+
+    def test_partial_then_full_envelope_settles_delivered(self):
+        # First read: only a 36-char partial ACK. Later the DOM grows to the
+        # full 5-line ACK. Final result must be the full envelope.
+        env = make_envelope(req_id="CANARY_fullreqid", repo="liangzhipengdamon-maker/Agent-Ops",
+                            pr="34", head=self.HEAD, request="status_report")
+        state = {"n": 0}
+        full = self._full(env)
+
+        async def reader():
+            state["n"] += 1
+            if state["n"] == 1:
+                probe.conv_state["asst"] = [self._partial36(env)]
+            else:
+                probe.conv_state["asst"] = [full]
+            return dict(probe.conv_state)
+
+        probe = FakeProbe()
+        probe.conversation = reader
+        flow = SendFlow(probe, reviewer_url=self.URL,
+                        settle_poll_interval=0.01, settle_stable_reads=2, timeout=5)
+        result = asyncio.run(flow._wait_for_response(env))
+        self.assertIn("ACK: status_report_received", result)
+        self.assertIn(env["REVIEW_REQUEST_ID"], result)
+
+    def test_partial_never_completes_fails_closed(self):
+        # DOM stays partial forever -> timeout -> SendFlowError, no ACK.
+        env = make_envelope(req_id="CANARY_never", repo="r/p", pr="1",
+                            head="h1", request="status_report")
+        async def reader():
+            return {"users": [], "asst": [self._partial36(env)], "stopBtn": False}
+        probe = FakeProbe()
+        probe.conversation = reader
+        flow = SendFlow(probe, reviewer_url=self.URL,
+                        settle_poll_interval=0.01, settle_stable_reads=2,
+                        timeout=1, stage_timeouts={"RESPONSE_SETTLE": 0.5})
+        with self.assertRaises(SendFlowError) as ctx:
+            asyncio.run(flow._wait_for_response(env))
+        self.assertEqual(ctx.exception.stage, "RESPONSE_SETTLE")
+
+    def test_full_but_still_changing_not_confirmed_early(self):
+        # A complete-looking envelope that keeps changing must NOT be confirmed
+        # until it is stable across the required consecutive identical reads.
+        env = make_envelope(req_id="CANARY_changing", repo="r/p", pr="1",
+                            head="h1", request="status_report")
+        state = {"n": 0}
+        v1 = f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nREPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\nACK: status_report_received\nv1"
+        v2 = f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nREPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\nACK: status_report_received\nv2"
+
+        async def reader():
+            state["n"] += 1
+            probe.conv_state["asst"] = [v1 if state["n"] <= 2 else v2]
+            return dict(probe.conv_state)
+
+        probe = FakeProbe()
+        probe.conversation = reader
+        flow = SendFlow(probe, reviewer_url=self.URL,
+                        settle_poll_interval=0.01, settle_stable_reads=3, timeout=5)
+        result = asyncio.run(flow._wait_for_response(env))
+        self.assertIn("v2", result)  # only the stable final version is returned
+        self.assertNotIn("v1\n", result)
+
+    def test_locks_own_turn_ignores_other_latest_node(self):
+        # A newer assistant message from a DIFFERENT turn must never be used;
+        # only the turn referencing this request's id is considered.
+        env = make_envelope(req_id="CANARY_mine", repo="r/p", pr="1",
+                            head="h1", request="status_report")
+        mine = self._full(env)
+        other = "unrelated assistant turn text"
+
+        async def reader():
+            probe.conv_state["asst"] = [mine, other]  # other is latest
+            return dict(probe.conv_state)
+
+        probe = FakeProbe()
+        probe.conversation = reader
+        flow = SendFlow(probe, reviewer_url=self.URL,
+                        settle_poll_interval=0.01, settle_stable_reads=2, timeout=5)
+        result = asyncio.run(flow._wait_for_response(env))
+        self.assertIn("ACK: status_report_received", result)
+        self.assertIn(env["REVIEW_REQUEST_ID"], result)
+        self.assertNotIn("unrelated", result)
 
 
 class TestConversationIdentity(unittest.TestCase):
