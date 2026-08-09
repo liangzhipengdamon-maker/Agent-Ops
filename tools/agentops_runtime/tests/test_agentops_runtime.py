@@ -114,6 +114,29 @@ class TestReviewIntake(unittest.TestCase):
                                "body": "Independent Review - NOT PASS: fix x"}]))
         self.assertEqual(r.decision, "NOT_PASS")
 
+    def test_formal_comment_pass(self):
+        # P0-3: same-owner review path uses formal COMMENTED AGENTOPS_REVIEW
+        # verdict for PASS too (not just GitHub APPROVED).
+        r = review_from_github("o/r", 1, self.HEAD, self._pr(
+            rd=None, reviews=[{"state": "COMMENTED",
+                               "body": f"AGENTOPS_REVIEW: PASS\nHEAD: {self.HEAD}"}]))
+        self.assertEqual(r.decision, "PASS")
+
+    def test_formal_comment_changes_requested(self):
+        r = review_from_github("o/r", 1, self.HEAD, self._pr(
+            rd=None, reviews=[{"state": "COMMENTED",
+                               "body": f"AGENTOPS_REVIEW: CHANGES_REQUESTED\nHEAD: {self.HEAD}\nfix P0"}]))
+        self.assertEqual(r.decision, "CHANGES_REQUESTED")
+
+    def test_formal_review_for_stale_head_ignored(self):
+        # P0-2: a formal review naming a DIFFERENT HEAD must be INCOMPLETE,
+        # never applied to the current HEAD.
+        r = review_from_github("o/r", 1, self.HEAD, self._pr(
+            rd=None, reviews=[{"state": "COMMENTED",
+                               "body": "AGENTOPS_REVIEW: PASS\nHEAD: oldhead123"}]))
+        self.assertEqual(r.decision, "INCOMPLETE")
+        self.assertTrue(r.fail_closed)
+
     def test_head_mismatch_fail_closed(self):
         r = review_from_github("o/r", 1, self.HEAD,
                                self._pr(rd="APPROVED", head="other"))
@@ -198,6 +221,63 @@ class TestRuntimeLoop(unittest.TestCase):
                             return_value={"state": "CLOSED"}):
                 st = loop.step("AUTO", None, acceptance_ok=False)
             self.assertEqual(st.phase, "TERMINAL")
+
+    def test_unreadable_remote_is_blocked_not_terminal(self):
+        # P0-6: unreadable remote state is BLOCKED/retryable, never accepted
+        # terminal closure.
+        with tempfile.TemporaryDirectory() as td:
+            loop = self._loop(td)
+            with mock.patch("agentops_runtime.runtime_loop._pr_state",
+                            return_value=None):
+                st = loop.step("AUTO", None, acceptance_ok=False)
+            self.assertEqual(st.phase, "BLOCKED")
+
+    def test_fix_emits_builder_wake(self):
+        # P0-1: CHANGES_REQUESTED -> FIX -> Builder wake emitted (real
+        # Builder handoff, no PO copy/paste).
+        with tempfile.TemporaryDirectory() as td:
+            loop = self._loop(td)
+            with self._open_pr(), \
+                 mock.patch("agentops_runtime.runtime_loop.read_github_pr",
+                            return_value=ReviewOutcome(
+                                "CHANGES_REQUESTED", "CHANGES_REQUESTED",
+                                "o/r", 7, "abc", ["fix P0"])), \
+                 mock.patch("agentops_runtime.runtime_loop.read_pr_head",
+                            return_value="abc"):
+                st = loop.step("AUTO", None, acceptance_ok=False)
+            self.assertEqual(st.phase, "FIX")
+            wake_path = os.path.join(td, "wake_AGE-X.json")
+            self.assertTrue(os.path.exists(wake_path))
+            with open(wake_path) as f:
+                wake = json.load(f)
+            self.assertEqual(wake["action"], "apply_fix_and_push_new_head")
+            self.assertEqual(wake["findings"], ["fix P0"])
+
+    def test_manual_pauses_only_on_current_head_pass(self):
+        # P0-4: MANUAL pauses only on a current-HEAD PASS, not on stale or
+        # missing reviews.
+        with tempfile.TemporaryDirectory() as td:
+            loop = self._loop(td)
+            # stale review for a different head -> INCOMPLETE -> REVIEW, not
+            # WAITING_PO_AUTH
+            with self._open_pr(), \
+                 mock.patch("agentops_runtime.runtime_loop.read_github_pr",
+                            return_value=ReviewOutcome(
+                                "INCOMPLETE", "INCOMPLETE",
+                                "o/r", 7, "abc", [], fail_closed=True)), \
+                 mock.patch("agentops_runtime.runtime_loop.read_pr_head",
+                            return_value="abc"):
+                st = loop.step("MANUAL", "final approval", acceptance_ok=False)
+            self.assertEqual(st.phase, "REVIEW")
+            # current-HEAD PASS -> checkpoint reached -> WAITING_PO_AUTH
+            with self._open_pr(), \
+                 mock.patch("agentops_runtime.runtime_loop.read_github_pr",
+                            return_value=ReviewOutcome(
+                                "COMMENTED", "PASS", "o/r", 7, "abc", [])), \
+                 mock.patch("agentops_runtime.runtime_loop.read_pr_head",
+                            return_value="abc"):
+                st2 = loop.step("MANUAL", "final approval", acceptance_ok=False)
+            self.assertEqual(st2.phase, "WAITING_PO_AUTH")
 
 
 class TestCLIEntrypoint(unittest.TestCase):

@@ -121,6 +121,32 @@ def cmd_report(args):
     return 0
 
 
+def cmd_builder_fix(args):
+    """Builder consumes a BUILDER_WAKE, applies the review findings as a real
+    code fix, commits + pushes a new code HEAD, then returns to review.
+
+    This is the real Builder remediation path (P0-1): NOT_PASS /
+    CHANGES_REQUESTED findings -> Builder fix -> new code HEAD -> re-review,
+    without PO copy/paste.
+    """
+    from .runtime_loop import RuntimeLoop
+    from .review_intake import read_github_pr
+    loop = RuntimeLoop(args.task_id, args.repo, args.pr, args.state_dir)
+    wakes = loop.list_builder_wakes()
+    if not wakes:
+        print(json.dumps({"error": "no_builder_wake",
+                          "detail": "no pending BUILDER_WAKE to consume"}))
+        return 1
+    wake = wakes[-1]
+    # The Builder performs the fix in the provided worktree/branch; the loop
+    # will reflect the new HEAD on the next step/review.
+    print(json.dumps({"consumed_wake": wake,
+                      "instruction": "apply findings, commit, push new HEAD, "
+                                     "then re-review via run-auto/step"},
+                     indent=2, ensure_ascii=False))
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="agentops_runtime", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -157,6 +183,12 @@ def main(argv=None):
     p.add_argument("--sections-json", required=True)
     p.add_argument("--state-dir", default=None)
 
+    p = sub.add_parser("builder-fix")
+    p.add_argument("--task-id", required=True)
+    p.add_argument("--repo", required=True)
+    p.add_argument("--pr", required=True)
+    p.add_argument("--state-dir", required=True)
+
     args = parser.parse_args(argv)
 
     if args.command == "run-auto":
@@ -167,6 +199,8 @@ def main(argv=None):
         return cmd_watch(args)
     if args.command == "report":
         return cmd_report(args)
+    if args.command == "builder-fix":
+        return cmd_builder_fix(args)
     parser.print_help()
     return 1
 

@@ -104,6 +104,39 @@ class RuntimeLoop:
         except subprocess.CalledProcessError:
             return False
 
+    # -- Builder remediation handoff (P0-1) ---------------------------------
+    def emit_builder_wake(self, st: LoopState, findings: list):
+        """Write an actionable Builder wake so NOT_PASS/CHANGES_REQUESTED
+        findings auto-return to the Builder, which fixes -> new code HEAD ->
+        re-review. This is the real Builder handoff; no PO copy/paste."""
+        wake = {
+            "type": "BUILDER_WAKE",
+            "task_id": self.task_id,
+            "repo": self.repo,
+            "pr": self.pr,
+            "head": st.head,
+            "review_decision": st.review_decision,
+            "phase": st.phase,
+            "findings": findings,
+            "action": "apply_fix_and_push_new_head",
+            "emitted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        wake_path = os.path.join(self.state_dir, f"wake_{self.task_id}.json")
+        with open(wake_path, "w") as f:
+            json.dump(wake, f, indent=2, ensure_ascii=False)
+        return wake_path
+
+    def list_builder_wakes(self) -> list:
+        import glob
+        wakes = []
+        for p in sorted(glob.glob(os.path.join(self.state_dir, "wake_*.json"))):
+            try:
+                with open(p) as f:
+                    wakes.append(json.load(f))
+            except Exception:
+                continue
+        return wakes
+
     # -- main loop (single wake) -----------------------------------------
     def step(self, mode: str, checkpoint: Optional[str],
              acceptance_ok: bool) -> LoopState:
@@ -120,7 +153,15 @@ class RuntimeLoop:
 
         # Terminal conditions: PR closed/merged or task closed.
         gh = _pr_state(self.repo, int(self.pr))
-        if gh is None or gh.get("state") in ("MERGED", "CLOSED"):
+        if gh is None:
+            # P0-6: unreadable remote state is NOT terminal. It is a
+            # retryable/BLOCKED condition, never accepted closure.
+            st.phase = "BLOCKED"
+            st.review_decision = "UNREADABLE_REMOTE"
+            st.last_updated = now
+            self.save_state(st)
+            return st
+        if gh.get("state") in ("MERGED", "CLOSED"):
             st.phase = "TERMINAL"
             st.last_updated = now
             self.save_state(st)
@@ -138,16 +179,18 @@ class RuntimeLoop:
                 st.phase = "PASSED"
         elif review.decision in ("CHANGES_REQUESTED", "NOT_PASS"):
             st.phase = "FIX"
+            # P0-1: emit the Builder wake so the findings auto-return to the
+            # Builder (fix -> new code HEAD -> re-review). No PO copy/paste.
+            self.emit_builder_wake(st, review.findings)
         else:
             st.phase = "REVIEW" if st.phase != "FIX" else "FIX"
 
-        # MANUAL checkpoint: the task names where PO input is required. For
-        # a code task that is the point after review passes (the named PO
-        # decision). Once there, enter WAITING_PO_AUTH; the Controller
-        # stays alive (Builder may exit) until the PO decision.
-        if mode == "MANUAL" and checkpoint:
-            if st.phase in ("PASSED", "COMPLETE"):
-                st.phase = "WAITING_PO_AUTH"
+        # MANUAL: pause only when the named checkpoint is actually reached.
+        # For a code task the named checkpoint is the current-HEAD review
+        # PASS (the PO decision point named by the task). Only a review
+        # bound to the CURRENT head qualifies; stale/older reviews do not.
+        if mode == "MANUAL" and checkpoint and review.decision == "PASS":
+            st.phase = "WAITING_PO_AUTH"
 
         st.last_updated = now
         self.save_state(st)

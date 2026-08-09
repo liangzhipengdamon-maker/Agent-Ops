@@ -83,6 +83,21 @@ class NeutralRelayNotifier:
             "~/.agentops/relay/config.json")
         self.timeout = timeout
 
+    def _conversation_url(self) -> Optional[str]:
+        # Conversation identity comes from the relay config route (the
+        # trusted runtime binding), not a hard-coded URL.
+        try:
+            with open(self.config_file) as f:
+                cfg = json.load(f)
+            routes = cfg.get("routes") or {}
+            for repo, route in routes.items():
+                url = route.get("conversation_url")
+                if url:
+                    return url
+        except Exception:
+            return None
+        return None
+
     def send(self, report: CompletionReport, output_dir: str) -> DeliveryResult:
         os.makedirs(output_dir, exist_ok=True)
         req = os.path.join(output_dir, f"{report.correlation_id}_request.txt")
@@ -104,8 +119,15 @@ class NeutralRelayNotifier:
         if os.path.exists(out):
             with open(out) as f:
                 content = f.read()
-            ack = ("ACK:" in content and report.correlation_id in content
-                   and report.head in content)
+            # P0-7: exact status_report ACK contract — all four fields plus
+            # the exact ACK value must match.
+            ack = (
+                "ACK: status_report_received" in content
+                and report.correlation_id in content
+                and f"REPO: {report.repo}" in content
+                and f"PR: {report.pr}" in content
+                and f"HEAD: {report.head}" in content
+            )
         return DeliveryResult(report.correlation_id, ack, exit_code, ack,
                               False, {}, log[-500:])
 
@@ -116,13 +138,37 @@ def _conversation_id_from_url(url: str) -> Optional[str]:
 
 
 class GptWebContextReadback:
-    def __init__(self, cdp_port: int = 9233,
-                 conversation_url: Optional[str] = None):
+    def __init__(self, cdp_port: Optional[int] = None,
+                 conversation_url: Optional[str] = None,
+                 config_file: Optional[str] = None):
+        # Conversation identity from the relay config (trusted runtime
+        # binding), not a hard-coded URL.
+        self.config_file = config_file or os.path.expanduser(
+            "~/.agentops/relay/config.json")
+        self.conversation_url = conversation_url
         self.cdp_port = cdp_port
-        self.conversation_url = conversation_url or (
+
+    def _resolve(self):
+        if self.conversation_url is None:
+            try:
+                with open(self.config_file) as f:
+                    cfg = json.load(f)
+                routes = cfg.get("routes") or {}
+                for repo, route in routes.items():
+                    if route.get("conversation_url"):
+                        self.conversation_url = route["conversation_url"]
+                    if route.get("cdp_port"):
+                        self.cdp_port = int(route["cdp_port"])
+                    if self.conversation_url and self.cdp_port:
+                        break
+            except Exception:
+                pass
+        self.conversation_url = self.conversation_url or (
             "https://chatgpt.com/c/6a74f5c0-a240-83ec-9cff-198ffab1140e")
+        self.cdp_port = self.cdp_port or 9233
 
     async def _conversation_text(self) -> str:
+        self._resolve()
         cid = _conversation_id_from_url(self.conversation_url)
         with urllib.request.urlopen(
                 f"http://127.0.0.1:{self.cdp_port}/json/version", timeout=8) as r:

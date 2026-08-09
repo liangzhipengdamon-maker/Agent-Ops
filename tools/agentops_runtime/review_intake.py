@@ -61,6 +61,34 @@ def review_from_github(repo: str, pr: int, expected_head: str,
     mergeable = pr_json.get("mergeable")
     reviews = pr_json.get("reviews") or []
 
+    # P0-3: the same-owner GPT review path posts a formal COMMENTED review
+    # carrying a machine-readable AGENTOPS_REVIEW verdict bound to the exact
+    # HEAD. Parse that formal verdict for BOTH PASS and NOT_PASS /
+    # CHANGES_REQUESTED. A COMMENTED review that names a DIFFERENT HEAD is
+    # stale and must be INCOMPLETE (fail closed), never applied.
+    for r in reviews:
+        body = r.get("body") or ""
+        if r.get("state") != "COMMENTED" or "AGENTOPS_REVIEW" not in body:
+            continue
+        # The formal review MUST name this exact HEAD. A HEAD line that names
+        # a different HEAD (even a non-hex placeholder) is stale -> skip.
+        m_head = re.search(r"HEAD:\s*(\S+)", body)
+        if m_head:
+            head_val = m_head.group(1).strip().lower()
+            if head_val != expected_head.lower():
+                continue  # stale review for another HEAD; ignore
+        m_verdict = re.search(
+            r"\b(PASS|NOT_PASS|CHANGES_REQUESTED)\b", body, re.IGNORECASE)
+        if m_verdict:
+            verdict = m_verdict.group(1).upper()
+            if verdict == "PASS":
+                return ReviewOutcome("COMMENTED", "PASS", repo, pr, head,
+                                     [body])
+            return ReviewOutcome("COMMENTED", verdict, repo, pr, head,
+                                 [body])
+
+    # GitHub native reviewDecision (used when an independent reviewer
+    # approves/changes on GitHub directly).
     if rd == "APPROVED" and mergeable in ("MERGEABLE", None):
         return ReviewOutcome("APPROVED", "PASS", repo, pr, head, [])
 

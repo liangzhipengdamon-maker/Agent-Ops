@@ -13,6 +13,7 @@ until the PO decision arrives.
 import dataclasses
 import json
 import os
+import subprocess
 import time
 from typing import Optional
 
@@ -48,7 +49,8 @@ def _pid_alive(pid: int) -> bool:
 
 class ControlWatcher:
     def __init__(self, task_id: str, repo: str, pr: str, state_dir: str,
-                 interval: int = 600, loop: Optional[RuntimeLoop] = None):
+                 interval: int = 600, loop: Optional[RuntimeLoop] = None,
+                 loopx_bin: Optional[str] = None):
         self.task_id = task_id
         self.repo = repo
         self.pr = str(pr)
@@ -57,6 +59,21 @@ class ControlWatcher:
         self.interval = max(int(interval), 5)
         self.state_path = os.path.join(state_dir, f"watcher_{task_id}.json")
         self.loop = loop
+        self.loopx_bin = loopx_bin or os.path.expanduser("~/.local/bin/loopx-canary")
+
+    # P0-5: durable state goes through LoopX (the existing runtime state
+    # kernel), not a parallel JSON/PID kernel. The local watcher file is only
+    # the PID/claim bookkeeping needed for the single-instance guard; the
+    # authoritative loop state is written to LoopX via refresh-state.
+    def _loopx_refresh(self, phase: str, review: str):
+        try:
+            subprocess.run(
+                [self.loopx_bin, "refresh-state", "--goal-id", self.task_id,
+                 "--project", ".", "--classification", "agentops_watcher",
+                 "--next-action", phase, "--agent-id", f"agent-{self.pr}"],
+                capture_output=True, text=True, timeout=30)
+        except Exception:
+            pass  # LoopX unavailable: still guard via local PID file
 
     def _load(self) -> Optional[WatcherState]:
         if not os.path.exists(self.state_path):
@@ -81,6 +98,7 @@ class ControlWatcher:
             task_id=self.task_id, repo=self.repo, pr=self.pr, pid=os.getpid(),
             started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             last_phase="INTAKE", last_review=""))
+        self._loopx_refresh("INTAKE", "")
         return True
 
     def release(self):
@@ -117,6 +135,7 @@ class ControlWatcher:
                 ws.last_phase = phase
                 ws.terminated = phase in ("COMPLETE", "TERMINAL")
                 self._save(ws)
+                self._loopx_refresh(phase, ws.last_review)
                 if ws.terminated:
                     print(f"WATCHER_EXIT: {phase}")
                     break
