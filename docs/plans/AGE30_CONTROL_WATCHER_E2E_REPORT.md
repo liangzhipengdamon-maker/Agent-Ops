@@ -155,3 +155,22 @@ https://github.com/liangzhipengdamon-maker/Agent-Ops/blob/feat/age-30-waiting-po
 - Governance state: WAITING_PO_AUTH.
 - Waiting: PO merge authorization for PR #31 HEAD
   `0f4a495a705fbd9204875819d29f0b7ee9b590b8`.
+
+---
+
+## Addendum — Watcher → Builder wake loop closure (f1144b2, b3a6f83)
+
+GPT's determination: `GPT → GitHub Review → Watcher PASS; Watcher → Review Intake → Builder 执行修复 FAIL`.
+
+Closed the blocker:
+- `_emit_builder_wake()`: on a detected GitHub change, the watcher writes a
+  `BUILDER_WAKE` event (repo/pr/head/review_decision/route/action =
+  execute_follow_up) that the Builder consumes via `agentops_runtime wake`.
+- Emitted on AUTO_CONTINUE, GPT_DECISION_REQUIRED, and ANY HIGH change
+  (before the blocking relay notify, so the Builder can act immediately).
+- Live verification: triggered a NEW GitHub comment on PR #31 ->
+  watcher detected (updated_at -> 10:03:27Z) -> emitted wake_AGE-30.json
+  (head b3a6f83, action execute_follow_up) -> Builder consumed it via CLI.
+- Builder then executes the fix, commits, pushes -> new HEAD -> watcher
+  re-evaluates. The P0 fixes (dynamic risk, delivery fail-closed, wake)
+  are committed at HEAD b3a6f83.
