@@ -358,6 +358,53 @@ class TestRuntimeLoopDecide(unittest.TestCase):
         self.assertFalse(other["duplicate"])
         self.assertEqual(len(sent), 2)
 
+    def test_gate_report_retry_after_failure_then_dedupe(self):
+        # R8-1: delivered=false must NOT dedupe. Next cycle retries; once
+        # delivered=true, subsequent cycles dedupe.
+        from agentops_runtime.runtime_loop import _gate_status_report
+        results = [{"delivered": False, "correlation_id": "fail-1"},
+                   {"delivered": True, "correlation_id": "ok-2"}]
+        def _fake_send(payload, _out):
+            return results.pop(0)
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch("agentops_runtime.runtime_loop._bridge_dir",
+                        return_value=td), \
+             mock.patch("agentops_runtime.runtime_loop.relay_client"
+                        ".send_status_report", side_effect=_fake_send):
+            first = _gate_status_report("AGE-X", "o/r", "7", "abc")
+            self.assertFalse(first["delivered"])
+            self.assertFalse(first["duplicate"])
+            second = _gate_status_report("AGE-X", "o/r", "7", "abc")
+            self.assertTrue(second["delivered"])
+            self.assertFalse(second["duplicate"])  # retried, not deduped
+            third = _gate_status_report("AGE-X", "o/r", "7", "abc")
+            self.assertTrue(third["duplicate"])    # now deduped
+            self.assertEqual(third["correlation_id"], "ok-2")
+
+    def test_gate_report_stays_waiting_po_auth_on_failure(self):
+        # R8-1: on delivered=false the loop stays WAITING_PO_AUTH (no
+        # CONTINUE/termination) and the next cycle retries.
+        with self._open_pr(), \
+             mock.patch("agentops_runtime.runtime_loop.spec_from_linear",
+                        return_value=TaskSpec("AGE-X", "MANUAL",
+                                              "final approval", [])), \
+             mock.patch("agentops_runtime.runtime_loop.read_github_pr",
+                        return_value=ReviewOutcome(
+                            "COMMENTED", "PASS", "o/r", 7, "abc", [])), \
+             mock.patch("agentops_runtime.runtime_loop.read_pr_head",
+                        return_value="abc"), \
+             self._reviews(), self._bridge(), \
+             mock.patch("agentops_runtime.runtime_loop._po_decision",
+                        return_value=None), \
+             mock.patch("agentops_runtime.runtime_loop._gate_status_report",
+                        return_value={"sent": True, "delivered": False,
+                                      "duplicate": False}), \
+             mock.patch("agentops_runtime.runtime_loop._loopx_refresh"):
+            out = decide("AGE-X", "o/r", "7")
+        self.assertEqual(out["phase"], "WAITING_PO_AUTH")
+        self.assertTrue(out["checkpoint_reached"])
+        self.assertFalse(out["gate_report"]["delivered"])
+
     def test_manual_resume_after_po_approve(self):
         # P0-2/R5-P0-1: a PO APPROVE decision at the exact HEAD resumes the
         # loop and wakes the Builder to continue (no completion evidence yet).

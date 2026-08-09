@@ -79,19 +79,27 @@ def _loopx_refresh(task_id: str, phase: str, pr: str) -> dict:
 
 def _gate_status_report(task_id: str, repo: str, pr: str, head: str) -> dict:
     """Auto-send ONE Gate status_report via the existing Neutral Relay when
-    the loop enters WAITING_PO_AUTH (MANUAL checkpoint reached). Idempotent
-    per exact PR+HEAD via a bridge `gate_report.json` marker. Fail-closed:
+    the loop enters WAITING_PO_AUTH (MANUAL checkpoint reached). Fail-closed:
     `delivered` is true only when the exact 5-line ACK envelope binds the
     same REVIEW_REQUEST_ID/REPO/PR/HEAD. Uses the existing relay_client;
-    never a manual copy/paste bypass."""
+    never a manual copy/paste bypass.
+
+    R8-1 retry semantics:
+    - dedupe ONLY after a confirmed delivery (delivered=true) for this exact
+      PR+HEAD (bridge `gate_report.json` marker);
+    - delivered=false does NOT dedupe: the next watcher cycle must retry, and
+      the marker is overwritten with the latest attempt so retry never
+      suppresses resend.
+    """
     marker = os.path.join(_bridge_dir(), "gate_report.json")
     try:
         with open(marker) as f:
             d = json.load(f)
         if (d.get("repo") == repo and str(d.get("pr")) == str(pr)
-                and d.get("head") == head and d.get("sent")):
-            return {"sent": True, "delivered": d.get("delivered", False),
-                    "duplicate": True, "correlation_id": d.get("correlation_id")}
+                and d.get("head") == head and d.get("sent")
+                and d.get("delivered")):
+            return {"sent": True, "delivered": True, "duplicate": True,
+                    "correlation_id": d.get("correlation_id")}
     except (OSError, json.JSONDecodeError):
         pass
     import uuid
@@ -105,15 +113,16 @@ def _gate_status_report(task_id: str, repo: str, pr: str, head: str) -> dict:
                f"SUMMARY: MANUAL checkpoint reached; waiting for PO decision\n"
                f"UNAUTHORIZED_ACTIONS: NONE\n")
     out = relay_client.send_status_report(payload, "/tmp/agentops_runtime_report")
+    delivered = out.get("delivered", False)
     try:
         os.makedirs(_bridge_dir(), exist_ok=True)
         with open(marker, "w") as f:
             json.dump({"repo": repo, "pr": str(pr), "head": head,
-                       "sent": True, "delivered": out.get("delivered", False),
+                       "sent": True, "delivered": delivered,
                        "correlation_id": out.get("correlation_id")}, f)
     except OSError:
         pass
-    return {"sent": True, "delivered": out.get("delivered", False),
+    return {"sent": True, "delivered": delivered,
             "duplicate": False,
             "correlation_id": out.get("correlation_id")}
 
