@@ -33,12 +33,23 @@ class TaskSpec:
 def parse_mode(description: str) -> str:
     """Extract AUTO/MANUAL from the description.
 
-    Accepts `AUTO` / `MANUAL` / `Execution Mode: AUTO` etc. If the text
-    contains both or neither unambiguous marker, returns "" (caller must
-    surface a decision request).
+    Prefers an explicit `Execution Mode:` field. If absent, accepts a lone
+    AUTO or MANUAL marker. If the text contains both without a field, or
+    neither, returns "" (caller must surface a decision request).
     """
     if not description:
         return ""
+    # Explicit field wins: "Execution Mode: AUTO" OR
+    # "## Execution Mode\n\n`AUTO`" (mode on following non-empty line).
+    m = re.search(
+        r"(?:execution\s*)?mode\s*[:：]\s*(AUTO|MANUAL)", description,
+        re.IGNORECASE)
+    if not m:
+        m = re.search(
+            r"##\s*Execution\s+Mode\s*\n+[^A-Za-z]*(AUTO|MANUAL)",
+            description, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
     has_auto = bool(re.search(r"\bAUTO\b", description, re.IGNORECASE))
     has_manual = bool(re.search(r"\bMANUAL\b", description, re.IGNORECASE))
     if has_auto and not has_manual:

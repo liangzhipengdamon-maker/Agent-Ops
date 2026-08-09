@@ -36,6 +36,13 @@ Acceptance criteria:
 - Resumes after PO decision
 """
 
+BOTH_WORDS_DESC = """# Task
+
+Execution Mode: AUTO
+
+The description also discusses MANUAL mode for comparison.
+"""
+
 
 class TestTaskIntake(unittest.TestCase):
     def test_parse_mode_auto(self):
@@ -47,6 +54,10 @@ class TestTaskIntake(unittest.TestCase):
     def test_parse_mode_ambiguous_returns_empty(self):
         # Both AUTO and MANUAL present -> ambiguous, no default.
         self.assertEqual(parse_mode("AUTO and MANUAL both"), "")
+
+    def test_explicit_execution_mode_field_wins(self):
+        # Even though the text mentions MANUAL, the explicit field says AUTO.
+        self.assertEqual(parse_mode(BOTH_WORDS_DESC), "AUTO")
 
     def test_parse_mode_missing_returns_empty(self):
         self.assertEqual(parse_mode("no mode"), "")
