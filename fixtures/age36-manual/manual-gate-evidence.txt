@@ -1,0 +1,3 @@
+AGE-36 MANUAL runtime-loop fixture gate evidence.
+Task: MANUAL; checkpoint: review approval.
+Disposable validation-only artifact. Never merged.
