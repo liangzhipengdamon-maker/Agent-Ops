@@ -71,6 +71,7 @@ class WatcherRuntimeState:
     last_linear: Optional[dict]
     last_route: str
     last_notify_at: Optional[str]
+    last_risk: Optional[str] = "HIGH"
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -168,6 +169,40 @@ class ControlWatcher:
     # ------------------------------------------------------------------
     # Routing on change (existing modules only)
     # ------------------------------------------------------------------
+    def _dynamic_risk(self, gh: dict, lin: dict, review_decision: str) -> str:
+        """Re-evaluate risk from the CHANGED evidence (not the launch risk).
+
+        Fail closed: default to HIGH unless there is positive evidence of a
+        lower-risk continuation.
+
+        Positive downgrade signals (AGE-29 aligned, conservative):
+        - LINEAR completed / Done + PR open but not high-risk -> LOW (resume).
+        - Linear moved to a normal startable state + review CHANGES_REQUESTED
+          -> MEDIUM (follow-up needs GPT decision).
+        - Otherwise -> HIGH (unchanged, stays WAITING_PO_AUTH).
+        """
+        lin_state = (lin or {}).get("state_name") or ""
+        lin_type = (lin or {}).get("state_type") or ""
+        gh_state = (gh or {}).get("state") or ""
+
+        if gh_state == "MERGED":
+            # terminal handled elsewhere; treat as not-a-continuation
+            return "HIGH"
+        if lin_type == "completed" or lin_state == "Done":
+            # Linear task completed and PR still open: a LOW-risk continuation
+            # (e.g. update deliverable, finalize docs). Resume.
+            if review_decision in ("PASS", "CHANGES_REQUESTED"):
+                return "LOW"
+            return "LOW"
+        if review_decision == "CHANGES_REQUESTED":
+            # Follow-up work on the reviewed change: GPT decision required.
+            return "MEDIUM"
+        if review_decision == "PASS":
+            # Reviewed PASS but task not Done: still wait for PO on any
+            # high-risk action; conservative HIGH.
+            return "HIGH"
+        return "HIGH"
+
     def _handle_change(self, snap: dict):
         gh = snap.get("github") or {}
         lin = snap.get("linear") or {}
@@ -176,10 +211,8 @@ class ControlWatcher:
         review = read_github_pr(self.repo, int(self.pr), gh.get("head") or self.head)
         review_decision = review.decision if review else "INCOMPLETE"
 
-        # Re-route through the existing Risk Policy + Transition Controller.
-        # The stored risk for a WAITING_PO_AUTH task is HIGH, but a change
-        # could carry new evidence (e.g. Linear moved to a LOW scope).
-        risk = "HIGH"
+        # DYNAMIC risk from the changed evidence (not hardcoded HIGH).
+        risk = self._dynamic_risk(gh, lin, review_decision)
         outcome = route_decision(risk, review_decision)
 
         route = outcome.route
@@ -188,15 +221,17 @@ class ControlWatcher:
         self.runtime.last_github = gh
         self.runtime.last_linear = lin
         self.runtime.last_route = route
+        self.runtime.last_risk = risk
         self._write_runtime()
 
         if route == "AUTO_CONTINUE":
-            print(f"WATCHER_ROUTE: AUTO_CONTINUE (task {self.task_id})")
+            print(f"WATCHER_ROUTE: AUTO_CONTINUE (task {self.task_id}, risk={risk})")
             self._notify("resume")
             return "AUTO_CONTINUE"
 
         if route == "GPT_DECISION_REQUIRED":
-            print(f"WATCHER_ROUTE: GPT_DECISION_REQUIRED (task {self.task_id})")
+            print(f"WATCHER_ROUTE: GPT_DECISION_REQUIRED (task {self.task_id}, "
+                  f"risk={risk})")
             self._notify("gpt_decision")
             return "GPT_DECISION_REQUIRED"
 
@@ -204,13 +239,13 @@ class ControlWatcher:
             # HIGH: stay; notify GPT/PO only when new info actually changed
             # relative to the PREVIOUS snapshot (avoid per-tick spam).
             print(f"WATCHER_ROUTE: WAITING_PO_AUTH (task {self.task_id}, "
-                  f"review={review_decision})")
+                  f"risk={risk}, review={review_decision})")
             if self._should_notify(prev_gh):
                 self._notify("high_state_change")
             return "WAITING_PO_AUTH"
 
         print(f"WATCHER_ROUTE: {route} (task {self.task_id}, "
-              f"review={review_decision})")
+              f"risk={risk}, review={review_decision})")
         return route
 
     def _should_notify(self, prev_gh: Optional[dict]) -> bool:

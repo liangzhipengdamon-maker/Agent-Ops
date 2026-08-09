@@ -118,8 +118,66 @@ class TestControlWatcher(unittest.TestCase):
         self.assertEqual(sent.head, "livehead123")
         self.assertNotEqual(sent.head, "launchhead")
 
+
+class TestDynamicRisk(unittest.TestCase):
+    """P0: watcher must re-evaluate risk dynamically from changed evidence,
+    not hardcode HIGH."""
+
+    def _watcher(self):
+        return ControlWatcher(
+            task_id="AGE-T", repo="o/r", pr="7", head="abc",
+            deliverable_path="docs/plans/X.md",
+            deliverable_url="https://github.com/o/r/blob/main/docs/plans/X.md",
+            state_dir="/tmp", interval=600)
+
+    def test_linear_done_low_risk(self):
+        w = self._watcher()
+        r = w._dynamic_risk(
+            {"state": "OPEN"}, {"state_name": "Done", "state_type": "completed"},
+            "PASS")
+        self.assertEqual(r, "LOW")
+
+    def test_changes_requested_medium(self):
+        w = self._watcher()
+        r = w._dynamic_risk(
+            {"state": "OPEN"}, {"state_name": "In Review", "state_type": "started"},
+            "CHANGES_REQUESTED")
+        self.assertEqual(r, "MEDIUM")
+
+    def test_open_high_default(self):
+        w = self._watcher()
+        r = w._dynamic_risk(
+            {"state": "OPEN"}, {"state_name": "In Review", "state_type": "started"},
+            "PASS")
+        self.assertEqual(r, "HIGH")
+
+    def test_merged_high(self):
+        w = self._watcher()
+        r = w._dynamic_risk(
+            {"state": "MERGED"}, {"state_name": "In Review", "state_type": "started"},
+            "PASS")
+        self.assertEqual(r, "HIGH")
+
+    def test_handle_change_uses_dynamic_risk_route(self):
+        # When Linear is Done + review PASS, dynamic risk is LOW and the
+        # watcher routes to AUTO_CONTINUE (resume), not WAITING_PO_AUTH.
+        w = self._watcher()
+        w.runtime = WatcherRuntimeState(
+            task_id="AGE-T", repo="o/r", pr="7", head="abc", pid=1,
+            started_at="x", last_github={"state": "OPEN", "head": "abc"},
+            last_linear=None, last_route="WAITING_PO_AUTH", last_notify_at=None)
+        with mock.patch.object(cw, "read_github_pr",
+                               return_value=mock.Mock(decision="PASS")), \
+             mock.patch.object(w, "_notify") as mock_notify:
+            result = w._handle_change({
+                "github": {"state": "OPEN", "head": "def"},
+                "linear": {"state_name": "Done", "state_type": "completed"},
+            })
+        self.assertEqual(result, "AUTO_CONTINUE")
+        mock_notify.assert_called_once()
+
     def test_terminal_when_merged(self):
-        w = self._watcher("/tmp")
+        w = self._watcher()
         w.runtime = WatcherRuntimeState(
             task_id="AGE-T", repo="o/r", pr="7", head="abc", pid=1,
             started_at="x", last_github={"state": "MERGED"},
@@ -127,7 +185,7 @@ class TestControlWatcher(unittest.TestCase):
         self.assertTrue(w._is_terminal())
 
     def test_terminal_when_linear_done(self):
-        w = self._watcher("/tmp")
+        w = self._watcher()
         w.runtime = WatcherRuntimeState(
             task_id="AGE-T", repo="o/r", pr="7", head="abc", pid=1,
             started_at="x", last_github={"state": "OPEN"},

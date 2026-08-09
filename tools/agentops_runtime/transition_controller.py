@@ -440,8 +440,25 @@ def transition_with_po_notify(
             ),
         )
 
+    # FAIL-CLOSED DELIVERY: write WAITING_PO_AUTH only when the notification
+    # was confirmed delivered. If delivery failed, record DELIVERY_FAILED and
+    # do NOT claim the task safely entered WAITING_PO_AUTH.
     if task_state_path:
-        write_state(outcome, task_state_path)
+        if outcome.route == "WAITING_PO_AUTH":
+            if delivery is not None and not delivery.delivered:
+                write_state(
+                    TransitionOutcome(
+                        route="DELIVERY_FAILED",
+                        risk=risk_level,
+                        review=review_decision,
+                        reason="po_notification_not_confirmed",
+                    ),
+                    task_state_path,
+                )
+            else:
+                write_state(outcome, task_state_path)
+        else:
+            write_state(outcome, task_state_path)
 
     result = {"outcome": outcome.to_record()}
     if delivery is not None:
@@ -450,4 +467,6 @@ def transition_with_po_notify(
             result["po_notify"]["status"] = "DELIVERED"
         else:
             result["po_notify"]["status"] = "DELIVERY_FAILED"
+            # reflect fail-closed in the reported outcome route as well
+            result["outcome"]["route"] = "DELIVERY_FAILED"
     return result

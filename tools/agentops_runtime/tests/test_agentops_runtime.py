@@ -306,8 +306,8 @@ class TestPoNotifyBeforeWait(unittest.TestCase):
         self.assertEqual(len(notifier.sent), 0)
 
     def test_delivery_failure_marks_failed_not_fake(self):
-        # No ack AND no read-back confirmation -> DELIVERY_FAILED, and the
-        # state is still recorded (safe stop) but never marked delivered.
+        # P0 fail-closed: no ack AND no read-back confirmation -> DELIVERY_FAILED
+        # and the state must NOT be recorded as WAITING_PO_AUTH.
         notifier = self.FakeNotifier(ack=False, exit_code=1)
         readback = self.FakeReadback(confirmed=False)
         with tempfile.TemporaryDirectory() as td:
@@ -319,7 +319,7 @@ class TestPoNotifyBeforeWait(unittest.TestCase):
                 completion_sections=self._sections(), output_dir=td,
                 notifier=notifier, readback=readback,
                 task_state_path=os.path.join(td, "state.json"))
-        self.assertEqual(result["outcome"]["route"], "WAITING_PO_AUTH")
+        self.assertEqual(result["outcome"]["route"], "DELIVERY_FAILED")
         self.assertEqual(result["po_notify"]["status"], "DELIVERY_FAILED")
         self.assertFalse(result["po_notify"]["delivered"])
         self.assertEqual(len(notifier.sent), 1)

@@ -10,7 +10,7 @@ sys.path.insert(0, _TOOLS)
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import agentops_runtime.__main__ as cli
-from transition_controller import route_decision
+from transition_controller import route_decision, transition_with_po_notify, DeliveryResult
 
 
 class TestCliTransitionRuntimePath(unittest.TestCase):
@@ -99,6 +99,86 @@ class TestCliTransitionRuntimePath(unittest.TestCase):
                 mock_twpn.assert_not_called()
         self.assertEqual(route_decision("LOW", "PASS").route, "AUTO_CONTINUE")
         self.assertEqual(route_decision("MEDIUM", "PASS").route, "GPT_DECISION_REQUIRED")
+
+
+class TestDeliveryFailClosed(unittest.TestCase):
+    """P0: fail-closed delivery — WAITING_PO_AUTH must NOT be recorded when
+    the PO notification was not confirmed delivered."""
+
+    class FailNotifier:
+        def send(self, report, output_dir):
+            return DeliveryResult(
+                correlation_id=report.correlation_id, delivered=False,
+                exit_code=1, ack_captured=False, readback_confirmed=False,
+                readback_checks={}, details="no ack, no readback")
+
+    class FailReadback:
+        def verify(self, report, retries=6, delay=5.0):
+            return DeliveryResult(
+                correlation_id=report.correlation_id, delivered=False,
+                exit_code=0, ack_captured=False, readback_confirmed=False,
+                readback_checks={
+                    "correlation_id": False, "pr": False, "head": False,
+                    "deliverable_path": False, "end_marker": False,
+                }, details="readback_missing")
+
+    def _sections(self):
+        return {"Task": "x", "Status": "y"}
+
+    def test_failed_delivery_writes_delivery_failed_not_waiting(self):
+        with tempfile.TemporaryDirectory() as td:
+            state_path = os.path.join(td, "state.json")
+            result = transition_with_po_notify(
+                risk_level="HIGH", review_decision="PASS",
+                task_id="AGE-X", repo="o/r", pr="1", head="abc",
+                deliverable_path="docs/plans/X.md",
+                deliverable_url="https://github.com/o/r/blob/main/docs/plans/X.md",
+                completion_sections=self._sections(), output_dir=td,
+                notifier=self.FailNotifier(), readback=self.FailReadback(),
+                task_state_path=state_path)
+            self.assertEqual(result["outcome"]["route"], "DELIVERY_FAILED")
+            self.assertEqual(result["po_notify"]["status"], "DELIVERY_FAILED")
+            self.assertFalse(result["po_notify"]["delivered"])
+            with open(state_path) as f:
+                state = json.load(f)
+            self.assertEqual(state["outcome"]["route"], "DELIVERY_FAILED")
+
+    def test_confirmed_delivery_writes_waiting(self):
+        notifier = self.FailNotifier()
+        readback = self.FailReadback()
+
+        class OkNotifier(self.FailNotifier):
+            def send(self, report, output_dir):
+                return DeliveryResult(
+                    correlation_id=report.correlation_id, delivered=True,
+                    exit_code=0, ack_captured=False, readback_confirmed=True,
+                    readback_checks={}, details="readback ok")
+
+        class OkReadback(self.FailReadback):
+            def verify(self, report, retries=6, delay=5.0):
+                return DeliveryResult(
+                    correlation_id=report.correlation_id, delivered=True,
+                    exit_code=0, ack_captured=False, readback_confirmed=True,
+                    readback_checks={
+                        "correlation_id": True, "pr": True, "head": True,
+                        "deliverable_path": True, "end_marker": True,
+                    }, details="readback ok")
+
+        with tempfile.TemporaryDirectory() as td:
+            state_path = os.path.join(td, "state.json")
+            result = transition_with_po_notify(
+                risk_level="HIGH", review_decision="PASS",
+                task_id="AGE-X", repo="o/r", pr="1", head="abc",
+                deliverable_path="docs/plans/X.md",
+                deliverable_url="https://github.com/o/r/blob/main/docs/plans/X.md",
+                completion_sections=self._sections(), output_dir=td,
+                notifier=OkNotifier(), readback=OkReadback(),
+                task_state_path=state_path)
+            self.assertEqual(result["outcome"]["route"], "WAITING_PO_AUTH")
+            self.assertEqual(result["po_notify"]["status"], "DELIVERED")
+            with open(state_path) as f:
+                state = json.load(f)
+            self.assertEqual(state["outcome"]["route"], "WAITING_PO_AUTH")
 
 
 if __name__ == "__main__":
