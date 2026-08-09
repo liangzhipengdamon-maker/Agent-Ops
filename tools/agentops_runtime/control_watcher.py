@@ -243,12 +243,12 @@ class ControlWatcher:
             print(f"WATCHER_ROUTE: WAITING_PO_AUTH (task {self.task_id}, "
                   f"risk={risk}, review={review_decision})")
             if self._should_notify(prev_gh):
+                # Emit the Builder wake FIRST (before the blocking notify) so
+                # the Builder can act immediately: any detected change on a
+                # HIGH task means the Builder must read GitHub and fix.
+                self._emit_builder_wake(
+                    "high_state_change", route, review_decision)
                 self._notify("high_state_change")
-                # A new review change on a HIGH task is evidence the Builder
-                # must act (e.g. fix P0s). Emit a Builder wake.
-                if review_decision in ("CHANGES_REQUESTED", "COMMENTED", "BLOCKED"):
-                    self._emit_builder_wake(
-                        "high_state_review_change", route, review_decision)
             return "WAITING_PO_AUTH"
 
         print(f"WATCHER_ROUTE: {route} (task {self.task_id}, "
