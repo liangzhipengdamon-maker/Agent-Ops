@@ -10,7 +10,7 @@ from review_intake import review_from_github, ReviewDecision
 from task_intake import is_eligible, discover, write_discovery_records
 from transition_controller import (
     route_decision, TransitionOutcome, write_state,
-    build_po_status_report, NeutralRelayNotifier, DeliveryResult,
+    build_completion_report, NeutralRelayNotifier, DeliveryResult,
     transition_with_po_notify,
 )
 
@@ -179,49 +179,114 @@ class TestPoNotifyBeforeWait(unittest.TestCase):
     """AGE-30 hardening: mandatory PO notification before WAITING_PO_AUTH."""
 
     class FakeNotifier:
-        def __init__(self):
+        def __init__(self, ack=True, exit_code=0):
             self.sent = []
-            self.delivery = DeliveryResult(
-                correlation_id="PO_test", delivered=True, exit_code=0,
-                ack_captured=True, details="fake-ack")
+            self.ack = ack
+            self.exit_code = exit_code
 
         def send(self, report, output_dir):
             self.sent.append(report)
-            return self.delivery
+            return DeliveryResult(
+                correlation_id=report.correlation_id,
+                delivered=self.ack, exit_code=self.exit_code,
+                ack_captured=self.ack, readback_confirmed=False,
+                readback_checks={},
+                details="fake-ack" if self.ack else "fake-no-ack")
 
-    def test_build_po_status_report_binds_fields(self):
-        r = build_po_status_report(
+    class FakeReadback:
+        def __init__(self, confirmed=True):
+            self.confirmed = confirmed
+
+        def verify(self, report):
+            return DeliveryResult(
+                correlation_id=report.correlation_id,
+                delivered=self.confirmed, exit_code=0,
+                ack_captured=False, readback_confirmed=self.confirmed,
+                readback_checks={
+                    "correlation_id": self.confirmed,
+                    "pr": self.confirmed,
+                    "head": self.confirmed,
+                    "deliverable_path": self.confirmed,
+                    "end_marker": self.confirmed,
+                },
+                details="readback_confirmed" if self.confirmed else "readback_missing")
+
+    def _sections(self):
+        return {
+            "Task": "AGE-30 notify validation",
+            "Fixed behavior": "notify before WAITING_PO_AUTH",
+            "Implementation": "transition_controller.py",
+            "Live validation evidence": "correlation delivered",
+            "Requirements verification": "all met",
+            "PR/branch/HEAD": "pr 1 / feat/x / abc",
+            "CI": "pass",
+            "Deliverable": "docs/plans/AGE30_REPORT.md",
+            "Boundaries": "no merge, no deploy",
+        }
+
+    def test_build_completion_report_binds_fields(self):
+        r = build_completion_report(
             task_id="AGE-X", repo="o/r", pr="1", head="abc",
-            summary="summary text")
-        self.assertEqual(r.state, "WAITING_PO_AUTH")
+            deliverable_path="docs/plans/X.md",
+            deliverable_url="https://github.com/o/r/blob/main/docs/plans/X.md",
+            sections=self._sections())
         self.assertEqual(r.repo, "o/r")
         self.assertEqual(r.pr, "1")
         self.assertEqual(r.head, "abc")
-        self.assertEqual(r.delivery_targets, ["gpt_web", "po_channel"])
-        self.assertIn("REVIEW_REQUEST_ID:", r.to_relay_payload())
-        self.assertIn("HEAD: abc", r.to_relay_payload())
+        self.assertEqual(r.deliverable_path, "docs/plans/X.md")
+        self.assertTrue(r.end_marker.startswith("AGENTOPS_COMPLETION_REPORT_END_"))
+        payload = r.to_relay_payload()
+        self.assertIn("REVIEW_REQUEST_ID:", payload)
+        self.assertIn("HEAD: abc", payload)
+        self.assertIn("DELIVERABLE_PATH: docs/plans/X.md", payload)
+        self.assertIn("DELIVERABLE_URL:", payload)
+        self.assertIn(r.end_marker, payload)
+        # Concise: body is NOT the full report; only a compact summary.
+        self.assertLess(len(r.body), 1500)
 
-    def test_high_risk_always_notifies_before_wait(self):
-        notifier = self.FakeNotifier()
+    def test_high_risk_always_notifies_and_confirms(self):
+        notifier = self.FakeNotifier(ack=True)
+        readback = self.FakeReadback(confirmed=True)
         with tempfile.TemporaryDirectory() as td:
             result = transition_with_po_notify(
                 risk_level="HIGH", review_decision="PASS",
                 task_id="AGE-X", repo="o/r", pr="1", head="abc",
-                summary="high risk summary", output_dir=td,
-                notifier=notifier, task_state_path=os.path.join(td, "state.json"))
+                deliverable_path="docs/plans/X.md",
+                deliverable_url="https://github.com/o/r/blob/main/docs/plans/X.md",
+                completion_sections=self._sections(), output_dir=td,
+                notifier=notifier, readback=readback,
+                task_state_path=os.path.join(td, "state.json"))
         self.assertEqual(result["outcome"]["route"], "WAITING_PO_AUTH")
+        self.assertEqual(result["po_notify"]["status"], "DELIVERED")
         self.assertTrue(result["po_notify"]["delivered"])
         self.assertEqual(len(notifier.sent), 1)
-        self.assertEqual(notifier.sent[0].state, "WAITING_PO_AUTH")
+
+    def test_high_risk_readback_alone_confirms_delivery(self):
+        # Even if relay ack is not captured, a read-back confirmation
+        # upgrades delivery to confirmed (never fake).
+        notifier = self.FakeNotifier(ack=False, exit_code=1)
+        readback = self.FakeReadback(confirmed=True)
+        with tempfile.TemporaryDirectory() as td:
+            result = transition_with_po_notify(
+                risk_level="HIGH", review_decision="PASS",
+                task_id="AGE-X", repo="o/r", pr="1", head="abc",
+                deliverable_path="docs/plans/X.md",
+                deliverable_url="https://github.com/o/r/blob/main/docs/plans/X.md",
+                completion_sections=self._sections(), output_dir=td,
+                notifier=notifier, readback=readback)
+        self.assertEqual(result["po_notify"]["status"], "DELIVERED")
+        self.assertTrue(result["po_notify"]["readback_confirmed"])
 
     def test_medium_risk_does_not_notify_po(self):
-        # MEDIUM routes to GPT_DECISION_REQUIRED; no PO notify.
         notifier = self.FakeNotifier()
         with tempfile.TemporaryDirectory() as td:
             result = transition_with_po_notify(
                 risk_level="MEDIUM", review_decision="PASS",
                 task_id="AGE-X", repo="o/r", pr="1", head="abc",
-                summary="medium", output_dir=td, notifier=notifier)
+                deliverable_path="docs/plans/X.md",
+                deliverable_url="https://github.com/o/r/blob/main/docs/plans/X.md",
+                completion_sections=self._sections(), output_dir=td,
+                notifier=notifier)
         self.assertEqual(result["outcome"]["route"], "GPT_DECISION_REQUIRED")
         self.assertNotIn("po_notify", result)
         self.assertEqual(len(notifier.sent), 0)
@@ -232,24 +297,30 @@ class TestPoNotifyBeforeWait(unittest.TestCase):
             result = transition_with_po_notify(
                 risk_level="LOW", review_decision="PASS",
                 task_id="AGE-X", repo="o/r", pr="1", head="abc",
-                summary="low", output_dir=td, notifier=notifier)
+                deliverable_path="docs/plans/X.md",
+                deliverable_url="https://github.com/o/r/blob/main/docs/plans/X.md",
+                completion_sections=self._sections(), output_dir=td,
+                notifier=notifier)
         self.assertEqual(result["outcome"]["route"], "AUTO_CONTINUE")
         self.assertNotIn("po_notify", result)
         self.assertEqual(len(notifier.sent), 0)
 
-    def test_delivery_failure_still_records_wait_but_marks_not_delivered(self):
-        # Even if the relay fails, the controller still records WAITING_PO_AUTH
-        # but marks po_notify delivered=False (does NOT silently pass).
-        notifier = self.FakeNotifier()
-        notifier.delivery = DeliveryResult(
-            correlation_id="PO_test", delivered=False, exit_code=1,
-            ack_captured=False, details="relay timeout")
+    def test_delivery_failure_marks_failed_not_fake(self):
+        # No ack AND no read-back confirmation -> DELIVERY_FAILED, and the
+        # state is still recorded (safe stop) but never marked delivered.
+        notifier = self.FakeNotifier(ack=False, exit_code=1)
+        readback = self.FakeReadback(confirmed=False)
         with tempfile.TemporaryDirectory() as td:
             result = transition_with_po_notify(
                 risk_level="HIGH", review_decision="PASS",
                 task_id="AGE-X", repo="o/r", pr="1", head="abc",
-                summary="high", output_dir=td, notifier=notifier)
+                deliverable_path="docs/plans/X.md",
+                deliverable_url="https://github.com/o/r/blob/main/docs/plans/X.md",
+                completion_sections=self._sections(), output_dir=td,
+                notifier=notifier, readback=readback,
+                task_state_path=os.path.join(td, "state.json"))
         self.assertEqual(result["outcome"]["route"], "WAITING_PO_AUTH")
+        self.assertEqual(result["po_notify"]["status"], "DELIVERY_FAILED")
         self.assertFalse(result["po_notify"]["delivered"])
         self.assertEqual(len(notifier.sent), 1)
 

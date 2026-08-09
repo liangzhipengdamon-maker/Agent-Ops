@@ -11,10 +11,18 @@ routing outcome:
   - LOW risk + INCOMPLETE     -> WAIT_REVIEW (incomplete evidence)
 
 AGE-30 hardening — mandatory PO notification before WAITING_PO_AUTH:
-  When the controller decides the task must enter WAITING_PO_AUTH, it
-  MUST first generate a PO status report, send it to GPT Web via the
-  existing Neutral Relay (AGE-19), and capture the delivery result BEFORE
-  recording the WAITING_PO_AUTH state.
+  Before recording WAITING_PO_AUTH the controller MUST, in order:
+    1. have the full detailed report committed to GitHub (authoritative
+       detailed record; caller performs the commit, controller receives
+       the committed path + URL),
+    2. build a CONCISE completion report (not the full report body),
+    3. send it to GPT Web via the existing Neutral Relay (AGE-19),
+    4. read-back verify the concise report reached the GPT Web control
+       conversation (correlation_id, PR, HEAD, GitHub path, end marker),
+    5. only then write the WAITING_PO_AUTH state.
+
+  If delivery/read-back is not confirmed, record DELIVERY_FAILED (never
+  fake success) and still stop safely without any PO follow-up action.
 
 Governance boundaries:
 - The controller NEVER grants merge/deploy permission.
@@ -30,9 +38,17 @@ import json
 import os
 import subprocess
 import time
+import urllib.request
 import uuid
+import websockets
+import asyncio
+import re
 from typing import List, Optional
 
+
+# ---------------------------------------------------------------------------
+# Pure routing + state writeback
+# ---------------------------------------------------------------------------
 
 @dataclasses.dataclass(frozen=True)
 class TransitionOutcome:
@@ -93,39 +109,85 @@ def write_state(outcome: TransitionOutcome, task_state_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 @dataclasses.dataclass(frozen=True)
-class PoStatusReport:
-    """AGE-31/33 PO status report event model."""
-    event_id: str
+class CompletionReport:
+    """A CONCISE completion report sent to GPT Web / PO.
+
+    Deliberately NOT the full detailed report: the full report lives on
+    GitHub (deliverable_path / deliverable_url) and is only referenced by
+    link. The concise report carries the required sections so the PO can
+    act without manual forwarding.
+    """
     correlation_id: str
-    task_id: str
     repo: str
     pr: str
     head: str
-    state: str
-    summary: str
-    delivery_targets: List[str]
+    deliverable_path: str      # repo-relative path (e.g. docs/plans/...)
+    deliverable_url: str       # full GitHub URL
+    body: str                  # concise multi-section report
+    end_marker: str            # unique completion-report end marker
 
     def to_relay_payload(self) -> str:
-        """AGE-18 status_report contract payload."""
         return (
             f"REVIEW_REQUEST_ID: {self.correlation_id}\n"
             f"REPO: {self.repo}\n"
             f"PR: {self.pr}\n"
             f"HEAD: {self.head}\n"
-            f"REQUEST: status_report\n"
-            f"STATE: {self.state}\n"
-            f"SUMMARY: {self.summary}\n"
-            f"UNAUTHORIZED_ACTIONS: NONE\n"
+            f"REQUEST: completion_report\n"
+            f"STATE: WAITING_PO_AUTH\n"
+            f"DELIVERABLE_PATH: {self.deliverable_path}\n"
+            f"DELIVERABLE_URL: {self.deliverable_url}\n"
+            f"END_MARKER: {self.end_marker}\n\n"
+            f"{self.body}"
         )
+
+
+def build_completion_report(
+    task_id: str,
+    repo: str,
+    pr: str,
+    head: str,
+    deliverable_path: str,
+    deliverable_url: str,
+    sections: dict,
+) -> CompletionReport:
+    """Build a CONCISE completion report from named sections.
+
+    `sections` is an ordered dict of {title: content_lines_or_str}.
+    The report body is a plain-text, terminal-style summary.
+    """
+    correlation_id = f"CPL_{uuid.uuid4().hex[:12]}"
+    end_marker = f"AGENTOPS_COMPLETION_REPORT_END_{correlation_id}"
+    lines = [f"Task: {task_id}"]
+    for title, content in sections.items():
+        lines.append("")
+        lines.append(f"{title}:")
+        if isinstance(content, list):
+            lines.extend(f"  {c}" for c in content)
+        else:
+            lines.append(f"  {content}")
+    lines.append("")
+    lines.append(end_marker)
+    return CompletionReport(
+        correlation_id=correlation_id,
+        repo=repo,
+        pr=str(pr),
+        head=head,
+        deliverable_path=deliverable_path,
+        deliverable_url=deliverable_url,
+        body="\n".join(lines),
+        end_marker=end_marker,
+    )
 
 
 @dataclasses.dataclass(frozen=True)
 class DeliveryResult:
-    """Result of delivering the PO status report via Neutral Relay."""
+    """Result of delivering the concise completion report via Neutral Relay."""
     correlation_id: str
-    delivered: bool          # relay exit 0 AND ACK captured
+    delivered: bool          # relay exit 0 AND (ack_captured OR readback_confirmed)
     exit_code: int
     ack_captured: bool
+    readback_confirmed: bool
+    readback_checks: dict
     details: str
 
     def to_record(self) -> dict:
@@ -134,34 +196,18 @@ class DeliveryResult:
             "delivered": self.delivered,
             "exit_code": self.exit_code,
             "ack_captured": self.ack_captured,
+            "readback_confirmed": self.readback_confirmed,
+            "readback_checks": self.readback_checks,
             "details": self.details,
         }
 
 
-def build_po_status_report(
-    task_id: str, repo: str, pr: str, head: str, summary: str,
-    state: str = "WAITING_PO_AUTH",
-) -> PoStatusReport:
-    """Generate the PO status report (AGE-31 event model)."""
-    return PoStatusReport(
-        event_id=f"evt_{uuid.uuid4().hex[:12]}",
-        correlation_id=f"PO_{uuid.uuid4().hex[:12]}",
-        task_id=task_id,
-        repo=repo,
-        pr=str(pr),
-        head=head,
-        state=state,
-        summary=summary,
-        delivery_targets=["gpt_web", "po_channel"],
-    )
-
-
 class NeutralRelayNotifier:
-    """Sends a PO status report via the existing Neutral Relay (AGE-19).
+    """Sends a completion report via the existing Neutral Relay (AGE-19).
 
     Reuses `~/.agentops/relay/neutral_relay.py` (the AGE-19 hardened relay).
-    It is transport-only: it does not judge the report and does not make
-    any PO decision.
+    Transport-only: it does not judge the report and does not make any PO
+    decision.
     """
 
     def __init__(self, relay_bin: Optional[str] = None,
@@ -173,7 +219,7 @@ class NeutralRelayNotifier:
             "~/.agentops/relay/config.json")
         self.timeout = timeout
 
-    def send(self, report: PoStatusReport, output_dir: str) -> DeliveryResult:
+    def send(self, report: CompletionReport, output_dir: str) -> DeliveryResult:
         os.makedirs(output_dir, exist_ok=True)
         req_path = os.path.join(output_dir, f"{report.correlation_id}_request.txt")
         out_path = os.path.join(output_dir, f"{report.correlation_id}_output.md")
@@ -205,13 +251,112 @@ class NeutralRelayNotifier:
                 and report.head in content
             )
 
-        delivered = exit_code == 0 and ack_captured
         return DeliveryResult(
             correlation_id=report.correlation_id,
-            delivered=delivered,
+            delivered=ack_captured,  # provisional; read-back may upgrade
             exit_code=exit_code,
             ack_captured=ack_captured,
+            readback_confirmed=False,
+            readback_checks={},
             details=log[-500:],
+        )
+
+
+def _conversation_id_from_url(url: str) -> Optional[str]:
+    m = re.search(r"/c/([0-9a-fA-F-]{8,})", url or "", re.IGNORECASE)
+    return m.group(1).lower() if m else None
+
+
+class GptWebContextReadback:
+    """Reads back the GPT Web control conversation to verify delivery.
+
+    Uses the SAME CDP mechanism as the Neutral Relay (AGE-19) on the
+    isolated AgentOps runtime. It reads the conversation text and checks
+    the concise report's correlation_id, PR, HEAD, GitHub deliverable
+    path, and end marker are present.
+    """
+
+    def __init__(self, cdp_port: int = 9233, conversation_url: Optional[str] = None):
+        self.cdp_port = cdp_port
+        self.conversation_url = conversation_url or (
+            "https://chatgpt.com/c/6a74f5c0-a240-83ec-9cff-198ffab1140e")
+
+    async def _conversation_text(self) -> str:
+        cid = _conversation_id_from_url(self.conversation_url)
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{self.cdp_port}/json/version", timeout=8) as r:
+            ws_url = json.loads(r.read().decode()).get("webSocketDebuggerUrl", "")
+        async with websockets.connect(ws_url, max_size=2**30, open_timeout=10) as ws:
+            _id = 0
+
+            async def cmd(method, params=None, session=None):
+                nonlocal _id
+                _id += 1
+                mid = _id
+                msg = {"id": mid, "method": method}
+                if params is not None:
+                    msg["params"] = params
+                if session:
+                    msg["sessionId"] = session
+                await ws.send(json.dumps(msg))
+                while True:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=15)
+                    data = json.loads(raw)
+                    if data.get("id") == mid:
+                        return data
+
+            r = await cmd("Target.getTargets")
+            target = next(
+                (t for t in r.get("result", {}).get("targetInfos", [])
+                 if t.get("type") == "page"
+                 and cid and cid in (t.get("url") or "")),
+                None)
+            if not target:
+                return ""
+            at = await cmd("Target.attachToTarget",
+                           {"targetId": target["targetId"], "flatten": True})
+            sid = at.get("result", {}).get("sessionId")
+            ev = await cmd("Runtime.evaluate", {
+                "expression": "document.body ? document.body.innerText.slice(0, 60000) : ''",
+                "returnByValue": True, "awaitPromise": True,
+            }, session=sid)
+            return str(ev.get("result", {}).get("result", {}).get("value", ""))
+
+    def verify(self, report: CompletionReport, retries: int = 6, delay: float = 5.0) -> DeliveryResult:
+        """Read back and verify the concise report reached the conversation."""
+        checks = {
+            "correlation_id": False,
+            "pr": False,
+            "head": False,
+            "deliverable_path": False,
+            "end_marker": False,
+        }
+        confirmed = False
+        text = ""
+        for _ in range(retries):
+            try:
+                text = asyncio.run(self._conversation_text())
+            except Exception:
+                text = ""
+            checks = {
+                "correlation_id": report.correlation_id in text,
+                "pr": f"PR: {report.pr}" in text,
+                "head": f"HEAD: {report.head}" in text,
+                "deliverable_path": report.deliverable_path in text,
+                "end_marker": report.end_marker in text,
+            }
+            confirmed = all(checks.values())
+            if confirmed:
+                break
+            time.sleep(delay)
+        return DeliveryResult(
+            correlation_id=report.correlation_id,
+            delivered=confirmed,
+            exit_code=0,
+            ack_captured=False,
+            readback_confirmed=confirmed,
+            readback_checks=checks,
+            details="readback_confirmed" if confirmed else "readback_missing_markers",
         )
 
 
@@ -222,33 +367,59 @@ def transition_with_po_notify(
     repo: str,
     pr: str,
     head: str,
-    summary: str,
+    deliverable_path: str,
+    deliverable_url: str,
+    completion_sections: dict,
     output_dir: str,
     notifier: Optional[NeutralRelayNotifier] = None,
+    readback: Optional[GptWebContextReadback] = None,
     task_state_path: Optional[str] = None,
 ) -> dict:
-    """Orchestrate routing + mandatory PO notify + state writeback.
+    """Orchestrate routing + mandatory completion-report delivery + read-back.
 
-    Steps:
-      1. route_decision(risk, review)
-      2. If route == WAITING_PO_AUTH:
-           a. generate PO status report
-           b. send via Neutral Relay
-           c. capture delivery result
-      3. Write state (if task_state_path given)
+    Steps (only for WAITING_PO_AUTH):
+      1. build CONCISE completion report (full report already committed to
+         GitHub by caller; deliverable_path/url reference it)
+      2. send via Neutral Relay
+      3. read-back verify (correlation_id, PR, HEAD, deliverable path,
+         end marker)
+      4. if relay ACK captured OR read-back confirms -> delivered; else
+         record DELIVERY_FAILED (never fake success)
+      5. write WAITING_PO_AUTH state (with delivery record)
 
-    Returns a dict with the outcome and delivery result.
+    For non-WAITING_PO_AUTH routes, no notify happens; state may still be
+    written.
     """
     outcome = route_decision(risk_level, review_decision)
     notifier = notifier or NeutralRelayNotifier()
+    readback = readback or GptWebContextReadback()
     delivery = None
 
     if outcome.route == "WAITING_PO_AUTH":
-        report = build_po_status_report(
-            task_id=task_id, repo=repo, pr=pr, head=head, summary=summary,
-            state="WAITING_PO_AUTH",
+        report = build_completion_report(
+            task_id=task_id, repo=repo, pr=pr, head=head,
+            deliverable_path=deliverable_path, deliverable_url=deliverable_url,
+            sections=completion_sections,
         )
-        delivery = notifier.send(report, output_dir)
+        # 2. send via Neutral Relay
+        relay_delivery = notifier.send(report, output_dir)
+        # 3. read-back verify
+        rb = readback.verify(report)
+
+        # 4. delivered only if ack captured OR read-back confirmed
+        delivered = relay_delivery.ack_captured or rb.readback_confirmed
+        delivery = DeliveryResult(
+            correlation_id=report.correlation_id,
+            delivered=delivered,
+            exit_code=relay_delivery.exit_code,
+            ack_captured=relay_delivery.ack_captured,
+            readback_confirmed=rb.readback_confirmed,
+            readback_checks=rb.readback_checks,
+            details=(
+                "delivered" if delivered
+                else "DELIVERY_FAILED: no ack and read-back did not confirm"
+            ),
+        )
 
     if task_state_path:
         write_state(outcome, task_state_path)
@@ -256,4 +427,8 @@ def transition_with_po_notify(
     result = {"outcome": outcome.to_record()}
     if delivery is not None:
         result["po_notify"] = delivery.to_record()
+        if delivery.delivered:
+            result["po_notify"]["status"] = "DELIVERED"
+        else:
+            result["po_notify"]["status"] = "DELIVERY_FAILED"
     return result
