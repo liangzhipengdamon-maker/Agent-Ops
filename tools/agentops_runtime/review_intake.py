@@ -43,6 +43,27 @@ def _parse_pr_json(raw: str) -> dict:
         return {}
 
 
+def _review_binds_head(r: dict, expected_head: str) -> bool:
+    """A review binds the exact current HEAD via its submitted commit_id
+    (authoritative) or a body `HEAD:` line. Both are used because the GPT
+    same-owner path posts a formal COMMENTED review whose body carries the
+    HEAD marker, while native GitHub reviews carry commit_id."""
+    commit = (r.get("commit_id") or "").lower()
+    if commit and commit == expected_head.lower():
+        return True
+    m = re.search(r"HEAD:\s*(\S+)", r.get("body") or "")
+    return bool(m) and m.group(1).strip().lower() == expected_head.lower()
+
+
+def _review_has_any_binding(r: dict) -> bool:
+    """True if the review exposes any HEAD binding (commit_id or body HEAD:).
+    P0-2: a formal review with NO binding is missing/ambiguous -> the
+    executable signal is INCOMPLETE, never applied."""
+    if (r.get("commit_id") or "").strip():
+        return True
+    return bool(re.search(r"HEAD:\s*(\S+)", r.get("body") or ""))
+
+
 def review_from_github(repo: str, pr: int, expected_head: str,
                        pr_json: Optional[dict] = None) -> ReviewOutcome:
     if pr_json is None:
@@ -64,19 +85,19 @@ def review_from_github(repo: str, pr: int, expected_head: str,
     # P0-3: the same-owner GPT review path posts a formal COMMENTED review
     # carrying a machine-readable AGENTOPS_REVIEW verdict bound to the exact
     # HEAD. Parse that formal verdict for BOTH PASS and NOT_PASS /
-    # CHANGES_REQUESTED. A COMMENTED review that names a DIFFERENT HEAD is
-    # stale and must be INCOMPLETE (fail closed), never applied.
+    # CHANGES_REQUESTED. A formal review without any HEAD binding is
+    # missing/ambiguous -> INCOMPLETE (fail closed). A formal review bound to
+    # a DIFFERENT HEAD is stale -> skip; with no current-HEAD verdict the
+    # outcome is INCOMPLETE, never the stale one.
     for r in reviews:
         body = r.get("body") or ""
         if r.get("state") != "COMMENTED" or "AGENTOPS_REVIEW" not in body:
             continue
-        # The formal review MUST name this exact HEAD. A HEAD line that names
-        # a different HEAD (even a non-hex placeholder) is stale -> skip.
-        m_head = re.search(r"HEAD:\s*(\S+)", body)
-        if m_head:
-            head_val = m_head.group(1).strip().lower()
-            if head_val != expected_head.lower():
-                continue  # stale review for another HEAD; ignore
+        if not _review_has_any_binding(r):
+            return ReviewOutcome("INCOMPLETE", "INCOMPLETE", repo, pr, head,
+                                 [], fail_closed=True)
+        if not _review_binds_head(r, expected_head):
+            continue  # stale review for another HEAD; ignore
         m_verdict = re.search(
             r"\b(PASS|NOT_PASS|CHANGES_REQUESTED)\b", body, re.IGNORECASE)
         if m_verdict:
@@ -88,34 +109,36 @@ def review_from_github(repo: str, pr: int, expected_head: str,
                                  [body])
 
     # GitHub native reviewDecision (used when an independent reviewer
-    # approves/changes on GitHub directly).
+    # approves/changes on GitHub directly). Only a native verdict whose
+    # review is bound to THIS exact HEAD is executable; a stale native
+    # review for an older HEAD is INCOMPLETE.
     if rd == "APPROVED" and mergeable in ("MERGEABLE", None):
-        return ReviewOutcome("APPROVED", "PASS", repo, pr, head, [])
+        if any(r.get("state") == "APPROVED"
+               and _review_binds_head(r, expected_head) for r in reviews):
+            return ReviewOutcome("APPROVED", "PASS", repo, pr, head, [])
+        return ReviewOutcome("INCOMPLETE", "INCOMPLETE", repo, pr, head,
+                             [], fail_closed=True)
 
     if rd == "CHANGES_REQUESTED":
         findings = []
+        bound = False
         for r in reviews:
             if r.get("state") == "CHANGES_REQUESTED" and r.get("body"):
-                findings.append(r["body"])
-        return ReviewOutcome("CHANGES_REQUESTED", "CHANGES_REQUESTED",
-                             repo, pr, head, findings)
-
-    # COMMENTED reviews with explicit NOT_PASS / NOT PASS signal a blocker.
-    not_pass_findings = []
-    for r in reviews:
-        body = r.get("body") or ""
-        if r.get("state") == "COMMENTED" and re.search(
-                r"\bNOT\s*PASS\b|\bNOT_PASS\b", body, re.IGNORECASE):
-            not_pass_findings.append(body)
-    if not_pass_findings:
-        return ReviewOutcome("COMMENTED", "NOT_PASS", repo, pr, head,
-                             not_pass_findings)
+                if _review_binds_head(r, expected_head):
+                    bound = True
+                    findings.append(r["body"])
+        if bound and findings:
+            return ReviewOutcome("CHANGES_REQUESTED", "CHANGES_REQUESTED",
+                                 repo, pr, head, findings)
+        return ReviewOutcome("INCOMPLETE", "INCOMPLETE", repo, pr, head,
+                             [], fail_closed=True)
 
     if mergeable in ("CONFLICTING", "UNKNOWN"):
         return ReviewOutcome("INCOMPLETE", "INCOMPLETE", repo, pr, head,
                              [], fail_closed=True)
 
-    # No PASS / CHANGES_REQUESTED / NOT_PASS: incomplete review evidence.
+    # No executable PASS / CHANGES_REQUESTED verdict bound to this HEAD:
+    # incomplete review evidence, fail closed.
     return ReviewOutcome("INCOMPLETE", "INCOMPLETE", repo, pr, head,
                          [], fail_closed=True)
 

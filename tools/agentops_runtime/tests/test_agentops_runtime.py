@@ -72,8 +72,19 @@ class TestReviewIntake(unittest.TestCase):
                 "headRefOid": head or self.HEAD, "reviews": reviews or []}
 
     def test_approved_pass(self):
-        r = review_from_github("o/r", 1, self.HEAD, self._pr(rd="APPROVED"))
+        r = review_from_github("o/r", 1, self.HEAD, self._pr(
+            rd="APPROVED", reviews=[{"state": "APPROVED",
+                                     "commit_id": self.HEAD}]))
         self.assertEqual(r.decision, "PASS")
+
+    def test_approved_stale_head_fail_closed(self):
+        # Native APPROVED review bound to an OLDER HEAD is not executable for
+        # the current HEAD.
+        r = review_from_github("o/r", 1, self.HEAD, self._pr(
+            rd="APPROVED", reviews=[{"state": "APPROVED",
+                                     "commit_id": "oldhead"}]))
+        self.assertEqual(r.decision, "INCOMPLETE")
+        self.assertTrue(r.fail_closed)
 
     def test_formal_comment_pass(self):
         r = review_from_github("o/r", 1, self.HEAD, self._pr(
@@ -100,11 +111,55 @@ class TestReviewIntake(unittest.TestCase):
         self.assertEqual(r.decision, "INCOMPLETE")
         self.assertTrue(r.fail_closed)
 
+    def test_stale_formal_not_pass_not_executable(self):
+        # A formal NOT_PASS bound to an OLDER HEAD must NOT drive FIX on the
+        # current HEAD (P0-2 regression: previously leaked via the unbounded
+        # generic NOT_PASS fallback).
+        r = review_from_github("o/r", 1, self.HEAD, self._pr(
+            rd=None, reviews=[{"state": "COMMENTED",
+                               "body": "AGENTOPS_REVIEW: NOT_PASS\nHEAD: oldhead"}]))
+        self.assertEqual(r.decision, "INCOMPLETE")
+        self.assertTrue(r.fail_closed)
+
+    def test_formal_missing_head_fail_closed(self):
+        # A formal marker with NO HEAD binding is missing/ambiguous.
+        r = review_from_github("o/r", 1, self.HEAD, self._pr(
+            rd=None, reviews=[{"state": "COMMENTED",
+                               "body": "AGENTOPS_REVIEW: PASS"}]))
+        self.assertEqual(r.decision, "INCOMPLETE")
+        self.assertTrue(r.fail_closed)
+
     def test_generic_comment_not_executable(self):
         # No AGENTOPS_REVIEW marker -> not executable.
         r = review_from_github("o/r", 1, self.HEAD, self._pr(
             rd=None, reviews=[{"state": "COMMENTED", "body": "looks ok"}]))
         self.assertEqual(r.decision, "INCOMPLETE")
+
+    def test_generic_not_pass_comment_not_executable(self):
+        # Generic "NOT PASS" without the formal marker is not executable
+        # (P0-2: only the formal AGENTOPS_REVIEW verdict drives decisions).
+        r = review_from_github("o/r", 1, self.HEAD, self._pr(
+            rd=None, reviews=[{"state": "COMMENTED",
+                               "body": "NOT PASS - please fix styling"}]))
+        self.assertEqual(r.decision, "INCOMPLETE")
+
+    def test_native_changes_requested_bound_to_head(self):
+        r = review_from_github("o/r", 1, self.HEAD, self._pr(
+            rd="CHANGES_REQUESTED", reviews=[
+                {"state": "CHANGES_REQUESTED", "commit_id": self.HEAD,
+                 "body": "needs work"}]))
+        self.assertEqual(r.decision, "CHANGES_REQUESTED")
+        self.assertEqual(r.findings, ["needs work"])
+
+    def test_native_changes_requested_stale_head(self):
+        # Native CHANGES_REQUESTED review bound to an OLDER HEAD must not
+        # drive FIX on the current HEAD.
+        r = review_from_github("o/r", 1, self.HEAD, self._pr(
+            rd="CHANGES_REQUESTED", reviews=[
+                {"state": "CHANGES_REQUESTED", "commit_id": "oldhead",
+                 "body": "needs work"}]))
+        self.assertEqual(r.decision, "INCOMPLETE")
+        self.assertTrue(r.fail_closed)
 
 
 class TestRuntimeLoopDecide(unittest.TestCase):
