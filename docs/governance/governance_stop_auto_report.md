@@ -1,43 +1,76 @@
-# Governance Stop Auto-Report & ACK-Before-Stop Protocol
+# Governance Status Reporting & Persistent Wait Protocol
+
+> Current semantics for AGE-18 reporting. This document supersedes the legacy interpretation that every reportable governance state terminates the Controller.
 
 ## Objective
-To ensure that whenever an AgentOps task reaches a governance stop state, it reliably informs the external GPT Reviewer before halting execution. This prevents silent stops and ensures the Reviewer is always aware of the exact final state without requiring manual PO intervention.
 
-## Allowed Stop States
-The protocol recognizes the following states as valid governance stop states:
-- `DONE`
-- `WAITING_PO_AUTH`
-- `BLOCKED`
-- `NEEDS_OWNER_DECISION`
-- `CHANGES_REQUESTED`
+Ensure the controlling GPT/PO context receives exact, correlated state evidence without turning a checkpoint or waiting state into task termination.
 
-## Canonical Protocol Flow
-1. `ENTER_STOP_STATE` (Internal state transitions to one of the allowed stop states).
-2. `authoritative remote read-back` (Ensure the local state reflects the remote canonical repository).
-3. `build exactly one status_report` (Construct the standardized report).
-4. `send via Neutral Relay` (Dispatch the report to the Reviewer).
-5. `wait for strictly correlated ACK` (Wait for an acknowledgment matching the exact request ID).
-6. `record ACK` (Store `stop_episode.acked = true` for the exact `request_id`/`state`/`PR`/`HEAD`-bound stop episode, to prevent duplicates).
-7. `STOP` (Halt execution).
+## Core rule
 
-## Report Contract
-The generated `status_report` must follow this exact format:
+**Builder STOP != Controller STOP.**
+
+`WAITING_PO_AUTH`, `CHANGES_REQUESTED`, `BLOCKED`, and `NEEDS_OWNER_DECISION` are control states that may pause Builder execution, but they do **not** by themselves terminate the Controller/Watcher.
+
+A report ACK closes the **report-delivery episode only**. It never authorizes a follow-on action and never terminates the control loop by itself.
+
+## State behavior
+
+### CHANGES_REQUESTED / NOT_PASS
+
+Normal remediation transition:
+
+```text
+GPT Review
+→ current-HEAD remediation
+→ Builder consumes findings
+→ fix/test
+→ new code HEAD
+→ GPT Review again
 ```
+
+Do not route `CHANGES_REQUESTED` through a stop-and-die protocol.
+
+### WAITING_PO_AUTH
+
+Persistent waiting state:
+
+```text
+enter WAITING_PO_AUTH
+→ Builder may idle/exit
+→ Controller/Watcher remains alive
+→ notify GPT/PO with exact state
+→ observe GitHub + Linear
+→ on meaningful change, re-run Review/Risk/Transition
+→ continue / ask GPT / remain waiting for PO
+```
+
+### BLOCKED / NEEDS_OWNER_DECISION
+
+Pause the relevant execution path and surface the blocker/decision requirement, but keep the control runtime alive unless the task is explicitly closed/cancelled.
+
+## status_report contract
+
+The generated `status_report` must use the exact envelope:
+
+```text
 REVIEW_REQUEST_ID: <new UUID>
 REPO: <exact repo>
 PR: <exact PR>
 HEAD: <exact bound HEAD>
 REQUEST: status_report
-STATE: <stop state>
+STATE: <state>
 SUMMARY: <concise factual summary>
 UNAUTHORIZED_ACTIONS: NONE|<explicit list>
 ```
 
-> **AGE-18 v1 requires a PR-bound task.** Non-PR stop reporting (`PR: NONE`) is outside this protocol version.
+AGE-18 v1 remains PR-bound for this exact report contract.
 
-## ACK Contract
-The GPT Reviewer MUST respond with:
-```
+## ACK contract
+
+The GPT Reviewer responds with exactly:
+
+```text
 REVIEW_REQUEST_ID: <same UUID>
 REPO: <exact repo>
 PR: <exact PR>
@@ -45,9 +78,25 @@ HEAD: <exact bound HEAD>
 ACK: status_report_received
 ```
 
+The ACK is transport/read-back evidence only.
+
+## Delivery semantics
+
+A report is `DELIVERED` only when the configured transport/read-back contract confirms it.
+
+If delivery cannot be confirmed:
+
+1. record `DELIVERY_FAILED` (or the equivalent explicit failure state/evidence);
+2. do **not** write a success timestamp/ACK flag;
+3. preserve retry/reconciliation evidence;
+4. retry only with bounded policy and duplicate protection;
+5. do not fabricate success and do not blindly spam duplicate reports.
+
 ## Invariants
-- `status_report` and `ACK` are purely informational and constitute **evidence only**. They do not authorize any further actions (no Ready, Merge, Deploy, or subsequent tasks).
-- The `ACK` must perfectly match the `REVIEW_REQUEST_ID`, `REPO`, `PR`, and `HEAD`. Stale or mismatched ACKs are rejected and the agent remains stopped.
-- Idempotency: One stop episode results in at most one acknowledged report. Restarts after ACK do not resend the report unless the underlying state has been mutated by a new authorization. The `stop_episode.acked = true` flag binds ACK to the exact `request_id`/`state`/`PR`/`HEAD` stop episode.
-- Unacknowledged or unknown-result cases must retry until resolved; they must not duplicate reports blindly.
-- The Builder must autonomously complete this flow without manual PO relay.
+
+- Report/ACK/read-back are evidence, never authorization.
+- Correlation binds exact request ID, repo, PR, and HEAD.
+- Stale/mismatched correlation is rejected.
+- No completion/report document may substitute for an implementation acceptance criterion.
+- A new report is generated only for a meaningful new episode/state/evidence change.
+- The Controller ends only on an explicitly terminal task outcome/policy decision, not merely because the Builder exited or a report was acknowledged.
