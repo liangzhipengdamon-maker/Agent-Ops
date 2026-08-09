@@ -1,7 +1,7 @@
 # Agent-Ops
 
-Agent-neutral control plane for governed multi-agent work.
+Agent-neutral control plane for governed, long-running software work.
 
-Current status: Bootstrap / Planning Only.
+Current control semantics: `docs/governance/CURRENT_RUNTIME_RULES.md`.
 
-No unattended implementation, merge, deployment, or production access is authorized.
+Legacy governance/architecture documents are historical when they conflict with that file.
