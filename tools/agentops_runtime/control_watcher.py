@@ -222,6 +222,10 @@ class ControlWatcher:
     def _notify(self, reason: str):
         if not self.deliverable_path:
             return
+        # Bind the notify to the CURRENT live PR HEAD, not the launch-time
+        # head: the PR may have advanced while the task sat at
+        # WAITING_PO_AUTH. This keeps the Completion Report exact.
+        live_head = github_poller.read_pr_head(self.repo, self.pr) or self.head
         sections = {
             "Task": f"{self.task_id}",
             "Status": f"Control Watcher detected a change and routed: {reason}",
@@ -230,14 +234,14 @@ class ControlWatcher:
             "Implementation": "tools/agentops_runtime/control_watcher.py",
             "Live validation evidence": "GitHub + Linear polled; change detected; "
                                         "existing Review/Risk/Transition path invoked.",
-            "PR/branch/HEAD": f"pr {self.pr} / {self.repo} / {self.head}",
+            "PR/branch/HEAD": f"pr {self.pr} / {self.repo} / {live_head}",
             "Deliverable": f"{self.deliverable_path}",
             "Deliverable URL": self.deliverable_url,
             "Boundaries": "No merge, no deploy, no PO bypass.",
             "Waiting": "WAITING_PO_AUTH (HIGH) or next route.",
         }
         report = build_completion_report(
-            task_id=self.task_id, repo=self.repo, pr=self.pr, head=self.head,
+            task_id=self.task_id, repo=self.repo, pr=self.pr, head=live_head,
             deliverable_path=self.deliverable_path,
             deliverable_url=self.deliverable_url,
             sections=sections,

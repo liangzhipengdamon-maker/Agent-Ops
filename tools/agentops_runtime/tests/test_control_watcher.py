@@ -7,6 +7,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from control_watcher import ControlWatcher, WatcherRuntimeState
+from transition_controller import DeliveryResult
 import control_watcher as cw
 
 
@@ -96,6 +97,26 @@ class TestControlWatcher(unittest.TestCase):
                                return_value={"state": "OPEN", "head": "abc",
                                              "updated_at": "t1"}):
             self.assertFalse(w._should_notify(prev))  # identical
+
+    def test_notify_binds_live_head_not_launch_head(self):
+        # The watcher must bind the CURRENT live PR HEAD in its notify,
+        # not the launch-time head (the PR may advance while waiting).
+        w = self._watcher("/tmp", head="launchhead")
+        w.runtime = WatcherRuntimeState(
+            task_id="AGE-T", repo="o/r", pr="7", head="launchhead", pid=1,
+            started_at="x", last_github={"state": "OPEN", "head": "launchhead"},
+            last_linear=None, last_route="WAITING_PO_AUTH", last_notify_at=None)
+        with mock.patch.object(cw.github_poller, "read_pr_head",
+                               return_value="livehead123"), \
+             mock.patch.object(w, "notifier") as mock_notifier:
+            mock_notifier.send.return_value = DeliveryResult(
+                correlation_id="x", delivered=True, exit_code=0,
+                ack_captured=False, readback_confirmed=True,
+                readback_checks={}, details="ok")
+            w._notify("high_state_change")
+        sent = mock_notifier.send.call_args[0][0]
+        self.assertEqual(sent.head, "livehead123")
+        self.assertNotEqual(sent.head, "launchhead")
 
     def test_terminal_when_merged(self):
         w = self._watcher("/tmp")
