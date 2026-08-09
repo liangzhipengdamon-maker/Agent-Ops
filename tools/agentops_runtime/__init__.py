@@ -1,13 +1,11 @@
-"""AgentOps AUTO/MANUAL Runtime Loop (AGE-30).
+"""AgentOps AUTO/MANUAL runtime adapter (AGE-30).
 
-Current task-mode runtime per docs/governance/CURRENT_RUNTIME_RULES.md.
+Thin control glue only. Durable state belongs to LoopX; GPT Web transport
+belongs to the existing Neutral Relay. This package only:
+  - reads the active Linear task (mode + criteria),
+  - reads the exact-PR/HEAD GitHub review verdict,
+  - decides the AUTO/MANUAL next step,
+  - keeps a watcher alive until terminal (PR/task closure or completion).
 
-No LOW/MEDIUM/HIGH risk classifier participates in the main control flow.
-The loop is: Linear task (AUTO|MANUAL) -> Builder -> GitHub -> GPT review;
-CHANGES_REQUESTED/NOT_PASS -> Builder fixes -> new code HEAD -> review again;
-PASS -> continue in scope until acceptance criteria are satisfied.
-
-Delivery is fail-closed: unconfirmed send/read-back is DELIVERY_FAILED.
-The Controller terminates only on accepted completion, closure, or
-cancellation.
+No risk classifier, no parallel state kernel, no re-implemented transport.
 """
