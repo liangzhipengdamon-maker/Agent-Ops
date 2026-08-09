@@ -183,6 +183,8 @@ class ControlWatcher:
         outcome = route_decision(risk, review_decision)
 
         route = outcome.route
+        prev_gh = self.runtime.last_github
+        prev_lin = self.runtime.last_linear
         self.runtime.last_github = gh
         self.runtime.last_linear = lin
         self.runtime.last_route = route
@@ -199,10 +201,11 @@ class ControlWatcher:
             return "GPT_DECISION_REQUIRED"
 
         if route == "WAITING_PO_AUTH":
-            # HIGH: stay; notify GPT/PO only when new info actually changed.
+            # HIGH: stay; notify GPT/PO only when new info actually changed
+            # relative to the PREVIOUS snapshot (avoid per-tick spam).
             print(f"WATCHER_ROUTE: WAITING_PO_AUTH (task {self.task_id}, "
                   f"review={review_decision})")
-            if self._should_notify():
+            if self._should_notify(prev_gh):
                 self._notify("high_state_change")
             return "WAITING_PO_AUTH"
 
@@ -210,12 +213,11 @@ class ControlWatcher:
               f"review={review_decision})")
         return route
 
-    def _should_notify(self) -> bool:
-        # Notify only when meaningful info changed (PR/head/review/state).
-        last = self.runtime.last_github
+    def _should_notify(self, prev_gh: Optional[dict]) -> bool:
+        # Notify only when meaningful GitHub state changed relative to the
+        # PREVIOUS snapshot. None-vs-None is not a change.
         cur = github_poller.read_pr_state(self.repo, self.pr)
-        changed = self._changed(last, cur)
-        return changed
+        return self._changed(prev_gh, cur)
 
     def _notify(self, reason: str):
         if not self.deliverable_path:

@@ -83,6 +83,20 @@ class TestControlWatcher(unittest.TestCase):
         self.assertEqual(result, "WAITING_PO_AUTH")
         mock_notify.assert_called_once()
 
+    def test_should_notify_compares_prev_snapshot(self):
+        # Notify only when the current PR state differs from the PREVIOUS
+        # snapshot (not from the just-updated one).
+        w = self._watcher("/tmp")
+        prev = {"state": "OPEN", "head": "abc", "updated_at": "t1"}
+        with mock.patch.object(cw.github_poller, "read_pr_state",
+                               return_value={"state": "OPEN", "head": "abc",
+                                             "updated_at": "t2"}):
+            self.assertTrue(w._should_notify(prev))  # updated_at changed
+        with mock.patch.object(cw.github_poller, "read_pr_state",
+                               return_value={"state": "OPEN", "head": "abc",
+                                             "updated_at": "t1"}):
+            self.assertFalse(w._should_notify(prev))  # identical
+
     def test_terminal_when_merged(self):
         w = self._watcher("/tmp")
         w.runtime = WatcherRuntimeState(
