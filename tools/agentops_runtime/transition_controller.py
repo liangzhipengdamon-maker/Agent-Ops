@@ -267,6 +267,25 @@ def _conversation_id_from_url(url: str) -> Optional[str]:
     return m.group(1).lower() if m else None
 
 
+def query_live_pr_head(repo: str, pr: str) -> Optional[str]:
+    """Query the CURRENT live PR HEAD via `gh` (authoritative).
+
+    Returns the exact headRefOid, or None on any failure (fail closed).
+    """
+    try:
+        res = subprocess.run(
+            ["gh", "pr", "view", str(pr), "--repo", repo,
+             "--json", "headRefOid"],
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+        data = json.loads(res.stdout)
+        head = (data.get("headRefOid") or "").strip()
+        return head if head else None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            OSError, json.JSONDecodeError):
+        return None
+
+
 class GptWebContextReadback:
     """Reads back the GPT Web control conversation to verify delivery.
 
