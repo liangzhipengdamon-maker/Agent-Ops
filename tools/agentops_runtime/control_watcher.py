@@ -226,12 +226,14 @@ class ControlWatcher:
 
         if route == "AUTO_CONTINUE":
             print(f"WATCHER_ROUTE: AUTO_CONTINUE (task {self.task_id}, risk={risk})")
+            self._emit_builder_wake("resume", route, review_decision)
             self._notify("resume")
             return "AUTO_CONTINUE"
 
         if route == "GPT_DECISION_REQUIRED":
             print(f"WATCHER_ROUTE: GPT_DECISION_REQUIRED (task {self.task_id}, "
                   f"risk={risk})")
+            self._emit_builder_wake("gpt_decision_follow_up", route, review_decision)
             self._notify("gpt_decision")
             return "GPT_DECISION_REQUIRED"
 
@@ -242,6 +244,11 @@ class ControlWatcher:
                   f"risk={risk}, review={review_decision})")
             if self._should_notify(prev_gh):
                 self._notify("high_state_change")
+                # A new review change on a HIGH task is evidence the Builder
+                # must act (e.g. fix P0s). Emit a Builder wake.
+                if review_decision in ("CHANGES_REQUESTED", "COMMENTED", "BLOCKED"):
+                    self._emit_builder_wake(
+                        "high_state_review_change", route, review_decision)
             return "WAITING_PO_AUTH"
 
         print(f"WATCHER_ROUTE: {route} (task {self.task_id}, "
@@ -253,6 +260,33 @@ class ControlWatcher:
         # PREVIOUS snapshot. None-vs-None is not a change.
         cur = github_poller.read_pr_state(self.repo, self.pr)
         return self._changed(prev_gh, cur)
+
+    def _emit_builder_wake(self, reason: str, route: str, review_decision: str):
+        """Write an actionable BUILDER_WAKE event for the Builder to consume.
+
+        This is the mechanism that drives the Builder to FIX the review
+        findings: the watcher does not fix code itself; it emits a wake
+        event (repo/pr/head/review/route/action) that the Builder consumes
+        on its next wake, executes the follow-up, commits, pushes, and the
+        watcher then re-evaluates the new HEAD.
+        """
+        os.makedirs(self.state_dir, exist_ok=True)
+        wake = {
+            "type": "BUILDER_WAKE",
+            "task_id": self.task_id,
+            "repo": self.repo,
+            "pr": self.pr,
+            "head": github_poller.read_pr_head(self.repo, self.pr) or self.head,
+            "review_decision": review_decision,
+            "route": route,
+            "reason": reason,
+            "action": "execute_follow_up",
+            "emitted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        wake_path = os.path.join(self.state_dir, f"wake_{self.task_id}.json")
+        with open(wake_path, "w") as f:
+            json.dump(wake, f, indent=2, ensure_ascii=False)
+        print(f"WATCHER_BUILDER_WAKE: {wake_path}")
 
     def _notify(self, reason: str):
         if not self.deliverable_path:

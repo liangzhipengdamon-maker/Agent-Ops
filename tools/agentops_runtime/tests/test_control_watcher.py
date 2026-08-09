@@ -176,6 +176,69 @@ class TestDynamicRisk(unittest.TestCase):
         self.assertEqual(result, "AUTO_CONTINUE")
         mock_notify.assert_called_once()
 
+    def test_changes_requested_emits_builder_wake(self):
+        # A CHANGES_REQUESTED review must emit an actionable BUILDER_WAKE so
+        # the Builder executes the fix (the current blocker).
+        with tempfile.TemporaryDirectory() as td:
+            w = ControlWatcher(
+                task_id="AGE-T", repo="o/r", pr="7", head="abc",
+                deliverable_path="docs/plans/X.md",
+                deliverable_url="https://github.com/o/r/blob/main/docs/plans/X.md",
+                state_dir=td, interval=600)
+            w.runtime = WatcherRuntimeState(
+                task_id="AGE-T", repo="o/r", pr="7", head="abc", pid=1,
+                started_at="x", last_github={"state": "OPEN", "head": "abc"},
+                last_linear=None, last_route="WAITING_PO_AUTH", last_notify_at=None)
+            with mock.patch.object(cw, "read_github_pr",
+                                   return_value=mock.Mock(decision="CHANGES_REQUESTED")), \
+                 mock.patch.object(w, "_notify"), \
+                 mock.patch.object(cw.github_poller, "read_pr_head",
+                                   return_value="def"):
+                result = w._handle_change({
+                    "github": {"state": "OPEN", "head": "def"},
+                    "linear": {"state_name": "In Review", "state_type": "started"},
+                })
+            self.assertEqual(result, "GPT_DECISION_REQUIRED")
+            wake_path = os.path.join(td, "wake_AGE-T.json")
+            self.assertTrue(os.path.exists(wake_path))
+            with open(wake_path) as f:
+                wake = json.load(f)
+            self.assertEqual(wake["type"], "BUILDER_WAKE")
+            self.assertEqual(wake["action"], "execute_follow_up")
+            self.assertEqual(wake["review_decision"], "CHANGES_REQUESTED")
+            self.assertEqual(wake["head"], "def")
+
+    def test_high_review_change_emits_builder_wake(self):
+        # Even on a HIGH task, a new COMMENTED/CHANGES_REQUESTED review
+        # change must emit a Builder wake so the Builder can fix P0s.
+        with tempfile.TemporaryDirectory() as td:
+            w = ControlWatcher(
+                task_id="AGE-T", repo="o/r", pr="7", head="abc",
+                deliverable_path="docs/plans/X.md",
+                deliverable_url="https://github.com/o/r/blob/main/docs/plans/X.md",
+                state_dir=td, interval=600)
+            w.runtime = WatcherRuntimeState(
+                task_id="AGE-T", repo="o/r", pr="7", head="abc", pid=1,
+                started_at="x", last_github={"state": "OPEN", "head": "abc"},
+                last_linear=None, last_route="WAITING_PO_AUTH", last_notify_at=None)
+            with mock.patch.object(cw, "read_github_pr",
+                                   return_value=mock.Mock(decision="COMMENTED")), \
+                 mock.patch.object(w, "_notify"), \
+                 mock.patch.object(w, "_should_notify", return_value=True), \
+                 mock.patch.object(cw.github_poller, "read_pr_head",
+                                   return_value="def"):
+                result = w._handle_change({
+                    "github": {"state": "OPEN", "head": "def"},
+                    "linear": {"state_name": "In Review", "state_type": "started"},
+                })
+            self.assertEqual(result, "WAITING_PO_AUTH")
+            wake_path = os.path.join(td, "wake_AGE-T.json")
+            self.assertTrue(os.path.exists(wake_path))
+            with open(wake_path) as f:
+                wake = json.load(f)
+            self.assertEqual(wake["type"], "BUILDER_WAKE")
+            self.assertEqual(wake["review_decision"], "COMMENTED")
+
     def test_terminal_when_merged(self):
         w = self._watcher()
         w.runtime = WatcherRuntimeState(

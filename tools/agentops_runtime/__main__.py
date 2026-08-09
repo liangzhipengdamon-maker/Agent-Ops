@@ -192,6 +192,9 @@ def main(argv=None):
     p_rep.add_argument("--sections-json", default=None)
     p_rep.add_argument("--output-dir", default=None)
 
+    p_wake = sub.add_parser("wake", help="List pending BUILDER_WAKE events (Builder consumes review follow-ups)")
+    p_wake.add_argument("--state-dir", default=None)
+
     args = parser.parse_args(argv)
 
     if args.command == "risk-evaluate":
@@ -284,6 +287,22 @@ def main(argv=None):
             "readback_confirmed": rb.readback_confirmed,
         }
         print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0
+
+    if args.command == "wake":
+        # Builder consumes pending BUILDER_WAKE events (driven by the
+        # Control Watcher) to execute review follow-ups. Read-only: it lists
+        # pending wakes; the Builder then executes the fix and pushes.
+        import glob
+        state_dir = args.state_dir or os.path.expanduser("~/.agentops/watcher")
+        wakes = []
+        for p in sorted(glob.glob(os.path.join(state_dir, "wake_*.json"))):
+            try:
+                with open(p) as f:
+                    wakes.append(json.load(f))
+            except (json.JSONDecodeError, OSError):
+                continue
+        print(json.dumps({"pending_wakes": wakes}, indent=2, ensure_ascii=False))
         return 0
 
     parser.print_help()
