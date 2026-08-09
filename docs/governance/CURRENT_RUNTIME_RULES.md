@@ -15,23 +15,25 @@ This is the single current control contract. Older governance/architecture docs 
 
 ## Execution mode
 
-Every task starts in one of two modes:
+Before execution starts, every task must specify exactly one mode: `AUTO` or `MANUAL`.
+
+The mode controls **when the loop pauses**. It does not expand the task scope or acceptance criteria. If the mode is missing or ambiguous, surface a decision request instead of inventing a default.
 
 ### AUTO
 
-Continue the task loop until the acceptance criteria are satisfied or a real blocker makes execution impossible.
+Keep the task loop running through the in-scope steps needed to satisfy the acceptance criteria.
 
 ```text
 Linear task → Builder → GitHub → GPT Review
 CHANGES_REQUESTED / NOT_PASS → Builder fixes → new code HEAD → review again
-PASS → continue the task or finish when acceptance criteria are satisfied
+PASS → continue in scope or finish when acceptance criteria are satisfied
 ```
 
-Do not stop merely because a phase, commit, report, or review round completed.
+Do not stop merely because a phase, commit, push, PR update, report, or review round completed. AUTO may continue through lifecycle steps that are already inside the task scope; it must not invent unrelated work.
 
 ### MANUAL
 
-The task instruction names the checkpoint/condition where PO input is required.
+The task instruction must name the checkpoint or condition where PO input is required.
 
 Run the same Builder ↔ GitHub ↔ GPT loop until that checkpoint is reached, then report the exact state and enter `WAITING_PO_AUTH`.
 
@@ -41,7 +43,7 @@ Run the same Builder ↔ GitHub ↔ GPT loop until that checkpoint is reached, t
 
 There is no LOW/MEDIUM/HIGH runtime risk classifier in the main control flow.
 
-The Builder/GPT may use judgment while executing, but they do not convert that judgment into a separate risk-state machine. If an action is clearly outside the authorized task scope, ambiguous, or impossible to execute safely, surface it as a blocker/decision request instead of inventing a risk tier.
+Builder and GPT use judgment directly. If work is outside the task scope, ambiguous, or cannot be executed safely, surface a blocker or decision request instead of creating a risk tier or a new gate system.
 
 ## Acceptance and delivery
 
