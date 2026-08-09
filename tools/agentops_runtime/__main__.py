@@ -11,6 +11,9 @@ Commands:
              closure or accepted completion.
   report     --task-id T --repo R --pr N --status-report S
              Send a status_report via the existing Neutral Relay (thin glue).
+  po-decision --repo R --pr N --head H --decision APPROVE|REJECT|CHANGES
+             Write a PO decision to the bridge so a WAITING_PO_AUTH loop
+             resumes at the named MANUAL checkpoint (P0-2).
 
 Durable state is LoopX's job; GPT Web transport is the existing Neutral
 Relay's job. This is only the AUTO/MANUAL control glue.
@@ -23,6 +26,22 @@ import sys
 from .runtime_loop import decide
 from .controller import ControlWatcher
 from . import relay_client
+
+
+def cmd_po_decision(args):
+    """Write a PO decision to the bridge so a WAITING_PO_AUTH loop resumes
+    (P0-2). The decision binds the exact PR+HEAD and is consumed by
+    runtime_loop._po_decision on the next step."""
+    import os
+    from .runtime_loop import _bridge_dir
+    bd = _bridge_dir()
+    os.makedirs(bd, exist_ok=True)
+    decision = {"repo": args.repo, "pr": str(args.pr), "head": args.head,
+                "decision": args.decision.upper()}
+    with open(os.path.join(bd, "po_decision.json"), "w") as f:
+        json.dump(decision, f, indent=2)
+    print(json.dumps({"written": True, "decision": decision}, indent=2))
+    return 0
 
 
 def cmd_step(args):
@@ -73,6 +92,13 @@ def main(argv=None):
     p.add_argument("--pr", required=True)
     p.add_argument("--status-report", required=True)
 
+    p = sub.add_parser("po-decision")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--pr", required=True)
+    p.add_argument("--head", required=True)
+    p.add_argument("--decision", required=True,
+                   choices=["APPROVE", "REJECT", "CHANGES"])
+
     args = parser.parse_args(argv)
 
     if args.command in ("run-auto", "run-manual"):
@@ -81,6 +107,8 @@ def main(argv=None):
         return cmd_watch(args)
     if args.command == "report":
         return cmd_report(args)
+    if args.command == "po-decision":
+        return cmd_po_decision(args)
     parser.print_help()
     return 1
 

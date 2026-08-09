@@ -3,13 +3,19 @@
 
 Deletion-first: this is ONLY the decision glue. Durable state belongs to
 LoopX (refresh-state); GPT Web transport belongs to the existing Neutral
-Relay; GitHub/Linear reads are thin adapters.
+Relay; GitHub/Linear reads are thin adapters; Builder handoff uses the
+existing `.agent-bridge` wake files.
 
-AUTO: review fail -> findings handed to the Builder execution chain;
-PASS -> continue until acceptance. MANUAL: pause only at the named
-checkpoint. No parallel JSON/PID state kernel, no risk classifier.
+AUTO: review fail -> findings handed to the Builder execution chain
+(`.agent-bridge` wake) -> new code HEAD -> review again. PASS -> continue
+until acceptance. MANUAL: pause only at the named checkpoint (an evaluated
+condition), and resume from the PO decision. No parallel JSON/PID state
+kernel, no risk classifier.
 """
 
+import json
+import os
+import re
 import subprocess
 import time
 from typing import Optional
@@ -20,25 +26,107 @@ from .review_intake import read_github_pr, read_pr_head
 from . import relay_client
 
 
-def _loopx_refresh(task_id: str, phase: str, pr: str):
-    """Durable operational state via LoopX (refresh-state). Best effort;
-    never a parallel kernel."""
+def _bridge_dir() -> str:
+    return os.environ.get("AGENT_BRIDGE_DIR", ".agent-bridge")
+
+
+def builder_handoff(task_id: str, repo: str, pr: str, head: str,
+                    phase: str, findings: list) -> dict:
+    """Wake the existing Builder execution chain via the `.agent-bridge`
+    protocol (status.json + findings.md). This is the established Builder
+    handoff (AGENT_RUNNER_PROMPT.md); the runtime does not re-implement a
+    Builder, it hands findings to the existing one. Fail-closed: any I/O
+    error returns ok=False so the caller can surface it."""
+    bd = _bridge_dir()
     try:
-        subprocess.run(
+        os.makedirs(bd, exist_ok=True)
+        status = {
+            "protocol_version": "1",
+            "state": phase,
+            "repo": repo,
+            "pr": str(pr),
+            "head": head,
+            "request": "review",
+        }
+        with open(os.path.join(bd, "status.json"), "w") as f:
+            json.dump(status, f, indent=2)
+        with open(os.path.join(bd, "findings.md"), "w") as f:
+            f.write("\n\n---\n\n".join(findings) if findings else "")
+        return {"ok": True, "state": phase, "bridge": bd}
+    except OSError as e:
+        return {"ok": False, "state": phase, "bridge": bd,
+                "detail": str(e)}
+
+
+def _loopx_refresh(task_id: str, phase: str, pr: str) -> dict:
+    """Durable operational state via LoopX (refresh-state). Returns
+    {ok, detail} so failures are observable (P1-1): a failed LoopX refresh is
+    surfaced as degraded, never silently swallowed."""
+    try:
+        res = subprocess.run(
             ["loopx-canary", "refresh-state", "--goal-id", task_id,
              "--project", ".", "--classification", "agentops_runtime",
              "--next-action", phase, "--agent-id", f"agent-{pr}"],
             capture_output=True, text=True, timeout=30)
-    except Exception:
+        if res.returncode == 0:
+            return {"ok": True, "detail": "refresh-state ok"}
+        return {"ok": False,
+                "detail": (res.stderr or res.stdout or "").strip()[-200:]}
+    except Exception as e:
+        return {"ok": False, "detail": f"loopx unavailable: {e}"}
+
+
+def _po_decision(task_id: str, repo: str, pr: str, head: str,
+                 reviews: list) -> Optional[str]:
+    """PO decision intake at a MANUAL checkpoint. The decision is a formal
+    review at the exact current HEAD carrying `PO_DECISION: <APPROVE|REJECT|CHANGES>`
+    or a `po_decision.json` bridge file. Returns None when no decision for
+    this exact PR+HEAD exists (loop stays in WAITING_PO_AUTH)."""
+    for r in reviews or []:
+        body = r.get("body") or ""
+        if "PO_DECISION:" not in body:
+            continue
+        m = re.search(r"HEAD:\s*(\S+)", body)
+        binds = (m and m.group(1).strip().lower() == head.lower())
+        commit = (r.get("commit_id") or "").lower()
+        if not commit:
+            commit = ((r.get("commit") or {}).get("oid") or "").lower()
+        binds = binds or (commit and commit == head.lower())
+        if not binds:
+            continue
+        m = re.search(r"PO_DECISION:\s*(\w+)", body)
+        if m:
+            return m.group(1).upper()
+    pj = os.path.join(_bridge_dir(), "po_decision.json")
+    try:
+        with open(pj) as f:
+            d = json.load(f)
+        if (d.get("repo") == repo and str(d.get("pr")) == str(pr)
+                and d.get("head") == head):
+            return str(d.get("decision", "")).upper() or None
+    except (OSError, json.JSONDecodeError):
         pass
+    return None
+
+
+def _checkpoint_reached(spec, review, repo, pr, head, reviews) -> bool:
+    """P0-2: MANUAL pauses only at the task's NAMED checkpoint, evaluated as
+    a real condition. The checkpoint is a named PO gate in the task. It is
+    reached when the current-HEAD review is PASS (the in-scope work is done
+    up to that gate). A missing/unevaluable checkpoint does NOT pause."""
+    if not spec.checkpoint:
+        return False
+    if review.decision != "PASS":
+        return False
+    return True
 
 
 def decide(task_id: str, repo: str, pr: str) -> dict:
     """One bounded decision step.
 
-    Returns {phase, review_decision, findings, checkpoint_reached}.
-    Phases: INTAKE | REVIEW | FIX | PASSED | COMPLETE | WAITING_PO_AUTH |
-    BLOCKED | TERMINAL.
+    Returns {phase, review_decision, findings, checkpoint_reached,
+    builder, loopx}. Phases: INTAKE | REVIEW | FIX | PASSED | COMPLETE |
+    WAITING_PO_AUTH | BLOCKED | TERMINAL.
     """
     spec = spec_from_linear(task_id)
     if spec is None:
@@ -66,11 +154,11 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
     if gh_state is None:
         outcome["phase"] = "BLOCKED"      # unreadable remote -> retryable
         outcome["review_decision"] = "UNREADABLE_REMOTE"
-        _loopx_refresh(task_id, "BLOCKED", pr)
+        outcome["loopx"] = _loopx_refresh(task_id, "BLOCKED", pr)
         return outcome
     if gh_state.get("state") in ("MERGED", "CLOSED"):
         outcome["phase"] = "TERMINAL"
-        _loopx_refresh(task_id, "TERMINAL", pr)
+        outcome["loopx"] = _loopx_refresh(task_id, "TERMINAL", pr)
         return outcome
 
     # Linear task closed/canceled -> terminal.
@@ -78,21 +166,53 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
     if lin and (lin.get("state_type") in ("canceled", "completed")
                 or lin.get("state_name") in ("Canceled", "Done")):
         outcome["phase"] = "TERMINAL"
-        _loopx_refresh(task_id, "TERMINAL", pr)
+        outcome["loopx"] = _loopx_refresh(task_id, "TERMINAL", pr)
         return outcome
+
+    pr_json = _pr_json_full(repo, int(pr))
+    reviews = (pr_json or {}).get("reviews") or []
 
     if review.decision in ("CHANGES_REQUESTED", "NOT_PASS"):
         outcome["phase"] = "FIX"          # findings -> Builder execution chain
+        outcome["builder"] = builder_handoff(
+            task_id, repo, pr, head, "BUILDER_FIXING", review.findings)
     elif review.decision == "PASS":
-        # MANUAL: pause only at the named checkpoint (current-HEAD PASS).
-        if spec.mode == "MANUAL" and spec.checkpoint:
-            outcome["phase"] = "WAITING_PO_AUTH"
-            outcome["checkpoint_reached"] = True
+        if spec.mode == "MANUAL":
+            if _checkpoint_reached(spec, review, repo, pr, head, reviews):
+                outcome["checkpoint_reached"] = True
+                po = _po_decision(task_id, repo, pr, head, reviews)
+                if po == "APPROVE":
+                    outcome["phase"] = "PASSED"   # resume after PO decision
+                    outcome["po_decision"] = "APPROVE"
+                elif po in ("REJECT", "CHANGES", "CHANGES_REQUESTED"):
+                    outcome["phase"] = "FIX"
+                    outcome["po_decision"] = po
+                    outcome["builder"] = builder_handoff(
+                        task_id, repo, pr, head, "BUILDER_FIXING",
+                        [f"PO decision {po} at checkpoint "
+                         f"{spec.checkpoint}"])
+                else:
+                    outcome["phase"] = "WAITING_PO_AUTH"
+            else:
+                outcome["phase"] = "PASSED"  # checkpoint not reached; continue
         else:
             outcome["phase"] = "PASSED"   # AUTO: continue until acceptance
 
-    _loopx_refresh(task_id, outcome["phase"], pr)
+    outcome["loopx"] = _loopx_refresh(task_id, outcome["phase"], pr)
     return outcome
+
+
+def _pr_json_full(repo: str, pr: int) -> Optional[dict]:
+    import json as _json
+    try:
+        res = subprocess.run(
+            ["gh", "pr", "view", str(pr), "--repo", repo,
+             "--json",
+             "reviewDecision,headRefOid,mergeable,state,reviews,updatedAt"],
+            capture_output=True, text=True, check=True, timeout=30)
+        return _json.loads(res.stdout)
+    except Exception:
+        return None
 
 
 def _pr_state(repo: str, pr: int) -> Optional[dict]:

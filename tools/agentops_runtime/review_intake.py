@@ -3,14 +3,17 @@
 
 Reads the authoritative GitHub PR review state via `gh` and classifies it
 into an AgentOps review outcome:
-  - PASS               -> reviewApproved (APPROVED, mergeable, head match)
-  - CHANGES_REQUESTED  -> GitHub CHANGES_REQUESTED
-  - NOT_PASS           -> COMMENTED with explicit "NOT PASS" / "NOT_PASS"
-                          in review bodies, or blocked, or incomplete
-                          evidence (fail closed)
+  - PASS               -> formal AGENTOPS_REVIEW PASS at the exact HEAD, or
+                          native APPROVED bound to the exact HEAD
+  - CHANGES_REQUESTED  -> formal AGENTOPS_REVIEW CHANGES_REQUESTED at the
+                          exact HEAD, or native CHANGES_REQUESTED bound to it
+  - NOT_PASS           -> formal AGENTOPS_REVIEW NOT_PASS at the exact HEAD
+  - INCOMPLETE         -> no executable verdict bound to the exact current
+                          HEAD (stale, missing-HEAD, or generic comments)
 
 The outcome is bound to the exact current PR + HEAD; a stale HEAD is
-INCOMPLETE (fail closed). NEVER self-approves.
+INCOMPLETE (fail closed). NEVER self-approves. Among multiple current-HEAD
+formal reviews the LATEST (by submittedAt) wins.
 """
 
 import dataclasses
@@ -44,11 +47,14 @@ def _parse_pr_json(raw: str) -> dict:
 
 
 def _review_binds_head(r: dict, expected_head: str) -> bool:
-    """A review binds the exact current HEAD via its submitted commit_id
-    (authoritative) or a body `HEAD:` line. Both are used because the GPT
+    """A review binds the exact current HEAD via its submitted commit (the
+    authoritative `commit.oid`; also accept a top-level `commit_id` for
+    callers/tests) or a body `HEAD:` line. Both are used because the GPT
     same-owner path posts a formal COMMENTED review whose body carries the
-    HEAD marker, while native GitHub reviews carry commit_id."""
+    HEAD marker, while native GitHub reviews carry the commit oid."""
     commit = (r.get("commit_id") or "").lower()
+    if not commit:
+        commit = ((r.get("commit") or {}).get("oid") or "").lower()
     if commit and commit == expected_head.lower():
         return True
     m = re.search(r"HEAD:\s*(\S+)", r.get("body") or "")
@@ -56,12 +62,30 @@ def _review_binds_head(r: dict, expected_head: str) -> bool:
 
 
 def _review_has_any_binding(r: dict) -> bool:
-    """True if the review exposes any HEAD binding (commit_id or body HEAD:).
-    P0-2: a formal review with NO binding is missing/ambiguous -> the
+    """True if the review exposes any HEAD binding (commit oid/id or body
+    HEAD:). P0-2: a formal review with NO binding is missing/ambiguous -> the
     executable signal is INCOMPLETE, never applied."""
-    if (r.get("commit_id") or "").strip():
+    commit = (r.get("commit_id") or "").strip()
+    if not commit:
+        commit = ((r.get("commit") or {}).get("oid") or "").strip()
+    if commit:
         return True
     return bool(re.search(r"HEAD:\s*(\S+)", r.get("body") or ""))
+
+
+def _latest_bound_review(reviews, expected_head: str):
+    """Deterministically select the LATEST current-HEAD formal review by
+    submittedAt (falling back to review id). P1-2: multiple formal reviews on
+    the same HEAD must not let an older verdict win via API ordering."""
+    bound = [r for r in reviews
+             if r.get("state") == "COMMENTED"
+             and "AGENTOPS_REVIEW" in (r.get("body") or "")
+             and _review_binds_head(r, expected_head)]
+    if not bound:
+        return None
+    bound.sort(key=lambda r: (r.get("submittedAt") or "",
+                              str(r.get("id") or "")), reverse=True)
+    return bound[0]
 
 
 def review_from_github(repo: str, pr: int, expected_head: str,
@@ -88,16 +112,11 @@ def review_from_github(repo: str, pr: int, expected_head: str,
     # CHANGES_REQUESTED. A formal review without any HEAD binding is
     # missing/ambiguous -> INCOMPLETE (fail closed). A formal review bound to
     # a DIFFERENT HEAD is stale -> skip; with no current-HEAD verdict the
-    # outcome is INCOMPLETE, never the stale one.
-    for r in reviews:
-        body = r.get("body") or ""
-        if r.get("state") != "COMMENTED" or "AGENTOPS_REVIEW" not in body:
-            continue
-        if not _review_has_any_binding(r):
-            return ReviewOutcome("INCOMPLETE", "INCOMPLETE", repo, pr, head,
-                                 [], fail_closed=True)
-        if not _review_binds_head(r, expected_head):
-            continue  # stale review for another HEAD; ignore
+    # outcome is INCOMPLETE, never the stale one. P1-2: among multiple
+    # current-HEAD formal reviews, the LATEST (by submittedAt) wins.
+    latest = _latest_bound_review(reviews, expected_head)
+    if latest is not None:
+        body = latest.get("body") or ""
         m_verdict = re.search(
             r"\b(PASS|NOT_PASS|CHANGES_REQUESTED)\b", body, re.IGNORECASE)
         if m_verdict:
@@ -107,6 +126,12 @@ def review_from_github(repo: str, pr: int, expected_head: str,
                                      [body])
             return ReviewOutcome("COMMENTED", verdict, repo, pr, head,
                                  [body])
+    # A formal AGENTOPS_REVIEW review exists but none binds this exact HEAD:
+    # stale/missing/ambiguous -> fail closed.
+    if any("AGENTOPS_REVIEW" in (r.get("body") or "")
+           for r in reviews if r.get("state") == "COMMENTED"):
+        return ReviewOutcome("INCOMPLETE", "INCOMPLETE", repo, pr, head,
+                             [], fail_closed=True)
 
     # GitHub native reviewDecision (used when an independent reviewer
     # approves/changes on GitHub directly). Only a native verdict whose

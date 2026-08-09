@@ -3,8 +3,9 @@
 
 Keeps the task loop alive across Builder exits and waiting periods. It has
 no parallel state kernel: durable state is written to LoopX (refresh-state)
-via runtime_loop. Terminates only on accepted completion, PR closure, or
-task closure/cancellation.
+via runtime_loop; Builder handoff uses the existing `.agent-bridge` wake
+files. Terminates only on accepted completion, PR closure, or task
+closure/cancellation.
 """
 
 import os
@@ -47,6 +48,14 @@ class ControlWatcher:
                 phase = outcome.get("phase")
                 print(f"WATCHER_STEP: phase={phase} "
                       f"review={outcome.get('review_decision')}")
+                # P1-1: LoopX degradation is observable, never silent.
+                loopx = outcome.get("loopx") or {}
+                if loopx.get("ok") is False:
+                    print(f"WATCHER_LOOPX_DEGRADED: {loopx.get('detail')}")
+                builder = outcome.get("builder") or {}
+                if builder.get("ok") is False:
+                    print(f"WATCHER_BUILDER_HANDOFF_FAILED: "
+                          f"{builder.get('detail')}")
                 if phase in ("COMPLETE", "TERMINAL"):
                     print(f"WATCHER_EXIT: {phase}")
                     break

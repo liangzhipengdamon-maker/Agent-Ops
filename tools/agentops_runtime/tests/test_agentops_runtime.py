@@ -161,11 +161,53 @@ class TestReviewIntake(unittest.TestCase):
         self.assertEqual(r.decision, "INCOMPLETE")
         self.assertTrue(r.fail_closed)
 
+    def test_commit_oid_binding_native(self):
+        # gh pr view returns reviews with commit.oid (not commit_id).
+        r = review_from_github("o/r", 1, self.HEAD, self._pr(
+            rd="CHANGES_REQUESTED", reviews=[
+                {"state": "CHANGES_REQUESTED",
+                 "commit": {"oid": self.HEAD}, "body": "fix it"}]))
+        self.assertEqual(r.decision, "CHANGES_REQUESTED")
+
+    def test_commit_oid_binding_stale(self):
+        r = review_from_github("o/r", 1, self.HEAD, self._pr(
+            rd="CHANGES_REQUESTED", reviews=[
+                {"state": "CHANGES_REQUESTED",
+                 "commit": {"oid": "oldhead"}, "body": "fix it"}]))
+        self.assertEqual(r.decision, "INCOMPLETE")
+
+    def test_latest_formal_review_wins(self):
+        # P1-2: among two current-HEAD formal reviews the LATEST (by
+        # submittedAt) determines the verdict, not API ordering.
+        older = {"state": "COMMENTED",
+                 "submittedAt": "2026-08-01T10:00:00Z",
+                 "body": f"AGENTOPS_REVIEW: NOT_PASS\nHEAD: {self.HEAD}"}
+        newer = {"state": "COMMENTED",
+                 "submittedAt": "2026-08-02T10:00:00Z",
+                 "body": f"AGENTOPS_REVIEW: PASS\nHEAD: {self.HEAD}"}
+        for reviews in ([newer, older], [older, newer]):
+            r = review_from_github("o/r", 1, self.HEAD,
+                                   self._pr(rd=None, reviews=reviews))
+            self.assertEqual(r.decision, "PASS")
+
 
 class TestRuntimeLoopDecide(unittest.TestCase):
     def _open_pr(self):
         return mock.patch("agentops_runtime.runtime_loop._pr_state",
                           return_value={"state": "OPEN"})
+
+    def _reviews(self, reviews=None):
+        return mock.patch("agentops_runtime.runtime_loop._pr_json_full",
+                          return_value={"reviews": reviews or [],
+                                        "headRefOid": "abc"})
+
+    def _bridge(self):
+        return mock.patch("agentops_runtime.runtime_loop._bridge_dir",
+                          return_value=tempfile.mkdtemp())
+
+    def _builder(self):
+        return mock.patch("agentops_runtime.runtime_loop.builder_handoff",
+                          return_value={"ok": True, "state": "BUILDER_FIXING"})
 
     def test_auto_review_fix(self):
         with self._open_pr(), \
@@ -177,10 +219,12 @@ class TestRuntimeLoopDecide(unittest.TestCase):
                             "abc", ["fix"])), \
              mock.patch("agentops_runtime.runtime_loop.read_pr_head",
                         return_value="abc"), \
+             self._reviews(), self._bridge(), self._builder(), \
              mock.patch("agentops_runtime.runtime_loop._loopx_refresh"):
             out = decide("AGE-X", "o/r", "7")
         self.assertEqual(out["phase"], "FIX")
         self.assertEqual(out["findings"], ["fix"])
+        self.assertEqual(out["builder"]["ok"], True)
 
     def test_auto_pass_passed(self):
         with self._open_pr(), \
@@ -191,6 +235,7 @@ class TestRuntimeLoopDecide(unittest.TestCase):
                             "COMMENTED", "PASS", "o/r", 7, "abc", [])), \
              mock.patch("agentops_runtime.runtime_loop.read_pr_head",
                         return_value="abc"), \
+             self._reviews(), \
              mock.patch("agentops_runtime.runtime_loop._loopx_refresh"):
             out = decide("AGE-X", "o/r", "7")
         self.assertEqual(out["phase"], "PASSED")
@@ -205,10 +250,32 @@ class TestRuntimeLoopDecide(unittest.TestCase):
                             "COMMENTED", "PASS", "o/r", 7, "abc", [])), \
              mock.patch("agentops_runtime.runtime_loop.read_pr_head",
                         return_value="abc"), \
+             self._reviews(), self._bridge(), \
+             mock.patch("agentops_runtime.runtime_loop._po_decision",
+                        return_value=None), \
              mock.patch("agentops_runtime.runtime_loop._loopx_refresh"):
             out = decide("AGE-X", "o/r", "7")
         self.assertEqual(out["phase"], "WAITING_PO_AUTH")
         self.assertTrue(out["checkpoint_reached"])
+
+    def test_manual_resume_after_po_approve(self):
+        # P0-2: a PO APPROVE decision at the exact HEAD resumes the loop.
+        with self._open_pr(), \
+             mock.patch("agentops_runtime.runtime_loop.spec_from_linear",
+                        return_value=TaskSpec("AGE-X", "MANUAL",
+                                              "final approval", [])), \
+             mock.patch("agentops_runtime.runtime_loop.read_github_pr",
+                        return_value=ReviewOutcome(
+                            "COMMENTED", "PASS", "o/r", 7, "abc", [])), \
+             mock.patch("agentops_runtime.runtime_loop.read_pr_head",
+                        return_value="abc"), \
+             self._reviews(), self._bridge(), \
+             mock.patch("agentops_runtime.runtime_loop._po_decision",
+                        return_value="APPROVE"), \
+             mock.patch("agentops_runtime.runtime_loop._loopx_refresh"):
+            out = decide("AGE-X", "o/r", "7")
+        self.assertEqual(out["phase"], "PASSED")
+        self.assertEqual(out["po_decision"], "APPROVE")
 
     def test_manual_no_checkpoint_does_not_pause(self):
         # MANUAL without a named checkpoint must not pause.
@@ -220,6 +287,7 @@ class TestRuntimeLoopDecide(unittest.TestCase):
                             "COMMENTED", "PASS", "o/r", 7, "abc", [])), \
              mock.patch("agentops_runtime.runtime_loop.read_pr_head",
                         return_value="abc"), \
+             self._reviews(), \
              mock.patch("agentops_runtime.runtime_loop._loopx_refresh"):
             out = decide("AGE-X", "o/r", "7")
         self.assertEqual(out["phase"], "PASSED")
@@ -251,12 +319,90 @@ class TestRuntimeLoopDecide(unittest.TestCase):
                             "COMMENTED", "PASS", "o/r", 7, "abc", [])), \
              mock.patch("agentops_runtime.runtime_loop.read_pr_head",
                         return_value="abc"), \
+             self._reviews(), \
              mock.patch.object(linear_adapter, "read_linear_issue",
                                return_value={"state_name": "Done",
                                              "state_type": "completed"}), \
              mock.patch("agentops_runtime.runtime_loop._loopx_refresh"):
             out = decide("AGE-X", "o/r", "7")
         self.assertEqual(out["phase"], "TERMINAL")
+
+    def test_loopx_degraded_is_observable(self):
+        # P1-1: a failed LoopX refresh is surfaced in the outcome, never
+        # silently swallowed.
+        with self._open_pr(), \
+             mock.patch("agentops_runtime.runtime_loop.spec_from_linear",
+                        return_value=TaskSpec("AGE-X", "AUTO", None, [])), \
+             mock.patch("agentops_runtime.runtime_loop.read_github_pr",
+                        return_value=ReviewOutcome(
+                            "COMMENTED", "CHANGES_REQUESTED", "o/r", 7,
+                            "abc", ["fix"])), \
+             mock.patch("agentops_runtime.runtime_loop.read_pr_head",
+                        return_value="abc"), \
+             self._reviews(), self._bridge(), self._builder(), \
+             mock.patch("agentops_runtime.runtime_loop._loopx_refresh",
+                        return_value={"ok": False, "detail": "boom"}):
+            out = decide("AGE-X", "o/r", "7")
+        self.assertEqual(out["phase"], "FIX")
+        self.assertEqual(out["loopx"], {"ok": False, "detail": "boom"})
+
+
+class TestPOIntake(unittest.TestCase):
+    def test_po_decision_from_formal_review(self):
+        from agentops_runtime.runtime_loop import _po_decision
+        reviews = [{"state": "COMMENTED", "commit_id": "abc",
+                    "body": "PO_DECISION: APPROVE\nHEAD: abc"}]
+        self.assertEqual(_po_decision("AGE-X", "o/r", "7", "abc", reviews),
+                         "APPROVE")
+
+    def test_po_decision_stale_head_ignored(self):
+        from agentops_runtime.runtime_loop import _po_decision
+        reviews = [{"state": "COMMENTED", "commit_id": "old",
+                    "body": "PO_DECISION: APPROVE\nHEAD: old"}]
+        self.assertIsNone(_po_decision("AGE-X", "o/r", "7", "abc", reviews))
+
+
+class TestRelayClientACK(unittest.TestCase):
+    def _send(self, payload, td, output):
+        import types
+        fake_uuid = types.SimpleNamespace(
+            uuid4=lambda: mock.Mock(hex="deadbeefcafe"))
+        out = os.path.join(td, "CPL_deadbeefcafe_output.md")
+        with open(out, "w") as f:
+            f.write(output)
+        with mock.patch("agentops_runtime.relay_client.subprocess.run",
+                        return_value=mock.Mock(returncode=0)), \
+             mock.patch("agentops_runtime.relay_client.RELAY_BIN", "/bin/true"), \
+             mock.patch.object(relay_client, "uuid", fake_uuid):
+            return relay_client.send_status_report(payload, td)
+
+    def test_ack_exact_binding_delivered(self):
+        payload = ("REVIEW_REQUEST_ID: req-1\nREPO: o/r\nPR: 7\nHEAD: h1\n"
+                   "REQUEST: status_report\n")
+        output = ("REVIEW_REQUEST_ID: req-1\nREPO: o/r\nPR: 7\nHEAD: h1\n"
+                  "ACK: status_report_received\n")
+        with tempfile.TemporaryDirectory() as td:
+            res = self._send(payload, td, output)
+        self.assertTrue(res["delivered"])
+
+    def test_ack_wrong_head_not_delivered(self):
+        # P0-3: ACK with a different HEAD must not be delivered=true.
+        payload = ("REVIEW_REQUEST_ID: req-1\nREPO: o/r\nPR: 7\nHEAD: h1\n"
+                   "REQUEST: status_report\n")
+        output = ("REVIEW_REQUEST_ID: req-1\nREPO: o/r\nPR: 7\nHEAD: WRONG\n"
+                  "ACK: status_report_received\n")
+        with tempfile.TemporaryDirectory() as td:
+            res = self._send(payload, td, output)
+        self.assertFalse(res["delivered"])
+
+    def test_ack_missing_marker_not_delivered(self):
+        payload = ("REVIEW_REQUEST_ID: req-1\nREPO: o/r\nPR: 7\nHEAD: h1\n"
+                   "REQUEST: status_report\n")
+        output = ("REVIEW_REQUEST_ID: req-1\nREPO: o/r\nPR: 7\nHEAD: h1\n"
+                  "ACK: something_else\n")
+        with tempfile.TemporaryDirectory() as td:
+            res = self._send(payload, td, output)
+        self.assertFalse(res["delivered"])
 
 
 class TestCLIEntrypoint(unittest.TestCase):
@@ -292,6 +438,19 @@ class TestCLIEntrypoint(unittest.TestCase):
                                "--repo", "o/r", "--pr", "7",
                                "--status-report", p])
             self.assertEqual(rc, 0)
+
+    def test_po_decision_writes_bridge_file(self):
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch("agentops_runtime.runtime_loop._bridge_dir",
+                        return_value=td):
+            rc = cli.main(["po-decision", "--repo", "o/r", "--pr", "7",
+                           "--head", "abc", "--decision", "APPROVE"])
+            with open(os.path.join(td, "po_decision.json")) as f:
+                import json as _json
+                d = _json.load(f)
+        self.assertEqual(rc, 0)
+        self.assertEqual(d["decision"], "APPROVE")
+        self.assertEqual(d["head"], "abc")
 
 
 if __name__ == "__main__":
