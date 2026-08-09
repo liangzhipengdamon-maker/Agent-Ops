@@ -70,12 +70,64 @@ def _transition(risk, review, args, sections=None):
             task_state_path=args.task_state,
         )
         print(json.dumps(result, indent=2, ensure_ascii=False))
+
+        # WAITING_PO_AUTH is the Watcher's START condition, not the task's
+        # termination. Launch the persistent Control Watcher (detached) so
+        # the Controller survives the Builder process exit.
+        route = result.get("outcome", {}).get("route")
+        if route == "WAITING_PO_AUTH" and getattr(args, "start_watcher", False):
+            launched = _launch_watcher(args, live_head)
+            print(json.dumps({"watcher": launched}, indent=2))
         return 0
 
     # LOW / MEDIUM: original behavior (route only, no notify).
     outcome = route_decision(risk, review)
     print(json.dumps(outcome.to_record(), indent=2))
     return 0
+
+
+def _launch_watcher(args, head):
+    """Spawn a detached Control Watcher process (survives Builder exit).
+
+    The watcher writes its PID + runtime state and runs until a terminal
+    state. Returns a dict describing the launch outcome.
+    """
+    import subprocess
+
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    tools_dir = os.path.dirname(pkg_dir)
+    cmd = [
+        sys.executable, "-m", "agentops_runtime", "watch",
+        "--task-id", args.task_id or "AGE-UNKNOWN",
+        "--repo", args.repo,
+        "--pr", str(args.pr),
+        "--head", head,
+        "--deliverable-path", args.deliverable_path or "",
+        "--deliverable-url", args.deliverable_url or "",
+        "--interval", str(getattr(args, "watcher_interval", 600) or 600),
+    ]
+    if getattr(args, "watcher_state_dir", None):
+        cmd += ["--state-dir", args.watcher_state_dir]
+    env = dict(os.environ)
+    # Both the tools dir (for the package) and the package dir (for the
+    # direct cross-module imports used by control_watcher) must be on path.
+    env["PYTHONPATH"] = (tools_dir + os.pathsep + pkg_dir
+                         + os.pathsep + env.get("PYTHONPATH", ""))
+    try:
+        # start_new_session detaches from the Builder's process group so the
+        # watcher survives the Builder CLI exit.
+        proc = subprocess.Popen(
+            cmd, env=env,
+            stdout=open(os.devnull, "w"), stderr=open(os.devnull, "w"),
+            start_new_session=True,
+        )
+        return {
+            "launched": True,
+            "pid": proc.pid,
+            "cmd": " ".join(cmd),
+        }
+    except Exception as e:
+        return {"launched": False, "error": str(e)}
 
 
 def main(argv=None):
@@ -110,8 +162,23 @@ def main(argv=None):
     p_tr.add_argument("--deliverable-url", default=None)
     p_tr.add_argument("--output-dir", default=None)
     p_tr.add_argument("--task-state", default=None)
+    p_tr.add_argument("--start-watcher", action="store_true",
+                      help="on HIGH WAITING_PO_AUTH, launch the persistent Control Watcher")
+    p_tr.add_argument("--watcher-interval", dest="watcher_interval", type=int, default=600,
+                      help="Control Watcher poll interval seconds (default 600 = 10 min)")
+    p_tr.add_argument("--watcher-state-dir", dest="watcher_state_dir", default=None)
     p_tr.add_argument("--completion-sections-json", dest="completion_sections_json",
                       default=None, help="path to a JSON dict of completion report sections")
+
+    p_watch = sub.add_parser("watch", help="Run the persistent Control Watcher loop (AGE-30)")
+    p_watch.add_argument("--task-id", default=None)
+    p_watch.add_argument("--repo", default=None)
+    p_watch.add_argument("--pr", default=None)
+    p_watch.add_argument("--head", default=None)
+    p_watch.add_argument("--deliverable-path", default=None)
+    p_watch.add_argument("--deliverable-url", default=None)
+    p_watch.add_argument("--state-dir", default=None)
+    p_watch.add_argument("--interval", type=int, default=600)
 
     args = parser.parse_args(argv)
 
@@ -156,6 +223,21 @@ def main(argv=None):
             with open(args.completion_sections_json) as f:
                 sections = json.load(f)
         return _transition(args.risk, args.review, args, sections=sections)
+
+    if args.command == "watch":
+        from .control_watcher import ControlWatcher
+        watcher = ControlWatcher(
+            task_id=args.task_id or "AGE-UNKNOWN",
+            repo=args.repo,
+            pr=args.pr,
+            head=args.head or "",
+            deliverable_path=args.deliverable_path or "",
+            deliverable_url=args.deliverable_url or "",
+            state_dir=args.state_dir,
+            interval=args.interval or 600,
+        )
+        ok = watcher.run_forever()
+        return 0 if ok else 1
 
     parser.print_help()
     return 1
