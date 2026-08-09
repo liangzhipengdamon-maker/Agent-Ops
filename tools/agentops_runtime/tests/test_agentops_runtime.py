@@ -8,7 +8,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from risk_evaluator import classify_risk, RiskDecision
 from review_intake import review_from_github, ReviewDecision
 from task_intake import is_eligible, discover, write_discovery_records
-from transition_controller import route_decision, TransitionOutcome, write_state
+from transition_controller import (
+    route_decision, TransitionOutcome, write_state,
+    build_po_status_report, NeutralRelayNotifier, DeliveryResult,
+    transition_with_po_notify,
+)
 
 
 class TestRiskEvaluator(unittest.TestCase):
@@ -169,6 +173,85 @@ class TestTransitionController(unittest.TestCase):
             with open(path) as f:
                 state = json.load(f)
             self.assertEqual(state["outcome"]["route"], "WAITING_PO_AUTH")
+
+
+class TestPoNotifyBeforeWait(unittest.TestCase):
+    """AGE-30 hardening: mandatory PO notification before WAITING_PO_AUTH."""
+
+    class FakeNotifier:
+        def __init__(self):
+            self.sent = []
+            self.delivery = DeliveryResult(
+                correlation_id="PO_test", delivered=True, exit_code=0,
+                ack_captured=True, details="fake-ack")
+
+        def send(self, report, output_dir):
+            self.sent.append(report)
+            return self.delivery
+
+    def test_build_po_status_report_binds_fields(self):
+        r = build_po_status_report(
+            task_id="AGE-X", repo="o/r", pr="1", head="abc",
+            summary="summary text")
+        self.assertEqual(r.state, "WAITING_PO_AUTH")
+        self.assertEqual(r.repo, "o/r")
+        self.assertEqual(r.pr, "1")
+        self.assertEqual(r.head, "abc")
+        self.assertEqual(r.delivery_targets, ["gpt_web", "po_channel"])
+        self.assertIn("REVIEW_REQUEST_ID:", r.to_relay_payload())
+        self.assertIn("HEAD: abc", r.to_relay_payload())
+
+    def test_high_risk_always_notifies_before_wait(self):
+        notifier = self.FakeNotifier()
+        with tempfile.TemporaryDirectory() as td:
+            result = transition_with_po_notify(
+                risk_level="HIGH", review_decision="PASS",
+                task_id="AGE-X", repo="o/r", pr="1", head="abc",
+                summary="high risk summary", output_dir=td,
+                notifier=notifier, task_state_path=os.path.join(td, "state.json"))
+        self.assertEqual(result["outcome"]["route"], "WAITING_PO_AUTH")
+        self.assertTrue(result["po_notify"]["delivered"])
+        self.assertEqual(len(notifier.sent), 1)
+        self.assertEqual(notifier.sent[0].state, "WAITING_PO_AUTH")
+
+    def test_medium_risk_does_not_notify_po(self):
+        # MEDIUM routes to GPT_DECISION_REQUIRED; no PO notify.
+        notifier = self.FakeNotifier()
+        with tempfile.TemporaryDirectory() as td:
+            result = transition_with_po_notify(
+                risk_level="MEDIUM", review_decision="PASS",
+                task_id="AGE-X", repo="o/r", pr="1", head="abc",
+                summary="medium", output_dir=td, notifier=notifier)
+        self.assertEqual(result["outcome"]["route"], "GPT_DECISION_REQUIRED")
+        self.assertNotIn("po_notify", result)
+        self.assertEqual(len(notifier.sent), 0)
+
+    def test_low_pass_no_notify(self):
+        notifier = self.FakeNotifier()
+        with tempfile.TemporaryDirectory() as td:
+            result = transition_with_po_notify(
+                risk_level="LOW", review_decision="PASS",
+                task_id="AGE-X", repo="o/r", pr="1", head="abc",
+                summary="low", output_dir=td, notifier=notifier)
+        self.assertEqual(result["outcome"]["route"], "AUTO_CONTINUE")
+        self.assertNotIn("po_notify", result)
+        self.assertEqual(len(notifier.sent), 0)
+
+    def test_delivery_failure_still_records_wait_but_marks_not_delivered(self):
+        # Even if the relay fails, the controller still records WAITING_PO_AUTH
+        # but marks po_notify delivered=False (does NOT silently pass).
+        notifier = self.FakeNotifier()
+        notifier.delivery = DeliveryResult(
+            correlation_id="PO_test", delivered=False, exit_code=1,
+            ack_captured=False, details="relay timeout")
+        with tempfile.TemporaryDirectory() as td:
+            result = transition_with_po_notify(
+                risk_level="HIGH", review_decision="PASS",
+                task_id="AGE-X", repo="o/r", pr="1", head="abc",
+                summary="high", output_dir=td, notifier=notifier)
+        self.assertEqual(result["outcome"]["route"], "WAITING_PO_AUTH")
+        self.assertFalse(result["po_notify"]["delivered"])
+        self.assertEqual(len(notifier.sent), 1)
 
 
 if __name__ == "__main__":

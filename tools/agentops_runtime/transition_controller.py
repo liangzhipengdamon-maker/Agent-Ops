@@ -10,17 +10,28 @@ routing outcome:
   - LOW risk + CHANGES_REQUESTED -> FOLLOW_UP_REQUIRED
   - LOW risk + INCOMPLETE     -> WAIT_REVIEW (incomplete evidence)
 
+AGE-30 hardening — mandatory PO notification before WAITING_PO_AUTH:
+  When the controller decides the task must enter WAITING_PO_AUTH, it
+  MUST first generate a PO status report, send it to GPT Web via the
+  existing Neutral Relay (AGE-19), and capture the delivery result BEFORE
+  recording the WAITING_PO_AUTH state.
+
 Governance boundaries:
 - The controller NEVER grants merge/deploy permission.
 - PO authorization is never bypassed for HIGH risk.
 - Review evidence is not authorization.
+- Risk Policy (AGE-29) is unchanged.
+- PO Authorization rules are unchanged.
+- The notify step does NOT auto-execute any PO decision.
 """
 
 import dataclasses
 import json
 import os
+import subprocess
 import time
-from typing import Optional
+import uuid
+from typing import List, Optional
 
 
 @dataclasses.dataclass(frozen=True)
@@ -75,3 +86,174 @@ def write_state(outcome: TransitionOutcome, task_state_path: str) -> str:
     with open(task_state_path, "w") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
     return task_state_path
+
+
+# ---------------------------------------------------------------------------
+# Mandatory PO notification before WAITING_PO_AUTH (AGE-30 hardening)
+# ---------------------------------------------------------------------------
+
+@dataclasses.dataclass(frozen=True)
+class PoStatusReport:
+    """AGE-31/33 PO status report event model."""
+    event_id: str
+    correlation_id: str
+    task_id: str
+    repo: str
+    pr: str
+    head: str
+    state: str
+    summary: str
+    delivery_targets: List[str]
+
+    def to_relay_payload(self) -> str:
+        """AGE-18 status_report contract payload."""
+        return (
+            f"REVIEW_REQUEST_ID: {self.correlation_id}\n"
+            f"REPO: {self.repo}\n"
+            f"PR: {self.pr}\n"
+            f"HEAD: {self.head}\n"
+            f"REQUEST: status_report\n"
+            f"STATE: {self.state}\n"
+            f"SUMMARY: {self.summary}\n"
+            f"UNAUTHORIZED_ACTIONS: NONE\n"
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class DeliveryResult:
+    """Result of delivering the PO status report via Neutral Relay."""
+    correlation_id: str
+    delivered: bool          # relay exit 0 AND ACK captured
+    exit_code: int
+    ack_captured: bool
+    details: str
+
+    def to_record(self) -> dict:
+        return {
+            "correlation_id": self.correlation_id,
+            "delivered": self.delivered,
+            "exit_code": self.exit_code,
+            "ack_captured": self.ack_captured,
+            "details": self.details,
+        }
+
+
+def build_po_status_report(
+    task_id: str, repo: str, pr: str, head: str, summary: str,
+    state: str = "WAITING_PO_AUTH",
+) -> PoStatusReport:
+    """Generate the PO status report (AGE-31 event model)."""
+    return PoStatusReport(
+        event_id=f"evt_{uuid.uuid4().hex[:12]}",
+        correlation_id=f"PO_{uuid.uuid4().hex[:12]}",
+        task_id=task_id,
+        repo=repo,
+        pr=str(pr),
+        head=head,
+        state=state,
+        summary=summary,
+        delivery_targets=["gpt_web", "po_channel"],
+    )
+
+
+class NeutralRelayNotifier:
+    """Sends a PO status report via the existing Neutral Relay (AGE-19).
+
+    Reuses `~/.agentops/relay/neutral_relay.py` (the AGE-19 hardened relay).
+    It is transport-only: it does not judge the report and does not make
+    any PO decision.
+    """
+
+    def __init__(self, relay_bin: Optional[str] = None,
+                 config_file: Optional[str] = None,
+                 timeout: int = 180):
+        self.relay_bin = relay_bin or os.path.expanduser(
+            "~/.agentops/relay/neutral_relay.py")
+        self.config_file = config_file or os.path.expanduser(
+            "~/.agentops/relay/config.json")
+        self.timeout = timeout
+
+    def send(self, report: PoStatusReport, output_dir: str) -> DeliveryResult:
+        os.makedirs(output_dir, exist_ok=True)
+        req_path = os.path.join(output_dir, f"{report.correlation_id}_request.txt")
+        out_path = os.path.join(output_dir, f"{report.correlation_id}_output.md")
+        with open(req_path, "w") as f:
+            f.write(report.to_relay_payload())
+
+        try:
+            res = subprocess.run(
+                ["python3", self.relay_bin,
+                 "--request-file", req_path,
+                 "--output-file", out_path,
+                 "--config-file", self.config_file,
+                 "--timeout", str(self.timeout)],
+                capture_output=True, text=True, timeout=self.timeout + 30,
+            )
+            exit_code = res.returncode
+            log = (res.stdout + res.stderr).strip()
+        except (subprocess.TimeoutExpired, OSError) as e:
+            exit_code = 2
+            log = f"relay invocation failed: {e}"
+
+        ack_captured = False
+        if os.path.exists(out_path):
+            with open(out_path) as f:
+                content = f.read()
+            ack_captured = (
+                "ACK:" in content
+                and report.correlation_id in content
+                and report.head in content
+            )
+
+        delivered = exit_code == 0 and ack_captured
+        return DeliveryResult(
+            correlation_id=report.correlation_id,
+            delivered=delivered,
+            exit_code=exit_code,
+            ack_captured=ack_captured,
+            details=log[-500:],
+        )
+
+
+def transition_with_po_notify(
+    risk_level: str,
+    review_decision: str,
+    task_id: str,
+    repo: str,
+    pr: str,
+    head: str,
+    summary: str,
+    output_dir: str,
+    notifier: Optional[NeutralRelayNotifier] = None,
+    task_state_path: Optional[str] = None,
+) -> dict:
+    """Orchestrate routing + mandatory PO notify + state writeback.
+
+    Steps:
+      1. route_decision(risk, review)
+      2. If route == WAITING_PO_AUTH:
+           a. generate PO status report
+           b. send via Neutral Relay
+           c. capture delivery result
+      3. Write state (if task_state_path given)
+
+    Returns a dict with the outcome and delivery result.
+    """
+    outcome = route_decision(risk_level, review_decision)
+    notifier = notifier or NeutralRelayNotifier()
+    delivery = None
+
+    if outcome.route == "WAITING_PO_AUTH":
+        report = build_po_status_report(
+            task_id=task_id, repo=repo, pr=pr, head=head, summary=summary,
+            state="WAITING_PO_AUTH",
+        )
+        delivery = notifier.send(report, output_dir)
+
+    if task_state_path:
+        write_state(outcome, task_state_path)
+
+    result = {"outcome": outcome.to_record()}
+    if delivery is not None:
+        result["po_notify"] = delivery.to_record()
+    return result
