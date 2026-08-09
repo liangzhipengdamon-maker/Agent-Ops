@@ -2,47 +2,51 @@
 
 This is the single current control contract. Older governance/architecture docs are historical when they conflict with this file.
 
-## Sources and roles
+## Roles
 
-- **Linear**: task instructions, acceptance criteria, status, dependencies. Not authorization.
+- **Linear**: task instructions, acceptance criteria, status, dependencies.
 - **GitHub**: code, PRs, reviews, technical evidence, merge state.
-- **ChatGPT Web**: architecture, independent review, medium-risk decisions.
-- **Product Owner**: explicit authorization for protected/high-risk actions.
+- **ChatGPT Web**: architecture, independent review, and decisions during execution.
+- **Product Owner**: chooses the task execution mode and gives decisions at manual gates.
 - **Relay**: transport only.
 - **Builder**: implementation.
-- **Controller/Watcher**: continuity and Review/Risk/Transition.
+- **Controller/Watcher**: keeps the task loop alive across Builder exits and waiting periods.
 - **LoopX/runtime state**: durable operational state only.
 
-## Control loop
+## Execution mode
+
+Every task starts in one of two modes:
+
+### AUTO
+
+Continue the task loop until the acceptance criteria are satisfied or a real blocker makes execution impossible.
 
 ```text
-Linear task
-→ Builder implements
-→ GitHub code/evidence
-→ GPT Review
-   CHANGES_REQUESTED / NOT_PASS → Builder fixes → new code HEAD → review again
-   PASS → Risk
-      LOW    → AUTO_CONTINUE
-      MEDIUM → GPT_DECISION_REQUIRED
-      HIGH   → WAITING_PO_AUTH
+Linear task → Builder → GitHub → GPT Review
+CHANGES_REQUESTED / NOT_PASS → Builder fixes → new code HEAD → review again
+PASS → continue the task or finish when acceptance criteria are satisfied
 ```
 
-Phase completion is a checkpoint, not termination.
+Do not stop merely because a phase, commit, report, or review round completed.
 
-`WAITING_PO_AUTH` is not Controller termination. Builder may idle/exit; Controller/Watcher stays alive, watches GitHub + Linear, and re-routes on meaningful change.
+### MANUAL
 
-## Authorization
+The task instruction names the checkpoint/condition where PO input is required.
 
-Review, CI, Linear state, reports, timers, transport success, and ACK/read-back are evidence only.
+Run the same Builder ↔ GitHub ↔ GPT loop until that checkpoint is reached, then report the exact state and enter `WAITING_PO_AUTH`.
 
-Inside an already authorized task/scope, ordinary edit/test/fix/commit/push/draft-PR-update work continues without fresh PO approval for every step.
+`WAITING_PO_AUTH` is not Controller termination. Builder may idle/exit; Controller/Watcher stays alive until the PO decision arrives, then execution continues from that decision.
 
-Explicit PO authorization remains required for protected/high-risk actions such as Ready, Merge, Deploy/production access, force push/main-history rewrite, authorization-policy/scope changes, and other canonical HIGH actions. Protected actions acting on an existing commit bind the exact live HEAD required by the gate.
+## No risk matrix
+
+There is no LOW/MEDIUM/HIGH runtime risk classifier in the main control flow.
+
+The Builder/GPT may use judgment while executing, but they do not convert that judgment into a separate risk-state machine. If an action is clearly outside the authorized task scope, ambiguous, or impossible to execute safely, surface it as a blocker/decision request instead of inventing a risk tier.
 
 ## Acceptance and delivery
 
 For code work, the live remote HEAD must contain the real code change. Docs-only/report-only commits, CI green, or self-declared PASS do not prove a code fix.
 
-Delivery is fail-closed: unconfirmed send/read-back is `DELIVERY_FAILED`; no false success timestamp. ACK closes only the delivery episode, never the Controller.
+Delivery is fail-closed: unconfirmed send/read-back is `DELIVERY_FAILED`; ACK closes only the delivery episode, never the Controller.
 
-The Controller terminates only on an explicitly terminal task outcome such as accepted completion, closure, or cancellation—not because a phase ended, Builder exited, review requested changes, the task is waiting for PO, or a report was acknowledged.
+The Controller terminates only on accepted completion, closure, or cancellation.
