@@ -25,7 +25,6 @@ CONFIG_FILE = os.path.expanduser("~/.agentops/relay/config.json")
 
 
 def _field(payload: str, key: str) -> Optional[str]:
-    """Extract `KEY: value` from the status_report payload (first line match)."""
     for line in payload.splitlines():
         if line.startswith(key + ":"):
             val = line.split(":", 1)[1].strip()
@@ -36,15 +35,6 @@ def _field(payload: str, key: str) -> Optional[str]:
 
 def send_status_report(payload: str, output_dir: str,
                        timeout: int = 180) -> dict:
-    """Send a status_report via the existing Neutral Relay.
-
-    `payload` must follow the AGE-18 status_report contract
-    (REVIEW_REQUEST_ID / REPO / PR / HEAD / REQUEST / STATE / SUMMARY /
-    UNAUTHORIZED_ACTIONS). The relay output file is written on correlated
-    capture. Delivery is proven only when the ACK binds the SAME canonical
-    REVIEW_REQUEST_ID, REPO, PR, HEAD (no aliases) and carries the exact
-    `ACK: status_report_received` marker. Returns a fail-closed result dict.
-    """
     os.makedirs(output_dir, exist_ok=True)
     corr = f"CPL_{uuid.uuid4().hex[:12]}"
     req = os.path.join(output_dir, f"{corr}_request.txt")
@@ -59,16 +49,9 @@ def send_status_report(payload: str, output_dir: str,
             capture_output=True, text=True, timeout=timeout + 30)
         exit_code = res.returncode
     except (subprocess.TimeoutExpired, OSError) as e:
-        exit_code = 2
-        detail = f"relay invocation failed: {e}"
         return {"correlation_id": corr, "delivered": False,
-                "exit_code": exit_code, "detail": detail}
+                "exit_code": 2, "detail": f"relay invocation failed: {e}"}
 
-    # P0-3/R6-P1: the retained status_report ACK contract is the exact
-    # five-line envelope `REVIEW_REQUEST_ID / REPO / PR / HEAD / ACK`. No
-    # aliases, no extra lines. Parse the output; delivery is confirmed only
-    # when the file contains EXACTLY those five lines, the canonical fields
-    # match the sent payload, and the ACK is exactly `status_report_received`.
     ack = False
     detail = "no ack captured"
     if os.path.exists(out):
@@ -98,8 +81,6 @@ def send_status_report(payload: str, output_dir: str,
 
 
 def _run_relay(payload: str, output_dir: str, timeout: int) -> dict:
-    """Shell out to the existing Neutral Relay with a payload. Returns
-    {correlation_id, exit_code, output_file, detail}."""
     os.makedirs(output_dir, exist_ok=True)
     corr = f"CPL_{uuid.uuid4().hex[:12]}"
     req = os.path.join(output_dir, f"{corr}_request.txt")
@@ -130,15 +111,6 @@ def _read_output(out: str) -> str:
 
 def send_independent_review(repo: str, pr: str, head: str,
                             output_dir: str, timeout: int = 400) -> dict:
-    """Send REQUEST: independent_review via the existing Neutral Relay.
-
-    Thin glue only: builds the exact-bound envelope
-    (AUTO_REVIEW_<uuid> / REPO / PR / HEAD / REQUEST: independent_review /
-    STATE: FINAL_RESULT_REVIEW) and calls the existing neutral_relay.py.
-    Never re-implements CDP/browser transport. Returns
-    {correlation_id, sent, exit_code, detail, raw_response}. The response is
-    captured from the relay output file (may be empty/incomplete -> caller
-    fails closed; the formal verdict also lands on GitHub independently)."""
     req_id = f"AUTO_REVIEW_{uuid.uuid4().hex[:12]}"
     payload = (f"REVIEW_REQUEST_ID: {req_id}\n"
                f"REPO: {repo}\n"
@@ -156,18 +128,6 @@ def send_independent_review(repo: str, pr: str, head: str,
 
 def parse_review_response(text: str, repo: str, pr: str, head: str,
                           req_id: str) -> dict:
-    """Parse a captured independent_review response.
-
-    Strict (fail closed): the response must contain EXACTLY one formal
-    `GOVERNLOOP_REVIEW: PASS | CHANGES_REQUESTED | NOT_PASS` verdict (or one
-    legacy `AGENTOPS_REVIEW` compatibility marker) AND REVIEW_REQUEST_ID /
-    REPO / PR / HEAD each exactly equal to the expected values. Duplicate or
-    mixed canonical/legacy marker lines are ambiguous and INCOMPLETE.
-
-    Findings after a CHANGES_REQUESTED / NOT_PASS verdict are retained
-    verbatim for the Builder.
-
-    Returns {verdict, review_request_id, repo, pr, head, findings, ok}."""
     fields = {}
     for line in (text or "").splitlines():
         line = line.strip()
@@ -202,10 +162,6 @@ def parse_review_response(text: str, repo: str, pr: str, head: str,
                 "detail": formal.detail}
 
     verdict = formal.verdict
-
-    # Findings: everything after the one formal verdict line, excluding the
-    # envelope-binding header lines and any marker-prefixed line. Marker
-    # duplicates have already failed closed above.
     findings = []
     if verdict in ("CHANGES_REQUESTED", "NOT_PASS"):
         seen = False
@@ -226,17 +182,6 @@ def parse_review_response(text: str, repo: str, pr: str, head: str,
 
 
 def _parse_status_payload(payload: str, repo: str, pr: str, head: str) -> dict:
-    """Strictly parse + validate a final status_report payload.
-
-    R12-P0 exact-binding chain: the status_report that gets ACKed and the
-    independent_review that follows must reference the SAME repo/pr/head.
-    Returns {ok, state, detail}. ok is True only when:
-      - REQUEST is EXACTLY 'status_report'
-      - STATE is EXACTLY 'WAITING_REVIEW'
-      - REPO / PR / HEAD each appear EXACTLY once and exactly equal the
-        function arguments
-    Missing, duplicate, or mismatched fields -> ok=False (fail closed); the
-    caller must NOT trigger an independent_review in that case."""
     fields = {}
     for line in (payload or "").splitlines():
         line = line.strip()
@@ -261,27 +206,35 @@ def _parse_status_payload(payload: str, repo: str, pr: str, head: str) -> dict:
     return {"ok": True, "state": "WAITING_REVIEW", "detail": "ok"}
 
 
+def _persist_review_request(bridge_dir: str, repo: str, pr: str, head: str,
+                            request_id: str) -> bool:
+    """Persist the exact active request before its verdict can be consumed."""
+    if not request_id:
+        return False
+    try:
+        os.makedirs(bridge_dir, exist_ok=True)
+        marker = os.path.join(bridge_dir, f"review_request_{pr}_{head}.json")
+        tmp = marker + f".{uuid.uuid4().hex}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({
+                "repo": repo,
+                "pr": str(pr),
+                "head": head,
+                "request": "independent_review",
+                "review_request_id": request_id,
+                "sent": True,
+            }, f, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, marker)
+        return True
+    except OSError:
+        return False
+
+
 def final_result_auto_review(repo: str, pr: str, head: str,
                              status_payload: str, bridge_dir: str,
                              output_dir: str, timeout: int = 400) -> dict:
-    """Final Result Auto-Review trigger.
-
-    Sends the final status_report; then, ONLY IF:
-      - status_report delivered=true, AND
-      - the status_report payload strictly validates (REQUEST exactly
-        status_report, STATE exactly WAITING_REVIEW, REPO/PR/HEAD exactly
-        equal to repo/pr/head args — forming an inseparable exact-binding
-        chain with the ACKed report), AND
-      - this repo/pr/head/final-report has NOT already triggered a review
-    does it send REQUEST: independent_review and parse the captured verdict.
-
-    WAITING_PO_AUTH never triggers a review even if delivered=true. A failed
-    status_report (delivered=false) never triggers a review. A payload that
-    fails strict binding validation never triggers a review. Deduped via a
-    bridge marker `auto_review_<pr>_<head>.json`.
-
-    Returns {status_delivered, state, review_sent, review, deduped,
-    succeeded, binding_ok}."""
     status = send_status_report(status_payload, output_dir, timeout)
     binding = _parse_status_payload(status_payload, repo, pr, head)
     if not status.get("delivered"):
@@ -290,8 +243,6 @@ def final_result_auto_review(repo: str, pr: str, head: str,
                 "binding_ok": binding.get("ok", False),
                 "detail": status.get("detail")}
     if not binding.get("ok"):
-        # R12-P0: the ACKed report did not bind exactly to the invocation
-        # repo/pr/head -> never trigger a review for a different object.
         return {"status_delivered": True, "state": binding.get("state"),
                 "review_sent": False, "review": None, "deduped": False,
                 "binding_ok": False, "detail": binding.get("detail")}
@@ -316,13 +267,15 @@ def final_result_auto_review(repo: str, pr: str, head: str,
         pass
 
     sent = send_independent_review(repo, pr, head, output_dir, timeout)
+    request_id = sent.get("review_request_id", "")
+    if not _persist_review_request(bridge_dir, repo, pr, head, request_id):
+        return {"status_delivered": True, "state": "WAITING_REVIEW",
+                "review_sent": bool(sent.get("sent")), "review": None,
+                "deduped": False, "succeeded": False, "binding_ok": False,
+                "detail": "active independent-review request binding could not be persisted"}
+
     parsed = parse_review_response(
-        sent.get("raw_response", ""), repo, pr, head,
-        sent.get("review_request_id", ""))
-    # P0-1: the success dedupe marker is written ONLY when the relay actually
-    # succeeded (exit_code == 0) AND the response parsed ok. A relay failure,
-    # empty output, binding mismatch, or INCOMPLETE verdict stays retryable so
-    # a later watcher/retry cycle can send the review again.
+        sent.get("raw_response", ""), repo, pr, head, request_id)
     succeeded = bool(sent.get("exit_code") == 0 and parsed.get("ok"))
     if succeeded:
         try:
@@ -330,7 +283,7 @@ def final_result_auto_review(repo: str, pr: str, head: str,
             with open(marker, "w") as f:
                 json.dump({"repo": repo, "pr": str(pr), "head": head,
                            "sent": True,
-                           "review_request_id": sent.get("review_request_id"),
+                           "review_request_id": request_id,
                            "verdict": parsed.get("verdict")}, f)
         except OSError:
             pass
