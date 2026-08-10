@@ -1,4 +1,4 @@
-# AgentOps Current Runtime Rules
+# GovernLoop Current Runtime Rules
 
 This is the single current control contract. Older governance/architecture docs are historical when they conflict with this file.
 
