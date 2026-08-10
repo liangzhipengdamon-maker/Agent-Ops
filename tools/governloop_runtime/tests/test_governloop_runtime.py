@@ -30,6 +30,15 @@ class TestGovernLoopCompatibility(unittest.TestCase):
             _compat.apply_env_aliases()
             self.assertEqual(os.environ["AGENTOPS_BASELINE_SHA"], "new")
 
+    def test_explicit_empty_canonical_value_revokes_legacy_value(self):
+        with mock.patch.dict(os.environ, {
+            "GOVERNLOOP_ALLOW_READY_MERGE_DEPLOY": "",
+            "AGENTOPS_ALLOW_READY_MERGE_DEPLOY": "true",
+        }, clear=True):
+            _compat.apply_env_aliases()
+            self.assertEqual(os.environ["AGENTOPS_ALLOW_READY_MERGE_DEPLOY"], "")
+            self.assertEqual(os.environ["GOVERNLOOP_ALLOW_READY_MERGE_DEPLOY"], "")
+
     def test_missing_authority_stays_missing(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             _compat.apply_env_aliases()
