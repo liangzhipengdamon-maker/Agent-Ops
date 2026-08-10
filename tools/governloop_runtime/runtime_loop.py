@@ -3,8 +3,6 @@
 from ._compat import apply_env_aliases
 from agentops_runtime import runtime_loop as _legacy
 
-ScopePolicy = None  # resolved lazily by callers through the legacy module
-
 
 def decide(task_id: str, repo: str, pr: str) -> dict:
     apply_env_aliases()
