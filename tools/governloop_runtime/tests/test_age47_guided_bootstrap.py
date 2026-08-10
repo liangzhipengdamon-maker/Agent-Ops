@@ -70,6 +70,40 @@ class TestDoctorNextRequiredAction(unittest.TestCase):
         self.assertEqual(value["check"], "positive_authority")
         self.assertIn("external operator", value["action"])
 
+    def test_earliest_blocked_gate_without_action_is_not_skipped(self):
+        checks = [
+            doctor._check("git_repository", "PASS", "origin ok"),
+            doctor._check("positive_authority", "PASS", "signed authority ok"),
+            doctor._check("git_branch", "BLOCKED", "current branch unreadable"),
+            doctor._check(
+                "pull_request", "EXPECTED_GATE", "no PR",
+                next_action="create Draft PR",
+            ),
+        ]
+        key, value = doctor._select_next_action(checks)
+        self.assertEqual(key, "next_required_action")
+        self.assertEqual(value["check"], "git_branch")
+        self.assertIn("do not skip to a later gate", value["action"])
+        self.assertNotIn("create Draft PR", value["action"])
+
+    def test_blocked_pr_without_specific_action_still_has_guidance(self):
+        checks = [
+            doctor._check("git_repository", "PASS", "origin ok"),
+            doctor._check("positive_authority", "PASS", "signed authority ok"),
+            doctor._check("git_branch", "PASS", "branch ok"),
+            doctor._check("baseline_commit", "PASS", "baseline ok"),
+            doctor._check("baseline_history", "PASS", "history ok"),
+            doctor._check("worktree_scope", "PASS", "scope ok"),
+            doctor._check("github_auth", "PASS", "gh ok"),
+            doctor._check("linear_task", "PASS", "linear ok"),
+            doctor._check("reviewer_binding", "PASS", "reviewer ok"),
+            doctor._check("pull_request", "BLOCKED", "GitHub PR response invalid"),
+        ]
+        key, value = doctor._select_next_action(checks)
+        self.assertEqual(key, "next_required_action")
+        self.assertEqual(value["check"], "pull_request")
+        self.assertIn("resolve the blocked prerequisite", value["action"])
+
     def test_exactly_one_top_level_next_action_is_emitted(self):
         missing = {
             "ok": False,
