@@ -50,6 +50,33 @@ def make_action(**kw):
     return ActionScope(**base)
 
 
+def verified_authority(policy=None):
+    """Simulate the external signature verifier after operator provisioning.
+
+    Legacy firewall tests are about downstream scope/origin/worktree behavior,
+    not about signing. AGE-44's dedicated authority tests cover missing,
+    tampered, same-uid, raw-env and direct-legacy bypass cases separately.
+    """
+    p = policy or make_policy()
+    return {
+        "ok": True,
+        "status": "READY",
+        "authority_id": "external-test-authority",
+        "payload": {
+            "schema": "governloop-authority-v2",
+            "authority_id": "external-test-authority",
+            "task_id": p.task_id,
+            "repository": p.repository,
+            "branch": p.branch,
+            "baseline_sha": p.base_sha,
+            "allowed_paths": list(p.allowed_paths),
+            "allowed_operations": list(p.allowed_operations),
+            "trusted_reviewers": ["reviewer"],
+        },
+        "detail": "external operator signature verified",
+    }
+
+
 class TestPathRules(unittest.TestCase):
     def test_traversal_rejected(self):
         self.assertFalse(_is_path_allowed("../outside", ["tools/"]))
@@ -67,7 +94,6 @@ class TestPathRules(unittest.TestCase):
         self.assertFalse(_is_path_allowed("other/x.py", ["tools/"]))
 
     def test_wildcard_not_authorized(self):
-        # '*' is treated literally, so "tools/*" does not authorize tools/a.py
         self.assertFalse(_is_path_allowed("tools/a.py", ["tools/*"]))
 
     def test_protected_path_rejected(self):
@@ -87,13 +113,10 @@ class TestEvaluateScope(unittest.TestCase):
         self.assertTrue(all(r["checks"].values()))
 
     def test_repository_mismatch_fails(self):
-        r = evaluate_scope(make_policy(),
-                           make_action(repository="other/repo"))
+        r = evaluate_scope(make_policy(), make_action(repository="other/repo"))
         self.assertFalse(r["ok"])
 
     def test_protected_repository_denied(self):
-        # AgentOps task targeting LearnMind-English without a separately
-        # scoped policy -> denied.
         r = evaluate_scope(
             make_policy(),
             make_action(repository="liangzhipengdamon-maker/LearnMind-English"))
@@ -108,14 +131,12 @@ class TestEvaluateScope(unittest.TestCase):
         self.assertFalse(r["checks"]["not_protected_repository"])
 
     def test_branch_mismatch_fails(self):
-        r = evaluate_scope(make_policy(),
-                           make_action(branch="main"))
+        r = evaluate_scope(make_policy(), make_action(branch="main"))
         self.assertFalse(r["ok"])
         self.assertFalse(r["checks"]["branch_exact"])
 
     def test_base_sha_mismatch_fails(self):
-        r = evaluate_scope(make_policy(),
-                           make_action(base_sha="stale-sha"))
+        r = evaluate_scope(make_policy(), make_action(base_sha="stale-sha"))
         self.assertFalse(r["ok"])
         self.assertFalse(r["checks"]["base_sha_exact"])
 
@@ -150,8 +171,7 @@ class TestEvaluateScope(unittest.TestCase):
         self.assertFalse(r["checks"]["paths_allowed"])
 
     def test_disallowed_operation_fails(self):
-        r = evaluate_scope(make_policy(),
-                           make_action(operation="delete"))
+        r = evaluate_scope(make_policy(), make_action(operation="delete"))
         self.assertFalse(r["ok"])
         self.assertFalse(r["checks"]["operation_allowed"])
 
@@ -172,8 +192,7 @@ class TestEvaluateScope(unittest.TestCase):
 
     def test_dirty_worktree_unrelated_change_fails(self):
         r = evaluate_scope(
-            make_policy(),
-            make_action(),
+            make_policy(), make_action(),
             worktree=WorktreeState(
                 current_branch="liangzhipengdamon/age-6-age-6-deterministic-scope-action-firewall",
                 has_uncommitted_changes=True,
@@ -183,8 +202,7 @@ class TestEvaluateScope(unittest.TestCase):
 
     def test_dirty_worktree_in_scope_change_passes(self):
         r = evaluate_scope(
-            make_policy(),
-            make_action(),
+            make_policy(), make_action(),
             worktree=WorktreeState(
                 current_branch="liangzhipengdamon/age-6-age-6-deterministic-scope-action-firewall",
                 has_uncommitted_changes=True,
@@ -193,8 +211,7 @@ class TestEvaluateScope(unittest.TestCase):
 
     def test_worktree_branch_mismatch_fails(self):
         r = evaluate_scope(
-            make_policy(),
-            make_action(),
+            make_policy(), make_action(),
             worktree=WorktreeState(current_branch="main",
                                    has_uncommitted_changes=False))
         self.assertFalse(r["ok"])
@@ -226,8 +243,6 @@ class TestEvaluateScope(unittest.TestCase):
         self.assertTrue(r["checks"]["changed_files_in_scope"])
 
     def test_authoritative_changed_file_out_of_scope_fails(self):
-        # P0-2: a committed out-of-scope file in the authoritative PR diff
-        # blocks the wake even when the worktree is clean.
         p = make_policy(authoritative_changed_files=(
             "LearnMind-English/src/a.py",))
         wt = WorktreeState(
@@ -257,6 +272,12 @@ class TestEvaluateScope(unittest.TestCase):
 
 
 class TestBuilderHandoffFirewall(unittest.TestCase):
+    def setUp(self):
+        p = mock.patch("governloop_runtime.authority.verify_authority",
+                       return_value=verified_authority())
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_no_policy_fails_closed_no_wake(self):
         with tempfile.TemporaryDirectory() as td, \
              mock.patch("agentops_runtime.runtime_loop._bridge_dir",
@@ -294,7 +315,7 @@ class TestBuilderHandoffFirewall(unittest.TestCase):
              mock.patch("agentops_runtime.runtime_loop._git_origin",
                         return_value="liangzhipengdamon-maker/Agent-Ops"), \
              mock.patch("agentops_runtime.runtime_loop.subprocess.run",
-                        return_value=mock.Mock(returncode=0, stdout="")) as m:
+                        return_value=mock.Mock(returncode=0, stdout="")):
             r = builder_handoff("AGE-6",
                                 "liangzhipengdamon-maker/Agent-Ops",
                                 "1", "abc123", "BUILDER_FIXING", ["x"],
@@ -308,7 +329,6 @@ class TestBuilderHandoffFirewall(unittest.TestCase):
         self.assertIn("findings.md", files)
 
     def test_origin_mismatch_blocks_wake(self):
-        # P0-1: local git origin differs from the bound repo -> block.
         p = make_policy()
         with tempfile.TemporaryDirectory() as td, \
              mock.patch("agentops_runtime.runtime_loop._bridge_dir",
@@ -323,8 +343,6 @@ class TestBuilderHandoffFirewall(unittest.TestCase):
         self.assertTrue(r["blocked"])
 
     def test_changed_files_unreadable_blocks_wake(self):
-        # P0-2: authoritative changed-file retrieval failure -> block, never
-        # treated as zero changes.
         p = make_policy(changed_files_unreadable=True)
         with tempfile.TemporaryDirectory() as td, \
              mock.patch("agentops_runtime.runtime_loop._bridge_dir",
@@ -339,8 +357,6 @@ class TestBuilderHandoffFirewall(unittest.TestCase):
         self.assertTrue(r["blocked"])
 
     def test_git_unverifiable_blocks_wake(self):
-        # P0-3: git rev-parse/status unverifiable -> block, never skip
-        # contamination checks.
         p = make_policy()
         with tempfile.TemporaryDirectory() as td, \
              mock.patch("agentops_runtime.runtime_loop._bridge_dir",
@@ -358,8 +374,6 @@ class TestBuilderHandoffFirewall(unittest.TestCase):
         self.assertIn("unverifiable", r["reason"])
 
     def test_merge_operation_never_emitted_by_runtime_phase(self):
-        # The runtime only ever hands off fix/continue/complete phases; verify
-        # no runtime phase maps to a lifecycle action.
         for phase in ("BUILDER_FIXING", "CONTINUE", "COMPLETE"):
             with self.subTest(phase=phase):
                 self.assertNotIn(phase.lower().replace("builder_", ""),
@@ -369,8 +383,6 @@ class TestBuilderHandoffFirewall(unittest.TestCase):
 def make_scope_env(branch="feature/x", base="base1",
                    repo="liangzhipengdamon-maker/Agent-Ops",
                    paths=None, ops=None, **extra):
-    """Full out-of-episode authorization env (all authorization-bearing
-    fields explicitly scoped)."""
     if paths is None:
         paths = ["tools/agentops_runtime/", "scripts/", "docs/", "tests/"]
     if ops is None:
@@ -408,16 +420,13 @@ class TestLoadScopePolicy(unittest.TestCase):
         self.assertTrue(p.binding_ok)
 
     def test_profile_branch_base_not_self_derived(self):
-        # P0-1: expected branch/base come from env (out-of-episode), NOT from
-        # the observed PR metadata. A drifted PR branch/base fails closed.
         env = make_scope_env(branch="feature/x", base="base1")
         with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
             p = _load_scope_policy(
                 "AGE-6", "liangzhipengdamon-maker/Agent-Ops",
                 "feature/y", "base2", "head1", "7", profile_path=None)
-        self.assertEqual(p.branch, "feature/x")   # env, not observed
+        self.assertEqual(p.branch, "feature/x")
         self.assertEqual(p.base_sha, "base1")
-        # Drift detected when evaluated with observed branch/base.
         a = ActionScope(task_id="AGE-6",
                         repository="liangzhipengdamon-maker/Agent-Ops",
                         branch="feature/y", base_sha="base2",
@@ -428,11 +437,8 @@ class TestLoadScopePolicy(unittest.TestCase):
         self.assertFalse(r["checks"]["base_sha_exact"])
 
     def test_repo_authority_must_be_explicit_env(self):
-        # R7-P0-1: repository authority must come from explicit env, not the
-        # mutable profile. Profile has a matching repo but env repo is missing
-        # -> binding_ok=False, no Builder wake.
         env = make_scope_env(repo=None)
-        env.pop("AGENTOPS_SCOPE_REPOSITORY", None)  # ensure absent
+        env.pop("AGENTOPS_SCOPE_REPOSITORY", None)
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.dict(os.environ, env, clear=True):
             prof = os.path.join(td, "agentops.json")
@@ -445,7 +451,6 @@ class TestLoadScopePolicy(unittest.TestCase):
         self.assertFalse(p.binding_ok)
 
     def test_repo_authority_explicit_env_passes(self):
-        # Explicit matching env repository authority -> pass.
         env = make_scope_env(repo="liangzhipengdamon-maker/Agent-Ops")
         with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
             p = _load_scope_policy(
@@ -454,7 +459,6 @@ class TestLoadScopePolicy(unittest.TestCase):
         self.assertTrue(p.binding_ok)
 
     def test_repo_authority_env_mismatch_fails_closed(self):
-        # Env repository differs from the invocation repo -> fail closed.
         env = make_scope_env(repo="other/org")
         with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
             p = _load_scope_policy(
@@ -463,9 +467,6 @@ class TestLoadScopePolicy(unittest.TestCase):
         self.assertFalse(p.binding_ok)
 
     def test_default_allowed_paths_has_no_implicit_dot(self):
-        # P0-2/R6: allowed paths must not include '.' (no implicit whole-repo
-        # bypass); explicit paths only, and missing allowed-paths authority
-        # fails closed.
         env = make_scope_env(paths=["tools/agentops_runtime/", "scripts/"])
         with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
             p = _load_scope_policy(
@@ -476,7 +477,6 @@ class TestLoadScopePolicy(unittest.TestCase):
         self.assertTrue(p.binding_ok)
 
     def test_missing_allowed_paths_fails_closed(self):
-        # R6-P0-1: missing allowed-paths authority -> binding_ok=False.
         env = make_scope_env(paths=[])
         with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
             p = _load_scope_policy(
@@ -485,7 +485,6 @@ class TestLoadScopePolicy(unittest.TestCase):
         self.assertFalse(p.binding_ok)
 
     def test_missing_operations_fails_closed(self):
-        # R6-P0-1: missing allowed-operations authority -> binding_ok=False.
         env = make_scope_env(ops=[])
         with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
             p = _load_scope_policy(
@@ -504,9 +503,7 @@ class TestLoadScopePolicy(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertFalse(r["checks"]["binding_ok"])
 
-    def test_env_authority_is_out_of_episode(self):
-        # P0-1/R4: authority from env (immutable, not in worktree) is bound
-        # and used, overriding any self-derived value.
+    def test_env_authority_is_structural_compatibility_only(self):
         env = make_scope_env(branch="feature/env", base="envbase")
         with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
             p = _load_scope_policy(
@@ -516,8 +513,7 @@ class TestLoadScopePolicy(unittest.TestCase):
         self.assertEqual(p.base_sha, "envbase")
         self.assertTrue(p.binding_ok)
 
-    def test_missing_authority_fails_closed(self):
-        # No env and no profile scope_firewall authority -> binding_ok=False.
+    def test_missing_authority_fails_closed_structurally(self):
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.dict(os.environ, {}, clear=True):
             prof = os.path.join(td, "agentops.json")
@@ -532,8 +528,11 @@ class TestLoadScopePolicy(unittest.TestCase):
 
 
 class TestDecideFirewallIntegration(unittest.TestCase):
-    """decide() with the REAL builder_handoff: a correctly bound scope emits a
-    Builder wake; a cross-repo target fails closed with no executable wake."""
+    def setUp(self):
+        p = mock.patch("governloop_runtime.authority.verify_authority",
+                       return_value=verified_authority())
+        p.start()
+        self.addCleanup(p.stop)
 
     def _open_pr(self):
         return mock.patch("agentops_runtime.runtime_loop._pr_state",
@@ -548,18 +547,10 @@ class TestDecideFirewallIntegration(unittest.TestCase):
                           "headRefName":
                               "liangzhipengdamon/age-6-age-6-deterministic-scope-action-firewall"})
 
-    def _bridge(self):
-        return mock.patch("agentops_runtime.runtime_loop._bridge_dir",
-                          return_value=tempfile.mkdtemp())
-
     def test_cross_repo_target_blocked_no_wake(self):
-        # An AgentOps decide() handed a protected/cross repo must not emit a
-        # Builder wake (firewall fails closed).
-        with tempfile.TemporaryDirectory() as td, \
-             self._open_pr(), \
+        with tempfile.TemporaryDirectory() as td, self._open_pr(), \
              mock.patch("agentops_runtime.runtime_loop._bridge_dir",
-                        return_value=td), \
-             self._base_pr(repo="liangzhipengdamon-maker/Agent-Ops"), \
+                        return_value=td), self._base_pr(), \
              mock.patch("agentops_runtime.runtime_loop.spec_from_linear",
                         return_value=__import__(
                             "agentops_runtime.task_intake", fromlist=["TaskSpec"]
@@ -578,8 +569,6 @@ class TestDecideFirewallIntegration(unittest.TestCase):
             out = decide("AGE-6",
                          "liangzhipengdamon-maker/LearnMind-English", "1")
             files = os.listdir(td)
-        # P0-3: firewall rejection -> phase BLOCKED (AGE-6 fail-closed), never
-        # FIX with an executable-looking wake.
         self.assertEqual(out["phase"], "BLOCKED")
         self.assertEqual(out["review_decision"], "SCOPE_BLOCKED")
         self.assertFalse(out["builder"]["ok"])
@@ -588,18 +577,14 @@ class TestDecideFirewallIntegration(unittest.TestCase):
         self.assertNotIn("findings.md", files)
 
     def test_bound_target_emits_wake(self):
-        # A correctly bound AgentOps target (out-of-episode env authority)
-        # emits the Builder wake.
         env = make_scope_env(
             branch="liangzhipengdamon/age-6-age-6-deterministic-scope-action-firewall",
             base="f93b1859bb63a2eb342789bf6bca3269b4f2c7de",
             repo="liangzhipengdamon-maker/Agent-Ops")
         with tempfile.TemporaryDirectory() as td, \
-             mock.patch.dict(os.environ, env), \
-             self._open_pr(), \
+             mock.patch.dict(os.environ, env), self._open_pr(), \
              mock.patch("agentops_runtime.runtime_loop._bridge_dir",
-                        return_value=td), \
-             self._base_pr(), \
+                        return_value=td), self._base_pr(), \
              mock.patch("agentops_runtime.runtime_loop._pr_changed_files",
                         return_value=[
                             "tools/agentops_runtime/scope_firewall.py"]), \
@@ -620,8 +605,7 @@ class TestDecideFirewallIntegration(unittest.TestCase):
              mock.patch("agentops_runtime.runtime_loop.subprocess.run",
                         return_value=mock.Mock(returncode=0, stdout="")), \
              mock.patch("agentops_runtime.runtime_loop._loopx_refresh"):
-            out = decide("AGE-6",
-                         "liangzhipengdamon-maker/Agent-Ops", "1")
+            out = decide("AGE-6", "liangzhipengdamon-maker/Agent-Ops", "1")
             files = os.listdir(td)
         self.assertEqual(out["phase"], "FIX")
         self.assertTrue(out["builder"]["ok"])
