@@ -86,7 +86,9 @@ def cmd_final_result_review(args):
     """Final Result Auto-Review: send status_report; ONLY if delivered=true
     AND STATE=WAITING_REVIEW, auto-send REQUEST: independent_review via the
     existing Neutral Relay and parse the captured verdict. WAITING_PO_AUTH
-    never triggers a review; deduped per PR+HEAD."""
+    never triggers a review; deduped per PR+HEAD. P1-1: returns non-zero when
+    the status report was not delivered or the independent review did not
+    parse successfully, so callers never see process success on failure."""
     import os
     from .runtime_loop import _bridge_dir
     with open(args.status_report) as f:
@@ -96,6 +98,12 @@ def cmd_final_result_review(args):
         _bridge_dir(), "/tmp/agentops_runtime_report",
         timeout=args.timeout)
     print(json.dumps(out, indent=2, ensure_ascii=False))
+    if not out.get("status_delivered"):
+        return 1  # status_report not delivered
+    if out.get("review_sent") and not out.get("succeeded"):
+        return 2  # independent_review sent but failed to parse
+    if out.get("review_sent") and not (out.get("review") or {}).get("ok"):
+        return 2
     return 0
 
 

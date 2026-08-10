@@ -265,14 +265,21 @@ def final_result_auto_review(repo: str, pr: str, head: str,
     parsed = parse_review_response(
         sent.get("raw_response", ""), repo, pr, head,
         sent.get("review_request_id", ""))
-    try:
-        os.makedirs(bridge_dir, exist_ok=True)
-        with open(marker, "w") as f:
-            json.dump({"repo": repo, "pr": str(pr), "head": head,
-                       "sent": True,
-                       "review_request_id": sent.get("review_request_id"),
-                       "verdict": parsed.get("verdict")}, f)
-    except OSError:
-        pass
+    # P0-1: the success dedupe marker is written ONLY when the relay actually
+    # succeeded (exit_code == 0) AND the response parsed ok. A relay failure,
+    # empty output, binding mismatch, or INCOMPLETE verdict stays retryable so
+    # a later watcher/retry cycle can send the review again.
+    succeeded = bool(sent.get("exit_code") == 0 and parsed.get("ok"))
+    if succeeded:
+        try:
+            os.makedirs(bridge_dir, exist_ok=True)
+            with open(marker, "w") as f:
+                json.dump({"repo": repo, "pr": str(pr), "head": head,
+                           "sent": True,
+                           "review_request_id": sent.get("review_request_id"),
+                           "verdict": parsed.get("verdict")}, f)
+        except OSError:
+            pass
     return {"status_delivered": True, "state": state,
-            "review_sent": True, "review": parsed, "deduped": False}
+            "review_sent": True, "review": parsed, "deduped": False,
+            "succeeded": succeeded}
