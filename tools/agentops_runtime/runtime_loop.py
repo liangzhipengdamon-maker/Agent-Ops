@@ -31,14 +31,106 @@ def _bridge_dir() -> str:
     return os.environ.get("AGENT_BRIDGE_DIR", ".agent-bridge")
 
 
+def _load_scope_policy(task_id: str, repo: str, branch: str, base_sha: str,
+                       head_sha: str, pr: str,
+                       profile_path: Optional[str] = None) -> "ScopePolicy":
+    """Build the immutable scope policy for one episode from the repo profile
+    + the explicit invocation context. The policy is NEVER derived from
+    runtime state, review verdicts, Builder findings, or prompt text.
+
+    Allowed paths default to the whole repo (explicit boundary '.') and the
+    controlled runtime/scripts/docs/tests prefixes; operations default to
+    fix/continue/complete. Ready/Merge/Deploy are excluded unless a profile
+    explicitly authorizes them.
+    """
+    from .scope_firewall import ScopePolicy
+
+    prof = {}
+    if profile_path and os.path.exists(profile_path):
+        try:
+            with open(profile_path) as f:
+                prof = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            prof = {}
+
+    github = prof.get("github") or {}
+    canonical_branch = github.get("canonical_branch") or "main"
+    protected = tuple((prof.get("protected_repositories")
+                       or ["liangzhipengdamon-maker/LearnMind-English",
+                           "liangzhipengdamon-maker/AI-Investment-Lab"]))
+
+    return ScopePolicy(
+        task_id=task_id,
+        repository=repo,
+        branch=branch or canonical_branch,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        allowed_paths=tuple(prof.get("allowed_paths")
+                            or [".", "tools/agentops_runtime/",
+                                "scripts/", "profiles/", "docs/", "tests/"]),
+        allowed_operations=tuple(prof.get("allowed_operations")
+                                 or ["fix", "continue", "complete"]),
+        protected_repositories=protected,
+        allowed_ready_merge_deploy=bool(prof.get("allowed_ready_merge_deploy")),
+    )
+
+
 def builder_handoff(task_id: str, repo: str, pr: str, head: str,
-                    phase: str, findings: list) -> dict:
+                    phase: str, findings: list,
+                    policy: Optional["ScopePolicy"] = None) -> dict:
     """Wake the existing Builder execution chain via the `.agent-bridge`
     protocol (status.json + findings.md). This is the established Builder
     handoff (AGENT_RUNNER_PROMPT.md); the runtime does not re-implement a
-    Builder, it hands findings to the existing one. Fail-closed: any I/O
-    error returns ok=False so the caller can surface it."""
+    Builder, it hands findings to the existing one.
+
+    AGE-6: this is the MANDATORY scope/action firewall gate. A Builder wake
+    is executable ONLY when the bound ScopePolicy passes for this exact
+    repo/branch/base/head/operation. On failure NO status.json/findings.md
+    is written (no executable wake) and the outcome is {ok: False,
+    blocked: True, reason}. Fail-closed: any I/O error also returns
+    ok=False."""
+    from .scope_firewall import evaluate_builder_wake, WorktreeState
+
     bd = _bridge_dir()
+    if policy is None:
+        # No policy bound -> fail closed (never an implicit green light).
+        return {"ok": False, "blocked": True, "state": phase,
+                "bridge": bd,
+                "reason": "no scope policy bound for Builder wake"}
+
+    # Clean-worktree contamination: observe current branch + uncommitted
+    # changes (all changed paths must be inside the policy's allowed paths).
+    wt = None
+    try:
+        cb = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                            capture_output=True, text=True, timeout=15)
+        cur_branch = cb.stdout.strip() if cb.returncode == 0 else ""
+        st = subprocess.run(["git", "status", "--porcelain"],
+                            capture_output=True, text=True, timeout=15)
+        changed = []
+        for line in (st.stdout or "").splitlines():
+            if len(line) > 3:
+                changed.append(line[3:].strip())
+        wt = WorktreeState(current_branch=cur_branch,
+                           has_uncommitted_changes=bool(st.stdout.strip()),
+                           changed_paths=tuple(changed))
+    except Exception:
+        wt = None
+
+    operation = "fix"
+    if phase == "CONTINUE":
+        operation = "continue"
+    elif phase == "COMPLETE":
+        operation = "complete"
+
+    verdict = evaluate_builder_wake(
+        policy, task_id, repo, policy.branch, policy.base_sha, head,
+        operation=operation, target_paths=None, worktree=wt)
+    if not verdict.get("ok"):
+        return {"ok": False, "blocked": True, "state": phase,
+                "bridge": bd, "checks": verdict.get("checks"),
+                "reason": verdict.get("reason")}
+
     try:
         os.makedirs(bd, exist_ok=True)
         status = {
@@ -53,7 +145,8 @@ def builder_handoff(task_id: str, repo: str, pr: str, head: str,
             json.dump(status, f, indent=2)
         with open(os.path.join(bd, "findings.md"), "w") as f:
             f.write("\n\n---\n\n".join(findings) if findings else "")
-        return {"ok": True, "state": phase, "bridge": bd}
+        return {"ok": True, "state": phase, "bridge": bd,
+                "checks": verdict.get("checks")}
     except OSError as e:
         return {"ok": False, "state": phase, "bridge": bd,
                 "detail": str(e)}
@@ -256,10 +349,18 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
     pr_json = _pr_json_full(repo, int(pr))
     reviews = (pr_json or {}).get("reviews") or []
 
+    # AGE-6: bind the deterministic scope policy for this episode. Branch and
+    # base SHA come from the authoritative PR metadata; never from runtime
+    # state / review text / Builder findings.
+    base_sha = (pr_json or {}).get("baseRefOid") or ""
+    branch = (pr_json or {}).get("headRefName") or ""
+    policy = _load_scope_policy(task_id, repo, branch, base_sha, head, pr)
+
     if review.decision in ("CHANGES_REQUESTED", "NOT_PASS"):
         outcome["phase"] = "FIX"          # findings -> Builder execution chain
         outcome["builder"] = builder_handoff(
-            task_id, repo, pr, head, "BUILDER_FIXING", review.findings)
+            task_id, repo, pr, head, "BUILDER_FIXING", review.findings,
+            policy=policy)
     elif review.decision == "PASS":
         if spec.mode == "MANUAL":
             if not _checkpoint_evaluable(spec):
@@ -281,14 +382,15 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
                         outcome["phase"] = "PASSED"
                         outcome["po_decision"] = "APPROVE"
                         outcome["builder"] = builder_handoff(
-                            task_id, repo, pr, head, "CONTINUE", [])
+                            task_id, repo, pr, head, "CONTINUE", [],
+                            policy=policy)
                 elif po in ("REJECT", "CHANGES", "CHANGES_REQUESTED"):
                     outcome["phase"] = "FIX"
                     outcome["po_decision"] = po
                     outcome["builder"] = builder_handoff(
                         task_id, repo, pr, head, "BUILDER_FIXING",
                         [f"PO decision {po} at checkpoint "
-                         f"{spec.checkpoint}"])
+                         f"{spec.checkpoint}"], policy=policy)
                 else:
                     outcome["phase"] = "WAITING_PO_AUTH"
                     outcome["gate_report"] = _gate_status_report(
@@ -296,7 +398,8 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
             else:
                 outcome["phase"] = "PASSED"  # checkpoint not reached; continue
                 outcome["builder"] = builder_handoff(
-                    task_id, repo, pr, head, "CONTINUE", [])
+                    task_id, repo, pr, head, "CONTINUE", [],
+                    policy=policy)
         else:
             # P0-1: AUTO PASS wakes the Builder to continue in scope; accepted
             # completion is derived from evidence, not a bare PASS.
@@ -305,7 +408,8 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
             else:
                 outcome["phase"] = "PASSED"
                 outcome["builder"] = builder_handoff(
-                    task_id, repo, pr, head, "CONTINUE", [])
+                    task_id, repo, pr, head, "CONTINUE", [],
+                    policy=policy)
 
     outcome["loopx"] = _loopx_refresh(task_id, outcome["phase"], pr)
     return outcome
@@ -317,7 +421,8 @@ def _pr_json_full(repo: str, pr: int) -> Optional[dict]:
         res = subprocess.run(
             ["gh", "pr", "view", str(pr), "--repo", repo,
              "--json",
-             "reviewDecision,headRefOid,mergeable,state,reviews,updatedAt"],
+             "reviewDecision,headRefOid,mergeable,state,reviews,updatedAt,"
+             "baseRefOid,headRefName"],
             capture_output=True, text=True, check=True, timeout=30)
         return _json.loads(res.stdout)
     except Exception:
