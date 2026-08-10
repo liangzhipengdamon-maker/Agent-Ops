@@ -547,16 +547,19 @@ class TestResponseSettling(unittest.TestCase):
         self.assertIn(env["REVIEW_REQUEST_ID"], result)
 
     def test_partial_never_completes_fails_closed(self):
-        # DOM stays partial forever -> timeout -> SendFlowError, no ACK.
+        # Turn appears (references the full req_id) but the envelope never
+        # completes -> settle window expires -> SendFlowError, no ACK.
         env = make_envelope(req_id="CANARY_never", repo="r/p", pr="1",
                             head="h1", request="status_report")
+        partial = (f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\n"
+                   f"REPO: {env['REPO']}")  # PR/HEAD/ACK missing forever
         async def reader():
-            return {"users": [], "asst": [self._partial36(env)], "stopBtn": False}
+            return {"users": [], "asst": [partial], "stopBtn": False}
         probe = FakeProbe()
         probe.conversation = reader
         flow = SendFlow(probe, reviewer_url=self.URL,
                         settle_poll_interval=0.01, settle_stable_reads=2,
-                        timeout=1, stage_timeouts={"RESPONSE_SETTLE": 0.5})
+                        timeout=5, stage_timeouts={"RESPONSE_SETTLE": 0.5})
         with self.assertRaises(SendFlowError) as ctx:
             asyncio.run(flow._wait_for_response(env))
         self.assertEqual(ctx.exception.stage, "RESPONSE_SETTLE")
@@ -603,6 +606,34 @@ class TestResponseSettling(unittest.TestCase):
         self.assertIn("ACK: status_report_received", result)
         self.assertIn(env["REVIEW_REQUEST_ID"], result)
         self.assertNotIn("unrelated", result)
+
+    def test_turn_appears_after_settle_window_still_accepted(self):
+        # The settle window only bounds the phase AFTER the response turn
+        # appears; a formal review may take longer before GPT starts replying.
+        # The outer deadline governs the wait for the turn to appear.
+        env = make_envelope(req_id="REV_slow", repo="r/p", pr="1",
+                            head="h1", request="independent_review")
+        full = (f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\n"
+                f"REPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\n"
+                f"VERDICT: PASS")
+        state = {"reads": 0}
+
+        async def reader():
+            state["reads"] += 1
+            # No turn for the first several reads (GPT busy), then it appears.
+            if state["reads"] >= 3:
+                probe.conv_state["asst"] = [full]
+            return dict(probe.conv_state)
+
+        probe = FakeProbe()
+        probe.conversation = reader
+        # settle window shorter than the turn-arrival delay -> must NOT be
+        # rejected by RESPONSE_SETTLE; outer timeout still allows the wait.
+        flow = SendFlow(probe, reviewer_url=self.URL,
+                        settle_poll_interval=0.01, settle_stable_reads=2,
+                        timeout=5, stage_timeouts={"RESPONSE_SETTLE": 0.02})
+        result = asyncio.run(flow._wait_for_response(env))
+        self.assertIn("VERDICT: PASS", result)
 
 
 class TestConversationIdentity(unittest.TestCase):

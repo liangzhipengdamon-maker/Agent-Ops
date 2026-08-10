@@ -769,10 +769,10 @@ class SendFlow:
         artifact, no fabricated ACK.
         """
         deadline = time.time() + self.timeout
-        settle_deadline = time.time() + self.stage_timeouts["RESPONSE_SETTLE"]
         req_id = envelope.get("REVIEW_REQUEST_ID")
         locked_text = None
         stable_reads = 0
+        settle_deadline = None
         while time.time() < deadline:
             await self.verify_conversation_identity()
             conv = await self.probe.conversation()
@@ -782,12 +782,13 @@ class SendFlow:
             # (never a generic latest node), and keep polling ONLY those.
             ours = [t for t in asst if req_id and req_id in (t or "")]
             if not ours:
-                if time.time() > settle_deadline:
-                    raise SendFlowError(
-                        "RESPONSE_SETTLE",
-                        f"no response turn referencing {req_id} appeared")
+                # Response turn not started yet: bounded by the OUTER deadline
+                # (a formal review may take a while before GPT begins). The
+                # settle window only starts once the turn appears.
                 await asyncio.sleep(self.settle_poll_interval)
                 continue
+            if settle_deadline is None:
+                settle_deadline = time.time() + self.stage_timeouts["RESPONSE_SETTLE"]
             # Take the newest of OUR turns; a stale other-turn latest node is
             # never used.
             text = ours[-1] or ""
