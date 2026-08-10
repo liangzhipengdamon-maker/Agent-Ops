@@ -1,0 +1,262 @@
+"""Read-only first-task readiness diagnostics for GovernLoop v0.1.
+
+Doctor observes the current environment and externally signed authority. It
+never creates authority, credentials, branches, PRs, or lifecycle decisions.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+from typing import Optional
+
+from . import authority, setup_wizard
+
+_GITHUB_RE = re.compile(r"(?:github\.com[:/]|git@github\.com:)([^/\s]+/[^/\s]+?)(?:\.git)?$")
+
+
+def _run(args, timeout=20):
+    try:
+        out = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return out.returncode, out.stdout.strip(), out.stderr.strip()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 127, "", str(exc)
+
+
+def _check(name, status, detail, *, next_action=None, data=None):
+    item = {"name": name, "status": status, "detail": detail}
+    if next_action:
+        item["next_action"] = next_action
+    if data is not None:
+        item["data"] = data
+    return item
+
+
+def _origin_repo(url):
+    value = (url or "").strip().rstrip("/")
+    match = _GITHUB_RE.search(value)
+    return match.group(1).removesuffix(".git") if match else None
+
+
+def _path_allowed(path, allowed_paths):
+    from agentops_runtime.scope_firewall import _is_path_allowed
+    return _is_path_allowed(path, tuple(allowed_paths or ()))
+
+
+def _changed_worktree_paths():
+    paths, errors = [], []
+    for command in (["git", "diff", "--name-only"],
+                    ["git", "diff", "--cached", "--name-only"],
+                    ["git", "ls-files", "--others", "--exclude-standard"]):
+        rc, out, err = _run(command)
+        if rc != 0:
+            errors.append(err or " ".join(command) + " failed")
+            continue
+        for raw in out.splitlines():
+            value = raw.strip()
+            if value and value not in paths:
+                paths.append(value)
+    return paths, errors
+
+
+def _worktree_scope_check(verified):
+    payload = verified.get("payload") or {}
+    allowed = payload.get("allowed_paths") if verified.get("ok") else None
+    paths, errors = _changed_worktree_paths()
+    if errors:
+        return _check("worktree_scope", "BLOCKED",
+                      "cannot determine complete worktree state: " + "; ".join(errors),
+                      next_action="repair git/worktree readability; never assume unreadable changes are in scope")
+    if not allowed:
+        if paths:
+            return _check("worktree_scope", "BLOCKED",
+                          "worktree has changes but no verified allowed-path authority",
+                          next_action="external operator must provision signed authority before Builder mutation",
+                          data={"changed_paths": paths})
+        return _check("worktree_scope", "PASS", "worktree clean", data={"changed_paths": []})
+    outside = [p for p in paths if not _path_allowed(p, allowed)]
+    if outside:
+        return _check("worktree_scope", "BLOCKED",
+                      "uncommitted paths outside operator-bound scope",
+                      next_action="clean/stash unrelated changes or use an isolated worktree; do not broaden authority to absorb contamination",
+                      data={"outside_paths": outside, "changed_paths": paths})
+    return _check("worktree_scope", "PASS",
+                  "worktree clean" if not paths else "all uncommitted paths are within bound scope",
+                  data={"changed_paths": paths})
+
+
+def _git_checks(repo, verified):
+    checks = []
+    rc, origin, err = _run(["git", "remote", "get-url", "origin"])
+    observed = _origin_repo(origin) if rc == 0 else None
+    if observed == repo:
+        checks.append(_check("git_repository", "PASS", f"origin = {repo}"))
+    else:
+        checks.append(_check("git_repository", "BLOCKED",
+                             f"expected {repo}; observed {observed or origin or err or 'unreadable'}",
+                             next_action="run GovernLoop from the intended repository/worktree; do not rewrite authority to match the directory"))
+
+    payload = verified.get("payload") or {}
+    expected_branch = payload.get("branch") if verified.get("ok") else None
+    rc, branch, err = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    if rc != 0:
+        checks.append(_check("git_branch", "BLOCKED", err or "current branch unreadable"))
+    elif not expected_branch:
+        checks.append(_check("git_branch", "BLOCKED", f"current branch = {branch}; no verified branch authority",
+                             next_action="external operator must provision signed authority before Builder execution"))
+    elif branch == expected_branch:
+        checks.append(_check("git_branch", "PASS", f"branch = {branch}"))
+    else:
+        checks.append(_check("git_branch", "BLOCKED",
+                             f"bound branch = {expected_branch}; current branch = {branch}",
+                             next_action="switch to the exact operator-authorized branch; do not alter authority from Builder inference"))
+
+    baseline = payload.get("baseline_sha") if verified.get("ok") else None
+    if baseline:
+        rc, _, _ = _run(["git", "cat-file", "-e", f"{baseline}^{{commit}}"])
+        checks.append(_check("baseline_commit", "PASS" if rc == 0 else "BLOCKED",
+                             f"bound baseline {'exists' if rc == 0 else 'not present locally'}: {baseline}",
+                             next_action=None if rc == 0 else "fetch repository history; never substitute another baseline"))
+    else:
+        checks.append(_check("baseline_commit", "BLOCKED", "no verified baseline authority",
+                             next_action="external operator must provision an exact baseline SHA"))
+    checks.append(_worktree_scope_check(verified))
+    return checks
+
+
+def _github_auth_check():
+    rc, out, err = _run(["gh", "auth", "status"], timeout=30)
+    if rc == 0:
+        return _check("github_auth", "PASS", "GitHub CLI authentication available")
+    return _check("github_auth", "BLOCKED", err or out or "GitHub CLI authentication unavailable",
+                  next_action="authenticate GitHub CLI for the target repository")
+
+
+def _linear_check(task_id):
+    if not os.environ.get("LINEAR_ACCESS_TOKEN", "").strip():
+        return _check("linear_task", "BLOCKED", "LINEAR_ACCESS_TOKEN is not present",
+                      next_action="provide LINEAR_ACCESS_TOKEN in the controller environment; do not reconstruct task instructions"), None
+    try:
+        from agentops_runtime.linear_adapter import read_linear_issue
+        from agentops_runtime.task_intake import parse_mode, extract_checkpoint
+        issue = read_linear_issue(task_id)
+    except Exception as exc:
+        return _check("linear_task", "BLOCKED", f"Linear task read failed: {exc}"), None
+    if not issue:
+        return _check("linear_task", "BLOCKED", f"task {task_id} is unreadable/not found",
+                      next_action="verify token access and task identifier"), None
+    description = issue.get("description") or ""
+    mode = parse_mode(description)
+    if mode not in ("AUTO", "MANUAL"):
+        return _check("linear_task", "BLOCKED", "Execution Mode is missing/ambiguous",
+                      next_action="Product Owner must set exactly one Execution Mode: AUTO or MANUAL"), issue
+    data = {"mode": mode, "state": issue.get("state_name")}
+    if mode == "MANUAL":
+        data["checkpoint"] = extract_checkpoint(description)
+    return _check("linear_task", "PASS", f"task {task_id} readable", data=data), issue
+
+
+def _reviewer_check(repo, *, probe):
+    try:
+        config = setup_wizard.load_config()
+    except Exception as exc:
+        return _check("reviewer_binding", "BLOCKED", f"reviewer config unreadable: {exc}",
+                      next_action=f"run `python -m governloop_runtime setup --repo {repo}`")
+    route = (config.get("routes") or {}).get(repo)
+    runtime = config.get("runtime") or {}
+    if not isinstance(route, dict):
+        return _check("reviewer_binding", "BLOCKED", f"no reviewer route is bound for {repo}",
+                      next_action=f"run `python -m governloop_runtime setup --repo {repo}`")
+    try:
+        url = setup_wizard.normalize_conversation_url(route.get("conversation_url"))
+        port = setup_wizard.normalize_cdp_port(route.get("cdp_port") or runtime.get("cdp_port"))
+    except Exception as exc:
+        return _check("reviewer_binding", "BLOCKED", f"reviewer route is invalid: {exc}")
+    if not probe:
+        return _check("reviewer_binding", "PASS", f"reviewer configured on CDP {port}",
+                      data={"conversation_url": url, "cdp_port": port})
+    result = setup_wizard.test_connection(url, port)
+    if result.get("ok"):
+        return _check("reviewer_binding", "PASS", f"dedicated reviewer reachable on CDP {port}")
+    return _check("reviewer_binding", "BLOCKED",
+                  result.get("error") or result.get("detail") or "reviewer connection test failed",
+                  next_action="open exactly one bound ChatGPT conversation tab in the configured GovernLoop Chrome runtime")
+
+
+def _pr_check(repo, pr: Optional[str], verified):
+    payload = verified.get("payload") or {}
+    if not pr:
+        branch = payload.get("branch") or "<authorized-branch>"
+        return _check("pull_request", "EXPECTED_GATE",
+                      "no PR supplied; this is valid during first-task bootstrap",
+                      next_action=f"after bounded work is pushed on `{branch}`, create a Draft PR to the authorized baseline/base; then rerun doctor --pr <number>. Draft creation grants no Ready/Merge authority")
+    rc, out, err = _run(["gh", "pr", "view", str(pr), "--repo", repo, "--json",
+                         "number,state,isDraft,headRefName,headRefOid,baseRefOid,baseRefName"], timeout=30)
+    if rc != 0:
+        return _check("pull_request", "BLOCKED", err or out or f"PR {pr} unreadable",
+                      next_action="verify the exact PR/repository; never substitute another PR")
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return _check("pull_request", "BLOCKED", "GitHub PR response invalid")
+    if data.get("state") != "OPEN":
+        return _check("pull_request", "BLOCKED", f"PR {pr} state = {data.get('state')}", data=data)
+    if not verified.get("ok"):
+        return _check("pull_request", "BLOCKED", "PR readable but positive authority is not verified",
+                      next_action="external operator must provision signed authority before the PR becomes controlled", data=data)
+    mismatches = []
+    if data.get("headRefName") != payload.get("branch"):
+        mismatches.append(f"head branch {data.get('headRefName')} != authority {payload.get('branch')}")
+    if data.get("baseRefOid") != payload.get("baseline_sha"):
+        mismatches.append(f"base {data.get('baseRefOid')} != authority baseline {payload.get('baseline_sha')}")
+    if mismatches:
+        return _check("pull_request", "BLOCKED", "; ".join(mismatches), data=data)
+    allowed = payload.get("allowed_paths") or []
+    rc, names, err = _run(["gh", "pr", "diff", str(pr), "--repo", repo, "--name-only"], timeout=30)
+    if rc != 0:
+        return _check("pull_request", "BLOCKED", err or "PR changed-file list unreadable",
+                      next_action="restore GitHub evidence readability; never assume unreadable files are in scope", data=data)
+    changed = [line.strip() for line in names.splitlines() if line.strip()]
+    outside = [p for p in changed if not _path_allowed(p, allowed)]
+    if outside:
+        return _check("pull_request", "BLOCKED", "PR contains changed files outside operator-bound paths",
+                      next_action="remove out-of-scope changes; do not broaden authority to absorb them",
+                      data={**data, "changed_files": changed, "outside_paths": outside})
+    return _check("pull_request", "PASS",
+                  f"PR #{pr} is {'Draft' if data.get('isDraft') else 'open'}; branch/baseline/files match bound scope",
+                  data={**data, "changed_files": changed})
+
+
+def run_doctor(task_id, repo, pr=None, *, probe_reviewer=True):
+    verified = authority.verify_authority(task_id, expected_repo=repo)
+    checks = []
+    if verified.get("ok"):
+        payload = verified.get("payload") or {}
+        checks.append(_check("positive_authority", "PASS",
+                             f"external signed authority verified: {verified.get('authority_id')}",
+                             data={"authority_id": verified.get("authority_id"),
+                                   "repository": payload.get("repository"),
+                                   "branch": payload.get("branch"),
+                                   "baseline_sha": payload.get("baseline_sha"),
+                                   "allowed_paths": payload.get("allowed_paths"),
+                                   "allowed_operations": payload.get("allowed_operations"),
+                                   "trusted_reviewers": payload.get("trusted_reviewers")}))
+    else:
+        detail = verified.get("detail") or "positive authority unavailable"
+        ignored = verified.get("ignored_process_authority_fields") or []
+        if ignored:
+            detail += "; ignored raw process fields: " + ", ".join(ignored)
+        checks.append(_check("positive_authority", "BLOCKED", detail,
+                             next_action="external operator must provision a valid signed authority document through the OS-protected control channel; runtime/Builder cannot mint it"))
+    checks.extend(_git_checks(repo, verified))
+    checks.append(_github_auth_check())
+    linear, _ = _linear_check(task_id)
+    checks.append(linear)
+    checks.append(_reviewer_check(repo, probe=probe_reviewer))
+    checks.append(_pr_check(repo, pr, verified))
+    status = "BLOCKED" if any(c["status"] == "BLOCKED" for c in checks) else (
+        "BOOTSTRAP_REQUIRED" if any(c["status"] == "EXPECTED_GATE" for c in checks) else "READY")
+    return {"tool": "GovernLoop Doctor", "task_id": task_id, "repo": repo,
+            "pr": str(pr) if pr else None, "status": status, "checks": checks,
+            "mutations_performed": False}
