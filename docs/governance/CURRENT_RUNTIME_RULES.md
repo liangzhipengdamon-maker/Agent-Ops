@@ -39,6 +39,26 @@ Run the same Builder ↔ GitHub ↔ GPT loop until that checkpoint is reached, t
 
 `WAITING_PO_AUTH` is not Controller termination. Builder may idle/exit; Controller/Watcher stays alive until the PO decision arrives, then execution continues from that decision.
 
+## Independent review response contract
+
+A machine-executable ChatGPT independent-review response is exact-bound to the request and uses this envelope:
+
+```text
+GOVERNLOOP_REVIEW: PASS|CHANGES_REQUESTED|NOT_PASS
+REVIEW_REQUEST_ID: <exact request id>
+REPO: <exact owner/repository>
+PR: <exact PR number>
+HEAD: <exact full current HEAD SHA>
+```
+
+`GOVERNLOOP_REVIEW` is the canonical v0.1 marker. `AGENTOPS_REVIEW` is accepted only as a pre-v0.1 compatibility marker.
+
+Exactly one recognized review marker line is allowed in one response or formal review body. Duplicate canonical markers, duplicate legacy markers, or a canonical+legacy pair are ambiguous and fail closed as `INCOMPLETE`, even if the verdict text matches.
+
+The executable verdict must also satisfy the trusted-reviewer and exact-current-HEAD rules. A stale HEAD, mismatched request/repository/PR/HEAD binding, missing binding, untrusted author, generic comment, or malformed verdict is not executable review evidence.
+
+A review `PASS` is technical evidence only. It does not grant Ready, Merge, Deploy, scope expansion, or any other lifecycle authority.
+
 ## No risk matrix
 
 There is no LOW/MEDIUM/HIGH runtime risk classifier in the main control flow.
