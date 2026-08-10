@@ -2,6 +2,9 @@
 """AGE-30 thin AUTO/MANUAL runtime adapter — production entrypoint.
 
 Commands:
+  setup      [--repo R] [--no-open]
+             Open a localhost-only first-run wizard that binds a dedicated
+             ChatGPT reviewer conversation to the Neutral Relay config.
   run-auto   --task-id T --repo R --pr N
              One AUTO decision step (reads Linear mode + GitHub review).
   run-manual --task-id T --repo R --pr N
@@ -24,7 +27,7 @@ Commands:
              only when acceptance is satisfied; drives COMPLETE).
 
 Durable state is LoopX's job; GPT Web transport is the existing Neutral
-Relay's job. This is only the AUTO/MANUAL control glue.
+Relay's job. This is only the AUTO/MANUAL control glue plus first-run setup.
 """
 
 import argparse
@@ -34,6 +37,18 @@ import sys
 from .runtime_loop import decide
 from .controller import ControlWatcher
 from . import relay_client
+from . import setup_wizard
+
+
+def cmd_setup(args):
+    return setup_wizard.run_setup(
+        config_path=args.config_file,
+        repository=args.repo,
+        cdp_port=args.cdp_port,
+        browser_profile=args.browser_profile,
+        setup_port=args.setup_port,
+        no_open=args.no_open,
+    )
 
 
 def cmd_po_decision(args):
@@ -122,6 +137,19 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="agentops_runtime", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
+    p = sub.add_parser("setup")
+    p.add_argument("--repo", help="Repository to prefill as owner/repo")
+    p.add_argument("--config-file", default=setup_wizard.DEFAULT_CONFIG_PATH,
+                   help="Neutral Relay config path")
+    p.add_argument("--cdp-port", type=int,
+                   help="AgentOps Chrome CDP port (defaults to existing config or 9233)")
+    p.add_argument("--browser-profile",
+                   help="AgentOps Chrome profile path (defaults to existing config)")
+    p.add_argument("--setup-port", type=int, default=0,
+                   help="Local setup UI port; 0 chooses an ephemeral port")
+    p.add_argument("--no-open", action="store_true",
+                   help="Do not auto-open the setup page; print its URL instead")
+
     p = sub.add_parser("run-auto")
     p.add_argument("--task-id", required=True)
     p.add_argument("--repo", required=True)
@@ -165,6 +193,8 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
 
+    if args.command == "setup":
+        return cmd_setup(args)
     if args.command in ("run-auto", "run-manual"):
         return cmd_step(args)
     if args.command == "watch":

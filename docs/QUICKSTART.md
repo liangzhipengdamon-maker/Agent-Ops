@@ -35,7 +35,73 @@ Verify the CLI:
 python -m agentops_runtime --help
 ```
 
-## 3. Authenticate external sources
+## 3. Bind your ChatGPT reviewer conversation
+
+Open the dedicated Chrome runtime you intend AgentOps to use, sign in to ChatGPT normally, and create or open a dedicated reviewer conversation. Do not give AgentOps your password, cookie, session token, or OpenAI API key.
+
+Then run:
+
+```bash
+python -m agentops_runtime setup --repo owner/repository
+```
+
+AgentOps starts a setup server bound only to `127.0.0.1` on an ephemeral local port and opens the setup page in your browser. The form asks for:
+
+- repository: `owner/repository`
+- dedicated ChatGPT conversation URL: `https://chatgpt.com/c/<conversation-id>`
+- AgentOps Chrome CDP port: default `9233`
+- AgentOps Chrome profile path: default `~/.agentops/chrome-profile`
+
+The conversation URL is canonicalized and must identify one exact `/c/<id>` ChatGPT conversation. Generic ChatGPT home pages, shared links, GPT pages, non-HTTPS URLs, query strings, fragments, or a different host are rejected.
+
+### Test Connection
+
+Before binding, click **Test Connection**. The wizard probes only the local Chrome DevTools endpoint:
+
+```text
+http://127.0.0.1:<cdp-port>/json/version
+http://127.0.0.1:<cdp-port>/json
+```
+
+The check succeeds only when exactly one open page has the same ChatGPT conversation ID as the URL you entered.
+
+- zero matching tabs -> fail closed (`REVIEWER_CONVERSATION_NOT_FOUND`)
+- multiple matching tabs -> fail closed (`AMBIGUOUS_REVIEWER_CONVERSATION`)
+- unreachable/invalid CDP -> fail closed
+
+The wizard does not select a generic ChatGPT tab and does not guess between duplicates.
+
+### Save
+
+**Bind Conversation** writes/updates:
+
+```text
+~/.agentops/relay/config.json
+```
+
+The write is atomic, unrelated existing config fields are preserved, and the runtime marker is created under the selected browser profile. The saved fields are local routing/runtime settings only; no ChatGPT credentials are collected or stored.
+
+For a machine where you do not want AgentOps to open a browser tab automatically:
+
+```bash
+python -m agentops_runtime setup \
+  --repo owner/repository \
+  --no-open
+```
+
+The command prints `SETUP_URL: http://127.0.0.1:<port>/`; open that loopback URL yourself.
+
+For tests or isolated configurations you can use:
+
+```bash
+python -m agentops_runtime setup \
+  --repo owner/repository \
+  --config-file /tmp/agentops-relay-config.json \
+  --browser-profile /tmp/agentops-chrome-profile \
+  --cdp-port 9233
+```
+
+## 4. Authenticate external sources
 
 Authenticate GitHub CLI:
 
@@ -51,7 +117,7 @@ export LINEAR_ACCESS_TOKEN="<your-linear-token>"
 
 The current Linear adapter is read-only. If the token is absent or the issue cannot be read, the runtime does not invent a task specification.
 
-## 4. Bind explicit scope authority
+## 5. Bind explicit scope authority
 
 The Scope & Action Firewall requires these authorization-bearing values from the controller's environment before a Builder wake can occur:
 
@@ -82,7 +148,7 @@ Important properties:
 
 The environment is intended to be established by the controller/launcher **before** the Builder episode. Do not source these values from a file that the controlled Builder can rewrite.
 
-## 5. Create a compatible task
+## 6. Create a compatible task
 
 The current task adapter reads the task description from Linear. For portable task definitions, use the explicit field syntax below rather than relying on fallback marker detection.
 
@@ -112,7 +178,7 @@ Acceptance Criteria
 
 The supported MANUAL checkpoint in v0.1 maps `review approval` to a review-PASS stage. Unsupported checkpoint text fails closed instead of being guessed.
 
-## 6. Run one bounded decision step
+## 7. Run one bounded decision step
 
 Assume:
 
@@ -150,7 +216,7 @@ The command emits a machine-readable outcome. Typical phases include:
 
 If a review is `CHANGES_REQUESTED` / `NOT_PASS` and the scope firewall passes, the runtime writes a Builder wake to `.agent-bridge`.
 
-## 7. Keep the controller alive
+## 8. Keep the controller alive
 
 ```bash
 python -m agentops_runtime watch \
@@ -164,7 +230,7 @@ The Watcher survives Builder exits and waiting periods. It terminates only when 
 
 `WAITING_PO_AUTH` is intentionally not a terminal state.
 
-## 8. Exact-HEAD completion and PO decisions
+## 9. Exact-HEAD completion and PO decisions
 
 A bare review PASS does not create completion evidence.
 
@@ -189,7 +255,7 @@ python -m agentops_runtime po-decision \
 
 This decision resumes the control loop. It should not be confused with GitHub Ready/Merge/Deploy authorization unless your external governance explicitly grants that action separately.
 
-## 9. Independent final-result review
+## 10. Independent final-result review
 
 AgentOps includes a helper for the project's current Neutral Relay integration:
 
@@ -203,7 +269,7 @@ python -m agentops_runtime final-result-review \
 
 The implemented contract automatically requests independent review only after a delivered `STATE: WAITING_REVIEW` status report. A `WAITING_PO_AUTH` report does not trigger review.
 
-## 10. What to test first
+## 11. What to test first
 
 For a first external pilot, choose a reversible, low-blast-radius change:
 
@@ -215,6 +281,22 @@ For a first external pilot, choose a reversible, low-blast-radius change:
 Avoid using a first pilot for destructive data operations, production deployment, account/auth changes, or a broad refactor.
 
 ## Troubleshooting
+
+### Setup page does not open
+
+Run with `--no-open` and copy the printed `SETUP_URL` into a browser. The setup server intentionally listens only on `127.0.0.1`; it is not remotely accessible.
+
+### `REVIEWER_CONVERSATION_NOT_FOUND`
+
+Make sure the exact dedicated ChatGPT conversation is open in the Chrome runtime using the configured CDP port. A different ChatGPT conversation does not count.
+
+### `AMBIGUOUS_REVIEWER_CONVERSATION`
+
+Close duplicate tabs that show the same bound conversation and retry. AgentOps refuses to choose one arbitrarily.
+
+### CDP unreachable
+
+Confirm the AgentOps Chrome process was started with remote debugging on the same port configured in the wizard. The default is `9233`.
 
 ### `LINEAR_UNREADABLE`
 

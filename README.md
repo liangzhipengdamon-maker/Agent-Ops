@@ -91,6 +91,34 @@ The same loop runs until a **named checkpoint** is reached. The Controller then 
 
 There is no LOW / MEDIUM / HIGH risk classifier in the current control flow.
 
+## First-run reviewer setup
+
+AgentOps includes a localhost-only browser wizard for binding your own dedicated ChatGPT conversation as the independent reviewer.
+
+```bash
+export PYTHONPATH="$PWD/tools"
+python -m agentops_runtime setup --repo owner/repository
+```
+
+The command opens a local setup page on `127.0.0.1` and asks for:
+
+- the target repository (`owner/repository`)
+- a dedicated `https://chatgpt.com/c/<conversation-id>` URL
+- the AgentOps Chrome CDP port (default `9233`)
+- the AgentOps Chrome profile path
+
+The wizard can **Test Connection** against the local Chrome DevTools endpoint and succeeds only when exactly one open tab matches the configured conversation ID. Zero matches or duplicate matching tabs fail closed.
+
+The wizard never asks for or stores a ChatGPT password, cookie, session token, or OpenAI API key. Login happens directly in ChatGPT. The resulting relay route is written to `~/.agentops/relay/config.json` using the same exact-conversation identity expected by the Neutral Relay.
+
+For headless/remote use:
+
+```bash
+python -m agentops_runtime setup --repo owner/repository --no-open
+```
+
+The CLI prints the loopback setup URL instead of opening it automatically.
+
 ## Quick start
 
 AgentOps is currently a repository-first developer tool rather than an installed package. A minimal controlled run requires Python, GitHub CLI, a readable Linear task, an existing GitHub PR, and explicit scope authority.
@@ -101,6 +129,9 @@ cd Agent-Ops
 
 export PYTHONPATH="$PWD/tools"
 export LINEAR_ACCESS_TOKEN="<linear-token>"
+
+# Bind your dedicated ChatGPT reviewer conversation
+python -m agentops_runtime setup --repo owner/repository
 
 export AGENTOPS_SCOPE_REPOSITORY="owner/repository"
 export AGENTOPS_AUTHORIZED_BRANCH="agentops/example-task"
@@ -130,6 +161,7 @@ For a detailed walkthrough, see [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
 ## Current CLI
 
 ```text
+setup                localhost first-run reviewer binding wizard
 run-auto             one AUTO decision step
 run-manual           one MANUAL decision step
 watch                persistent Controller/Watcher
@@ -156,7 +188,7 @@ PYTHONPATH=tools python -m agentops_runtime --help
 
 ## Repository map
 
-- `tools/agentops_runtime/` — current AUTO/MANUAL runtime, Controller/Watcher, review intake, relay integration, scope firewall
+- `tools/agentops_runtime/` — current AUTO/MANUAL runtime, Controller/Watcher, review intake, relay integration, scope firewall, first-run setup
 - `scripts/` — supporting authorization/relay tools
 - `docs/governance/CURRENT_RUNTIME_RULES.md` — canonical current governance contract
 - `docs/governance/` — governance documentation; older material is historical when it conflicts with the canonical contract
@@ -167,7 +199,7 @@ PYTHONPATH=tools python -m agentops_runtime --help
 AgentOps is being released early so other maintainers can inspect and improve the governance model. Current limitations include:
 
 - no PyPI/package installer yet
-- external-project onboarding is not yet a one-command experience
+- reviewer-conversation binding has a first-run wizard, but full external-project onboarding still requires the Builder, Linear, and browser runtime integrations
 - Linear is the currently implemented task adapter
 - GitHub CLI is used for live PR evidence
 - Neutral Relay and LoopX integrations are environment-specific
