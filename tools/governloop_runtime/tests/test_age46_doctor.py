@@ -124,14 +124,15 @@ class TestDoctorBootstrap(unittest.TestCase):
 class TestDoctorGitBaseline(unittest.TestCase):
     def test_exact_baseline_ancestor_passes(self):
         head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        with mock.patch("governloop_runtime.doctor._run", side_effect=[
-            (0, "git@github.com:owner/repo.git", ""),
-            (0, "feat/task", ""),
-            (0, "", ""),
-            (0, head, ""),
-            (0, "", ""),
-        ]), mock.patch("governloop_runtime.doctor._worktree_scope_check",
-                       return_value={"name":"worktree_scope","status":"PASS","detail":"clean"}):
+        with mock.patch("governloop_runtime.doctor._git_worktree_available", return_value=(True, "")), \
+             mock.patch("governloop_runtime.doctor._run", side_effect=[
+                 (0, "git@github.com:owner/repo.git", ""),
+                 (0, "feat/task", ""),
+                 (0, "", ""),
+                 (0, head, ""),
+                 (0, "", ""),
+             ]), mock.patch("governloop_runtime.doctor._worktree_scope_check",
+                            return_value={"name":"worktree_scope","status":"PASS","detail":"clean"}):
             checks = doctor._git_checks("owner/repo", AUTH)
         history = next(c for c in checks if c["name"] == "baseline_history")
         self.assertEqual(history["status"], "PASS")
@@ -139,14 +140,15 @@ class TestDoctorGitBaseline(unittest.TestCase):
 
     def test_divergent_branch_from_existing_baseline_blocks(self):
         head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-        with mock.patch("governloop_runtime.doctor._run", side_effect=[
-            (0, "git@github.com:owner/repo.git", ""),
-            (0, "feat/task", ""),
-            (0, "", ""),
-            (0, head, ""),
-            (1, "", ""),
-        ]), mock.patch("governloop_runtime.doctor._worktree_scope_check",
-                       return_value={"name":"worktree_scope","status":"PASS","detail":"clean"}):
+        with mock.patch("governloop_runtime.doctor._git_worktree_available", return_value=(True, "")), \
+             mock.patch("governloop_runtime.doctor._run", side_effect=[
+                 (0, "git@github.com:owner/repo.git", ""),
+                 (0, "feat/task", ""),
+                 (0, "", ""),
+                 (0, head, ""),
+                 (1, "", ""),
+             ]), mock.patch("governloop_runtime.doctor._worktree_scope_check",
+                            return_value={"name":"worktree_scope","status":"PASS","detail":"clean"}):
             checks = doctor._git_checks("owner/repo", AUTH)
         baseline = next(c for c in checks if c["name"] == "baseline_commit")
         history = next(c for c in checks if c["name"] == "baseline_history")
@@ -156,14 +158,15 @@ class TestDoctorGitBaseline(unittest.TestCase):
 
     def test_unreadable_ancestry_fails_closed(self):
         head = "cccccccccccccccccccccccccccccccccccccccc"
-        with mock.patch("governloop_runtime.doctor._run", side_effect=[
-            (0, "git@github.com:owner/repo.git", ""),
-            (0, "feat/task", ""),
-            (0, "", ""),
-            (0, head, ""),
-            (128, "", "fatal: shallow history"),
-        ]), mock.patch("governloop_runtime.doctor._worktree_scope_check",
-                       return_value={"name":"worktree_scope","status":"PASS","detail":"clean"}):
+        with mock.patch("governloop_runtime.doctor._git_worktree_available", return_value=(True, "")), \
+             mock.patch("governloop_runtime.doctor._run", side_effect=[
+                 (0, "git@github.com:owner/repo.git", ""),
+                 (0, "feat/task", ""),
+                 (0, "", ""),
+                 (0, head, ""),
+                 (128, "", "fatal: shallow history"),
+             ]), mock.patch("governloop_runtime.doctor._worktree_scope_check",
+                            return_value={"name":"worktree_scope","status":"PASS","detail":"clean"}):
             checks = doctor._git_checks("owner/repo", AUTH)
         history = next(c for c in checks if c["name"] == "baseline_history")
         self.assertEqual(history["status"], "BLOCKED")
