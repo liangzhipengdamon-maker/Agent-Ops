@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """AGE-30 review intake: real GitHub PR review bound to exact PR+HEAD.
 
-Reads the authoritative GitHub PR review state via `gh` and classifies it
-into an AgentOps review outcome:
-  - PASS               -> formal AGENTOPS_REVIEW PASS at the exact HEAD, or
-                          native APPROVED bound to the exact HEAD
-  - CHANGES_REQUESTED  -> formal AGENTOPS_REVIEW CHANGES_REQUESTED at the
+Reads the authoritative GitHub PR review state via ``gh`` and classifies it
+into a GovernLoop review outcome:
+  - PASS               -> formal GOV​ERNLOOP_REVIEW PASS at the exact HEAD,
+                          legacy AGENTOPS_REVIEW PASS, or native APPROVED
+  - CHANGES_REQUESTED  -> canonical/legacy formal CHANGES_REQUESTED at the
                           exact HEAD, or native CHANGES_REQUESTED bound to it
-  - NOT_PASS           -> formal AGENTOPS_REVIEW NOT_PASS at the exact HEAD
+  - NOT_PASS           -> canonical/legacy formal NOT_PASS at the exact HEAD
   - INCOMPLETE         -> no executable verdict bound to the exact current
-                          HEAD (stale, missing-HEAD, or generic comments)
+                          HEAD, including ambiguous/duplicate formal markers
 
-The outcome is bound to the exact current PR + HEAD; a stale HEAD is
-INCOMPLETE (fail closed). NEVER self-approves. Among multiple current-HEAD
-formal reviews the LATEST (by submittedAt) wins.
+``GOVERNLOOP_REVIEW`` is canonical. ``AGENTOPS_REVIEW`` remains a pre-v0.1
+compatibility marker. The outcome is bound to the exact current PR + HEAD; a
+stale HEAD is INCOMPLETE (fail closed). NEVER self-approves. Among multiple
+current-HEAD formal review submissions the LATEST (by submittedAt) wins, but
+an ambiguous latest formal submission fails closed rather than falling back.
 """
 
 import dataclasses
@@ -22,6 +24,11 @@ import os
 import re
 import subprocess
 from typing import Optional
+
+from .review_protocol import (
+    has_formal_review_marker,
+    parse_formal_review_verdict,
+)
 
 
 def _profile_path() -> Optional[str]:
@@ -40,10 +47,11 @@ def _profile_path() -> Optional[str]:
 def trusted_reviewers() -> set:
     """Configured trusted reviewer/PO identities (exact GitHub logins).
 
-    Source: AGENTOPS_TRUSTED_REVIEWERS env (comma-separated), else the
-    project profile governance.trusted_reviewers. An EMPTY set fails closed:
-    no review/PO signal is executable. R6-P0-1: executable control signals
-    are trusted-author bound; an untrusted account cannot inject PASS /
+    Source: AGENTOPS_TRUSTED_REVIEWERS env (canonical GOV​ERNLOOP_* is mapped
+    by the compatibility facade), else the project profile
+    governance.trusted_reviewers. An EMPTY set fails closed: no review/PO
+    signal is executable. R6-P0-1: executable control signals are trusted-
+    author bound; an untrusted account cannot inject PASS /
     CHANGES_REQUESTED / PO decision into the control loop.
     """
     env = os.environ.get("AGENTOPS_TRUSTED_REVIEWERS", "").strip()
@@ -93,8 +101,8 @@ def _parse_pr_json(raw: str) -> dict:
 
 def _review_binds_head(r: dict, expected_head: str) -> bool:
     """A review binds the exact current HEAD via its submitted commit (the
-    authoritative `commit.oid`; also accept a top-level `commit_id` for
-    callers/tests) or a body `HEAD:` line. Both are used because the GPT
+    authoritative ``commit.oid``; also accept a top-level ``commit_id`` for
+    callers/tests) or a body ``HEAD:`` line. Both are used because the GPT
     same-owner path posts a formal COMMENTED review whose body carries the
     HEAD marker, while native GitHub reviews carry the commit oid."""
     commit = (r.get("commit_id") or "").lower()
@@ -108,8 +116,8 @@ def _review_binds_head(r: dict, expected_head: str) -> bool:
 
 def _review_has_any_binding(r: dict) -> bool:
     """True if the review exposes any HEAD binding (commit oid/id or body
-    HEAD:). P0-2: a formal review with NO binding is missing/ambiguous -> the
-    executable signal is INCOMPLETE, never applied."""
+    HEAD:). A formal review with NO binding is missing/ambiguous and must not
+    become executable."""
     commit = (r.get("commit_id") or "").strip()
     if not commit:
         commit = ((r.get("commit") or {}).get("oid") or "").strip()
@@ -119,13 +127,16 @@ def _review_has_any_binding(r: dict) -> bool:
 
 
 def _latest_bound_review(reviews, expected_head: str):
-    """Deterministically select the LATEST current-HEAD TRUSTED formal review
-    by submittedAt (falling back to review id). R6-P0-1: only reviews
-    submitted by a trusted reviewer identity are executable; P1-2 keeps the
-    latest-wins rule among them."""
+    """Select the latest current-HEAD TRUSTED formal review submission.
+
+    Both the canonical GOV​ERNLOOP_REVIEW marker and the legacy
+    AGENTOPS_REVIEW marker identify a formal submission. Marker validity is
+    evaluated only after latest selection so a newer ambiguous/invalid formal
+    review fails closed instead of silently falling back to an older PASS.
+    """
     bound = [r for r in reviews
              if r.get("state") == "COMMENTED"
-             and "AGENTOPS_REVIEW" in (r.get("body") or "")
+             and has_formal_review_marker(r.get("body") or "")
              and _author_trusted(r)
              and _review_binds_head(r, expected_head)]
     if not bound:
@@ -136,8 +147,8 @@ def _latest_bound_review(reviews, expected_head: str):
 
 
 def _any_trusted_formal(reviews) -> bool:
-    """Any formal AGENTOPS_REVIEW review from a trusted author."""
-    return any("AGENTOPS_REVIEW" in (r.get("body") or "")
+    """Any canonical/legacy formal review marker from a trusted author."""
+    return any(has_formal_review_marker(r.get("body") or "")
                and _author_trusted(r) for r in reviews)
 
 
@@ -159,28 +170,26 @@ def review_from_github(repo: str, pr: int, expected_head: str,
     mergeable = pr_json.get("mergeable")
     reviews = pr_json.get("reviews") or []
 
-    # P0-3: the same-owner GPT review path posts a formal COMMENTED review
-    # carrying a machine-readable AGENTOPS_REVIEW verdict bound to the exact
-    # HEAD. Parse that formal verdict for BOTH PASS and NOT_PASS /
-    # CHANGES_REQUESTED. A formal review without any HEAD binding is
-    # missing/ambiguous -> INCOMPLETE (fail closed). A formal review bound to
-    # a DIFFERENT HEAD is stale -> skip; with no current-HEAD verdict the
-    # outcome is INCOMPLETE, never the stale one. P1-2: among multiple
-    # current-HEAD formal reviews, the LATEST (by submittedAt) wins.
+    # Same-owner GPT review path posts a formal COMMENTED review carrying a
+    # machine-readable canonical/legacy verdict bound to the exact HEAD.
+    # Select the latest bound trusted formal submission first, then require
+    # EXACTLY one recognized marker line and a valid verdict. Duplicate or
+    # mixed marker lines are INCOMPLETE (fail closed).
     latest = _latest_bound_review(reviews, expected_head)
     if latest is not None:
         body = latest.get("body") or ""
-        m_verdict = re.search(
-            r"\b(PASS|NOT_PASS|CHANGES_REQUESTED)\b", body, re.IGNORECASE)
-        if m_verdict:
-            verdict = m_verdict.group(1).upper()
-            if verdict == "PASS":
-                return ReviewOutcome("COMMENTED", "PASS", repo, pr, head,
-                                     [body])
-            return ReviewOutcome("COMMENTED", verdict, repo, pr, head,
+        formal = parse_formal_review_verdict(body)
+        if formal.status != "VALID":
+            return ReviewOutcome("INCOMPLETE", "INCOMPLETE", repo, pr, head,
+                                 [], fail_closed=True)
+        verdict = formal.verdict
+        if verdict == "PASS":
+            return ReviewOutcome("COMMENTED", "PASS", repo, pr, head,
                                  [body])
-    # A formal AGENTOPS_REVIEW review exists (trusted) but none binds this
-    # exact HEAD: stale/missing/ambiguous -> fail closed.
+        return ReviewOutcome("COMMENTED", verdict, repo, pr, head, [body])
+
+    # A trusted formal review exists but none binds this exact HEAD:
+    # stale/missing/ambiguous -> fail closed.
     if _any_trusted_formal(reviews):
         return ReviewOutcome("INCOMPLETE", "INCOMPLETE", repo, pr, head,
                              [], fail_closed=True)
@@ -221,7 +230,7 @@ def review_from_github(repo: str, pr: int, expected_head: str,
 
 
 def read_github_pr(repo: str, pr: int, expected_head: str) -> ReviewOutcome:
-    """Read the authoritative PR review state via `gh` (incl. reviews)."""
+    """Read the authoritative PR review state via ``gh`` (incl. reviews)."""
     try:
         res = subprocess.run(
             ["gh", "pr", "view", str(pr), "--repo", repo,
