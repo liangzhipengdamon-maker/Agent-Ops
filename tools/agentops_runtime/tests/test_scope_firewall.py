@@ -366,10 +366,29 @@ class TestBuilderHandoffFirewall(unittest.TestCase):
                                  LIFECYCLE_ACTIONS)
 
 
+def make_scope_env(branch="feature/x", base="base1", repo=None,
+                   paths=None, ops=None, **extra):
+    """Full out-of-episode authorization env (all authorization-bearing
+    fields explicitly scoped)."""
+    if paths is None:
+        paths = ["tools/agentops_runtime/", "scripts/", "docs/", "tests/"]
+    if ops is None:
+        ops = ["fix", "continue", "complete"]
+    env = {
+        "AGENTOPS_AUTHORIZED_BRANCH": branch,
+        "AGENTOPS_BASELINE_SHA": base,
+        "AGENTOPS_ALLOWED_PATHS": ",".join(paths),
+        "AGENTOPS_AUTHORIZED_OPERATIONS": ",".join(ops),
+    }
+    if repo:
+        env["AGENTOPS_SCOPE_REPOSITORY"] = repo
+    env.update(extra)
+    return env
+
+
 class TestLoadScopePolicy(unittest.TestCase):
     def test_default_policy_binds_context(self):
-        env = {"AGENTOPS_AUTHORIZED_BRANCH": "feature/x",
-               "AGENTOPS_BASELINE_SHA": "base1"}
+        env = make_scope_env(branch="feature/x", base="base1")
         with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
             prof = os.path.join(td, "agentops.json")
             with open(prof, "w") as f:
@@ -390,8 +409,7 @@ class TestLoadScopePolicy(unittest.TestCase):
     def test_profile_branch_base_not_self_derived(self):
         # P0-1: expected branch/base come from env (out-of-episode), NOT from
         # the observed PR metadata. A drifted PR branch/base fails closed.
-        env = {"AGENTOPS_AUTHORIZED_BRANCH": "feature/x",
-               "AGENTOPS_BASELINE_SHA": "base1"}
+        env = make_scope_env(branch="feature/x", base="base1")
         with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
             p = _load_scope_policy(
                 "AGE-6", "liangzhipengdamon-maker/Agent-Ops",
@@ -422,17 +440,35 @@ class TestLoadScopePolicy(unittest.TestCase):
         self.assertFalse(p.binding_ok)
 
     def test_default_allowed_paths_has_no_implicit_dot(self):
-        # P0-2: production default allowed paths must NOT include '.' (no
-        # implicit whole-repo bypass). Explicit paths only.
-        with tempfile.TemporaryDirectory() as td:
-            prof = os.path.join(td, "agentops.json")
-            with open(prof, "w") as f:
-                f.write('{"github": {"repository": "liangzhipengdamon-maker/Agent-Ops"}}')
+        # P0-2/R6: allowed paths must not include '.' (no implicit whole-repo
+        # bypass); explicit paths only, and missing allowed-paths authority
+        # fails closed.
+        env = make_scope_env(paths=["tools/agentops_runtime/", "scripts/"])
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
             p = _load_scope_policy(
                 "AGE-6", "liangzhipengdamon-maker/Agent-Ops",
-                "feature/x", "base1", "head1", "7", profile_path=prof)
+                "feature/x", "base1", "head1", "7", profile_path=None)
         self.assertNotIn(".", p.allowed_paths)
         self.assertIn("tools/agentops_runtime/", p.allowed_paths)
+        self.assertTrue(p.binding_ok)
+
+    def test_missing_allowed_paths_fails_closed(self):
+        # R6-P0-1: missing allowed-paths authority -> binding_ok=False.
+        env = make_scope_env(paths=[])
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
+            p = _load_scope_policy(
+                "AGE-6", "liangzhipengdamon-maker/Agent-Ops",
+                "feature/x", "base1", "head1", "7", profile_path=None)
+        self.assertFalse(p.binding_ok)
+
+    def test_missing_operations_fails_closed(self):
+        # R6-P0-1: missing allowed-operations authority -> binding_ok=False.
+        env = make_scope_env(ops=[])
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
+            p = _load_scope_policy(
+                "AGE-6", "liangzhipengdamon-maker/Agent-Ops",
+                "feature/x", "base1", "head1", "7", profile_path=None)
+        self.assertFalse(p.binding_ok)
 
     def test_binding_ok_false_blocks_evaluate(self):
         p = ScopePolicy(task_id="AGE-6",
@@ -448,8 +484,7 @@ class TestLoadScopePolicy(unittest.TestCase):
     def test_env_authority_is_out_of_episode(self):
         # P0-1/R4: authority from env (immutable, not in worktree) is bound
         # and used, overriding any self-derived value.
-        env = {"AGENTOPS_AUTHORIZED_BRANCH": "feature/env",
-               "AGENTOPS_BASELINE_SHA": "envbase"}
+        env = make_scope_env(branch="feature/env", base="envbase")
         with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
             p = _load_scope_policy(
                 "AGE-6", "liangzhipengdamon-maker/Agent-Ops",
@@ -532,12 +567,10 @@ class TestDecideFirewallIntegration(unittest.TestCase):
     def test_bound_target_emits_wake(self):
         # A correctly bound AgentOps target (out-of-episode env authority)
         # emits the Builder wake.
-        env = {
-            "AGENTOPS_AUTHORIZED_BRANCH":
-                "liangzhipengdamon/age-6-age-6-deterministic-scope-action-firewall",
-            "AGENTOPS_BASELINE_SHA":
-                "f93b1859bb63a2eb342789bf6bca3269b4f2c7de",
-        }
+        env = make_scope_env(
+            branch="liangzhipengdamon/age-6-age-6-deterministic-scope-action-firewall",
+            base="f93b1859bb63a2eb342789bf6bca3269b4f2c7de",
+            repo="liangzhipengdamon-maker/Agent-Ops")
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.dict(os.environ, env), \
              self._open_pr(), \

@@ -90,12 +90,13 @@ def _load_scope_policy(task_id: str, repo: str, observed_branch: str,
     env_ops = [o.strip() for o in
                os.environ.get("AGENTOPS_AUTHORIZED_OPERATIONS", "").split(",")
                if o.strip()]
-    allowed_ops = tuple(env_ops or ["fix", "continue", "complete"])
+    allowed_ops = tuple(env_ops)
     env_paths = [p.strip() for p in
                  os.environ.get("AGENTOPS_ALLOWED_PATHS", "").split(",")
                  if p.strip()]
-    allowed_paths = tuple(env_paths or ["tools/agentops_runtime/",
-                                        "scripts/", "docs/", "tests/"])
+    allowed_paths = tuple(env_paths)
+    # Deny-side defaults only (cannot broaden scope): protected repositories
+    # default to the protected repos; ready/merge/deploy default denied.
     env_protected = [r.strip() for r in
                      os.environ.get("AGENTOPS_PROTECTED_REPOSITORIES",
                                     "").split(",") if r.strip()]
@@ -105,9 +106,13 @@ def _load_scope_policy(task_id: str, repo: str, observed_branch: str,
     allow_rmd = os.environ.get("AGENTOPS_ALLOW_READY_MERGE_DEPLOY",
                                "").strip().lower() in ("1", "true", "yes")
 
+    # R6-P0-1: repository, branch, baseline, allowed-paths, and allowed-
+    # operations are authorization-bearing and MUST be explicitly scoped via
+    # env. Missing/empty -> binding_ok=False -> firewall BLOCKs with no
+    # Builder wake. Only deny-side defaults (protected repos) are allowed.
     binding_ok = bool(canonical_repo) and canonical_repo == repo
-    if not (expected_branch and expected_base):
-        binding_ok = False  # no out-of-episode authority bound
+    if not (expected_branch and expected_base and allowed_paths and allowed_ops):
+        binding_ok = False  # authorization not fully explicitly scoped
     auth_changed = tuple(prof.get("authoritative_changed_files") or ())
 
     return ScopePolicy(
