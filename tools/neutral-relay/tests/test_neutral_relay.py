@@ -317,8 +317,7 @@ class TestSendFlow(unittest.TestCase):
                 probe.conv_state["users"] = [make_request_text(env)]
             if state["n"] >= 3:
                 probe.conv_state["asst"] = [
-                    f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nREPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\nVERDICT: PASS\nv1",
-                    f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nREPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\nVERDICT: PASS\nv2",
+                    f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\nREPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\nVERDICT: PASS",
                 ]
             return dict(probe.conv_state)
         probe.conversation = conv
@@ -480,6 +479,9 @@ class TestSendFlow(unittest.TestCase):
         self.assertEqual(len(targets), 2)
 
     def test_duplicate_response_handling_flow(self):
+        # Two assistant nodes referencing the same request_id at first
+        # identification is AMBIGUOUS: the relay must fail closed, not pick
+        # the last one (GPT R10 finding).
         env = make_envelope()
         probe = FakeProbe()
         probe.composer_state = [probe.visible_composer()]
@@ -495,9 +497,10 @@ class TestSendFlow(unittest.TestCase):
         probe.conversation = conv
 
         flow = SendFlow(probe, reviewer_url="https://chatgpt.com/c/6a74f5c0-a240-83ec-9cff-198ffab1140e", timeout=5, poll_interval=0.05, stage_timeouts={"LOCATE_COMPOSER":1,"WAIT_SEND_ENABLED":3,"VERIFY_REQUEST_APPEARED":1})
-        result = asyncio.run(flow.run(env, make_request_text(env)))
-        self.assertIn("new", result)
-        self.assertNotIn("old", result)
+        with self.assertRaises(SendFlowError) as ctx:
+            asyncio.run(flow.run(env, make_request_text(env)))
+        self.assertEqual(ctx.exception.stage, "RESPONSE_SETTLE")
+        self.assertIn("ambiguous", ctx.exception.reason)
 
 
 class TestResponseSettling(unittest.TestCase):
@@ -668,6 +671,33 @@ class TestResponseSettling(unittest.TestCase):
         result = asyncio.run(flow._wait_for_response(env))
         self.assertIn("original", result)
         self.assertNotIn("DUPLICATE", result)
+
+    def test_two_dup_nodes_at_first_identification_fails_closed(self):
+        # GPT-requested: if the DOM already contains TWO nodes referencing the
+        # same request_id at FIRST identification, the relay must NOT pick
+        # ours[-1]; identity is ambiguous -> RESPONSE_SETTLE fail closed.
+        env = make_envelope(req_id="REV_ambig", repo="r/p", pr="1",
+                            head="h1", request="independent_review")
+        v1 = (f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\n"
+              f"REPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\n"
+              f"VERDICT: PASS\none")
+        v2 = (f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\n"
+              f"REPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\n"
+              f"VERDICT: PASS\ntwo")
+
+        async def reader():
+            probe.conv_state["asst"] = [v1, v2]  # both present from the start
+            return dict(probe.conv_state)
+
+        probe = FakeProbe()
+        probe.conversation = reader
+        flow = SendFlow(probe, reviewer_url=self.URL,
+                        settle_poll_interval=0.01, settle_stable_reads=2,
+                        timeout=5, stage_timeouts={"RESPONSE_SETTLE": 2})
+        with self.assertRaises(SendFlowError) as ctx:
+            asyncio.run(flow._wait_for_response(env))
+        self.assertEqual(ctx.exception.stage, "RESPONSE_SETTLE")
+        self.assertIn("ambiguous", ctx.exception.reason)
 
 
 class TestConversationIdentity(unittest.TestCase):

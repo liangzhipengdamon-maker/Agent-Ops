@@ -791,11 +791,17 @@ class SendFlow:
                 settle_deadline = time.time() + self.stage_timeouts["RESPONSE_SETTLE"]
 
             if locked_id is None:
-                # LOCK this node by its stable data-message-id. If the node
-                # has no id, it cannot be reliably re-identified across polls:
-                # a node without identity is ambiguous -> fail closed rather
-                # than risk switching turns.
-                locked_id = ours[-1].get("id")
+                # FIRST identification: the response turn must be UNIQUE.
+                # If more than one node references the exact request_id at
+                # first sight, the identity is ambiguous -> fail closed (never
+                # pick ours[-1] arbitrarily). Also require a non-empty stable
+                # data-message-id; a node without identity cannot be locked.
+                if len(ours) != 1:
+                    raise SendFlowError(
+                        "RESPONSE_SETTLE",
+                        f"{len(ours)} response nodes reference {req_id} at "
+                        f"first identification; ambiguous, cannot lock")
+                locked_id = ours[0].get("id")
                 if not locked_id:
                     raise SendFlowError(
                         "RESPONSE_SETTLE",
