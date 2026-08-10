@@ -68,7 +68,12 @@
           }
         },
         "protected_project": { "type": "boolean", "default": false },
-        "cross_project_allowed": { "type": "boolean", "default": false }
+        "cross_project_allowed": { "type": "boolean", "default": false },
+        "trusted_reviewers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "GitHub logins whose formal review / PO decisions are executable (R6-P0-1). Empty/unset fails closed."
+        }
       },
       "required": ["capabilities", "required_gates", "protected_project"],
       "additionalProperties": false

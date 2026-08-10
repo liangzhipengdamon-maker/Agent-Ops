@@ -476,6 +476,12 @@ class DomProbe:
       return {users, asst, stopBtn};
     }"""
 
+    PROBE_ASSISTANT_TURNS = """()=>{
+      return Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'))
+                  .map(m => ({text: m.innerText || '',
+                              id: m.getAttribute('data-message-id') || null}));
+    }"""
+
     PROBE_FOCUS_COMPOSER = """(sels)=>{
       for (const sel of sels) {
         const el = document.querySelector(sel);
@@ -513,6 +519,16 @@ class DomProbe:
 
     async def conversation(self):
         return await self.probe(self.PROBE_CONVERSATION, [])
+
+    async def assistant_turns(self):
+        """Return per-turn assistant node descriptors {text, id}.
+
+        Each entry is one `[data-message-author-role="assistant"]` node with
+        its current innerText and (when present) data-message-id, so the wait
+        logic can LOCK the response turn produced by this request instead of
+        re-reading whatever happens to be the latest node on each poll.
+        """
+        return await self.probe(self.PROBE_ASSISTANT_TURNS, [])
 
     async def focus_composer(self):
         return await self.probe(self.PROBE_FOCUS_COMPOSER, self.COMPOSER_SELECTORS)
@@ -557,10 +573,12 @@ class SendFlow:
         "WAIT_SEND_ENABLED": 20,
         "VERIFY_REQUEST_APPEARED": 30,
         "WAIT_ASSISTANT_RESPONSE": 180,
+        "RESPONSE_SETTLE": 25,
     }
 
     def __init__(self, probe, reviewer_url, timeout=None, max_send_attempts=2,
-                 poll_interval=2.0, stage_timeouts=None):
+                 poll_interval=2.0, stage_timeouts=None,
+                 settle_poll_interval=0.4, settle_stable_reads=3):
         self.probe = probe
         self.reviewer_url = reviewer_url
         self.timeout = timeout or self.stage_timeouts["WAIT_ASSISTANT_RESPONSE"]
@@ -569,6 +587,10 @@ class SendFlow:
         self.stage_timeouts = dict(self.STAGE_TIMEOUTS)
         if stage_timeouts:
             self.stage_timeouts.update(stage_timeouts)
+        # Assistant-response settling: poll the LOCKED response turn at this
+        # interval until the exact envelope is fully present AND stable.
+        self.settle_poll_interval = settle_poll_interval
+        self.settle_stable_reads = settle_stable_reads
 
     async def _deadline(self, stage):
         return time.time() + self.stage_timeouts.get(stage, 30)
@@ -697,22 +719,134 @@ class SendFlow:
         return ("CONFIRMED_NOT_SENT",
                 "request never appeared in conversation within timeout")
 
+    def _response_envelope_complete(self, text, envelope):
+        """True only when the EXACT correlation envelope is fully present in
+        the response text: REVIEW_REQUEST_ID/REPO/PR/HEAD each exactly equal
+        to the request's values. For status_report requests the response must
+        ALSO contain the exact `ACK: status_report_received` marker. No
+        partial/substring matches; presence of a field value alone is not
+        enough."""
+        if not text:
+            return False
+        req = envelope.get("REVIEW_REQUEST_ID")
+        repo = envelope.get("REPO")
+        pr = envelope.get("PR")
+        head = envelope.get("HEAD")
+        if not all([req, repo, pr, head]):
+            return False
+        fields = {}
+        for line in text.splitlines():
+            for key in ("REVIEW_REQUEST_ID", "REPO", "PR", "HEAD"):
+                if line.startswith(f"{key}:"):
+                    fields[key] = line.split(f"{key}:", 1)[1].strip()
+        if fields.get("REVIEW_REQUEST_ID") != req:
+            return False
+        if fields.get("REPO") != repo:
+            return False
+        if fields.get("PR") != pr:
+            return False
+        if fields.get("HEAD") != head:
+            return False
+        if envelope.get("REQUEST") == "status_report":
+            return "ACK: status_report_received" in text
+        return True
+
     async def _wait_for_response(self, envelope):
+        """Wait for the assistant response produced by THIS request.
+
+        Timing fix (canary-exposed): do NOT treat the currently-latest
+        assistant node, `data-is-last-node`, or "not streaming" as proof the
+        response is complete. Instead:
+          1. LOCK the response turn — the assistant node(s) produced by this
+             request, identified by the exact REVIEW_REQUEST_ID in the text —
+             and keep polling THAT turn, never switching to a different latest
+             node mid-wait.
+          2. Wait until the exact 5-field envelope is fully present.
+          3. Require the locked text to be stable across settle_stable_reads
+             consecutive identical reads (~1s) before calling the strict
+             correlate parser.
+        Timeout or permanently-incomplete DOM -> fail closed, no success
+        artifact, no fabricated ACK.
+        """
         deadline = time.time() + self.timeout
-        last_seen = None
         req_id = envelope.get("REVIEW_REQUEST_ID")
+        locked_id = None
+        locked_text = None
+        stable_reads = 0
+        settle_deadline = None
         while time.time() < deadline:
             await self.verify_conversation_identity()
-            conv = await self.probe.conversation()
-            asst = (conv or {}).get("asst") or []
-            matched = correlate_response(asst, envelope)
-            if matched:
-                stop = bool(conv and conv.get("stopBtn"))
-                if not stop:
-                    if matched == last_seen:
-                        return matched  # stable across a poll -> complete
-                    last_seen = matched
-            await asyncio.sleep(self.poll_interval)
+            turns = await self.probe.assistant_turns()
+            turns = turns or []
+            # Identify THIS request's response turn(s): assistant nodes whose
+            # text references our exact REVIEW_REQUEST_ID.
+            ours = [t for t in turns if req_id and req_id in (t.get("text") or "")]
+            if not ours:
+                # Response turn not started yet: bounded by the OUTER deadline
+                # (a formal review may take a while before GPT begins). The
+                # settle window only starts once the turn appears.
+                await asyncio.sleep(self.settle_poll_interval)
+                continue
+            if settle_deadline is None:
+                settle_deadline = time.time() + self.stage_timeouts["RESPONSE_SETTLE"]
+
+            if locked_id is None:
+                # FIRST identification: the response turn must be UNIQUE.
+                # If more than one node references the exact request_id at
+                # first sight, the identity is ambiguous -> fail closed (never
+                # pick ours[-1] arbitrarily). Also require a non-empty stable
+                # data-message-id; a node without identity cannot be locked.
+                if len(ours) != 1:
+                    raise SendFlowError(
+                        "RESPONSE_SETTLE",
+                        f"{len(ours)} response nodes reference {req_id} at "
+                        f"first identification; ambiguous, cannot lock")
+                locked_id = ours[0].get("id")
+                if not locked_id:
+                    raise SendFlowError(
+                        "RESPONSE_SETTLE",
+                        f"response turn for {req_id} has no stable node id; "
+                        f"cannot lock")
+                locked_text = None
+                stable_reads = 0
+
+            # Only read the LOCKED node; never switch to another assistant
+            # node (even one that also references this request_id) mid-wait.
+            current = None
+            for t in turns:
+                if t.get("id") == locked_id:
+                    current = t
+                    break
+            if current is None:
+                raise SendFlowError(
+                    "RESPONSE_SETTLE",
+                    f"locked response node {locked_id} for {req_id} vanished")
+            text = current.get("text") or ""
+
+            if not self._response_envelope_complete(text, envelope):
+                stable_reads = 0
+                if time.time() > settle_deadline:
+                    raise SendFlowError(
+                        "RESPONSE_SETTLE",
+                        f"response for {req_id} never became complete "
+                        f"(envelope fields missing)")
+                await asyncio.sleep(self.settle_poll_interval)
+                continue
+            # Envelope complete: require stability before strict correlation.
+            if text == locked_text:
+                stable_reads += 1
+            else:
+                locked_text = text
+                stable_reads = 1
+            if stable_reads >= self.settle_stable_reads:
+                matched = correlate_response([text], envelope)
+                if not matched:
+                    raise SendFlowError(
+                        "RESPONSE_SETTLE",
+                        f"settled response for {req_id} failed strict "
+                        f"correlation")
+                return matched
+            await asyncio.sleep(self.settle_poll_interval)
         raise SendFlowError("WAIT_ASSISTANT_RESPONSE",
                             f"timed out waiting for correlated response for {req_id}")
 
