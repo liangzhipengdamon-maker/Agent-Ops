@@ -1,9 +1,7 @@
 {
-  "project_identity": "AgentOps (pre-v0.1 compatibility)",
-  "status": "deprecated",
-  "superseded_by": "profiles/governloop.json",
+  "project_identity": "GovernLoop",
   "github": {
-    "repository": "liangzhipengdamon-maker/Agent-Ops",
+    "repository": "liangzhipengdamon-maker/GovernLoop",
     "canonical_branch": "main"
   },
   "linear": {
@@ -15,8 +13,8 @@
     "required_env_vars": []
   },
   "validation": {
-    "ci_command": "pytest",
-    "test_command": "pytest tests/"
+    "ci_command": "python -m unittest discover",
+    "test_command": "PYTHONPATH=tools python -m unittest discover -s tools/governloop_runtime/tests"
   },
   "reviewer_relay": {
     "binding_type": "chatgpt-neutral-relay",

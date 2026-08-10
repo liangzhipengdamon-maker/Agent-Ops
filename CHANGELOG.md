@@ -1,17 +1,25 @@
 # Changelog
 
-All notable public releases of AgentOps will be documented here.
+All notable public releases of GovernLoop will be documented here.
 
-The project is currently preparing its first open-source pre-release.
+The project is preparing its first open-source pre-release.
 
 ## [Unreleased]
 
 ### Added
 
-- public open-source documentation and quick start
+- public open-source documentation and Quick Start
 - Apache License 2.0
 - contribution and security policies
-- v0.1.0 release-readiness checklist
+- localhost-only first-run ChatGPT reviewer binding wizard
+- canonical `governloop_runtime` CLI/runtime facade
+- canonical `GOVERNLOOP_*` authority environment and `~/.governloop/` local state
+
+### Changed
+
+- public project identity frozen as **GovernLoop** — “Governed autonomy for coding agents.”
+- pre-release AgentOps names moved behind a temporary compatibility layer rather than remaining public API
+- GitHub Actions baseline now validates the GovernLoop facade plus the proven pre-v0.1 regression suites
 
 ## [0.1.0] - planned
 
@@ -27,33 +35,40 @@ The project is currently preparing its first open-source pre-release.
 
 - status-report delivery through a Neutral Relay boundary
 - strict correlated ACK handling
-- Final Result Auto-Review path from delivered `WAITING_REVIEW` report to independent review
+- Final Result Auto-Review from delivered `WAITING_REVIEW` to independent review
 - exact-current-HEAD review binding
 - automatic remediation loop after `CHANGES_REQUESTED` / `NOT_PASS`
 
 ### Scope & Action Firewall
 
-- explicit out-of-episode repository authority
+- explicit episode-external repository authority
 - exact branch and baseline binding
 - explicit allowed paths and allowed operations
 - local git-origin verification
 - clean-worktree contamination checks
 - authoritative PR changed-file checks
-- fail-closed behavior for unreadable scope evidence
-- rejection of path traversal, absolute paths, wildcard broadening, protected paths, and disallowed operations
+- fail-closed unreadable-scope behavior
+- rejection of traversal, absolute paths, wildcard broadening, protected paths, and disallowed operations
 - no implied Ready / Merge / Deploy authority from CI, review, ACK, runtime state, or Builder text
+
+### Onboarding
+
+- first-run reviewer-binding setup on localhost
+- exact ChatGPT conversation URL binding
+- deterministic CDP Test Connection requiring exactly one matching tab
+- no ChatGPT credential collection or storage
 
 ### Governance
 
-- canonical runtime rules consolidated in `docs/governance/CURRENT_RUNTIME_RULES.md`
-- runtime model simplified to `AUTO | MANUAL`; historical LOW/MEDIUM/HIGH risk routing is not part of the current control flow
-- Linear retained as task/status source, GitHub as code/evidence source, and Product Owner decisions as lifecycle authority
+- canonical runtime rules in `docs/governance/CURRENT_RUNTIME_RULES.md`
+- runtime model `AUTO | MANUAL`; historical LOW/MEDIUM/HIGH routing is not part of current control flow
+- Linear as current task/status adapter, GitHub as code/evidence source, Product Owner as lifecycle authority
 
 ### Known limitations
 
 - repository-first developer workflow; no packaged installer yet
-- Linear is the currently implemented task adapter
+- full external-project onboarding still requires Builder, Linear, and browser-runtime integration
 - GitHub CLI is required for live PR evidence
-- Neutral Relay and LoopX integrations require environment-specific setup
-- external-project onboarding is not yet a one-command experience
-- first cross-project real-world pilot is still part of v0.1 validation
+- Neutral Relay and LoopX remain environment-specific integrations
+- the first real cross-project pilot remains release-validation work in progress
+- a thin pre-v0.1 naming compatibility bridge remains and should be removed in a later breaking cleanup after external migration evidence exists
