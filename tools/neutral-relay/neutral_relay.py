@@ -770,17 +770,17 @@ class SendFlow:
         """
         deadline = time.time() + self.timeout
         req_id = envelope.get("REVIEW_REQUEST_ID")
+        locked_id = None
         locked_text = None
         stable_reads = 0
         settle_deadline = None
         while time.time() < deadline:
             await self.verify_conversation_identity()
-            conv = await self.probe.conversation()
-            asst = (conv or {}).get("asst") or []
-            # Identify THIS request's response turn(s): assistant messages
-            # whose text references our exact REVIEW_REQUEST_ID. Lock to them
-            # (never a generic latest node), and keep polling ONLY those.
-            ours = [t for t in asst if req_id and req_id in (t or "")]
+            turns = await self.probe.assistant_turns()
+            turns = turns or []
+            # Identify THIS request's response turn(s): assistant nodes whose
+            # text references our exact REVIEW_REQUEST_ID.
+            ours = [t for t in turns if req_id and req_id in (t.get("text") or "")]
             if not ours:
                 # Response turn not started yet: bounded by the OUTER deadline
                 # (a formal review may take a while before GPT begins). The
@@ -789,9 +789,34 @@ class SendFlow:
                 continue
             if settle_deadline is None:
                 settle_deadline = time.time() + self.stage_timeouts["RESPONSE_SETTLE"]
-            # Take the newest of OUR turns; a stale other-turn latest node is
-            # never used.
-            text = ours[-1] or ""
+
+            if locked_id is None:
+                # LOCK this node by its stable data-message-id. If the node
+                # has no id, it cannot be reliably re-identified across polls:
+                # a node without identity is ambiguous -> fail closed rather
+                # than risk switching turns.
+                locked_id = ours[-1].get("id")
+                if not locked_id:
+                    raise SendFlowError(
+                        "RESPONSE_SETTLE",
+                        f"response turn for {req_id} has no stable node id; "
+                        f"cannot lock")
+                locked_text = None
+                stable_reads = 0
+
+            # Only read the LOCKED node; never switch to another assistant
+            # node (even one that also references this request_id) mid-wait.
+            current = None
+            for t in turns:
+                if t.get("id") == locked_id:
+                    current = t
+                    break
+            if current is None:
+                raise SendFlowError(
+                    "RESPONSE_SETTLE",
+                    f"locked response node {locked_id} for {req_id} vanished")
+            text = current.get("text") or ""
+
             if not self._response_envelope_complete(text, envelope):
                 stable_reads = 0
                 if time.time() > settle_deadline:

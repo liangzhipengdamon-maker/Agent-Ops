@@ -94,7 +94,10 @@ class FakeProbe:
         return dict(self.conv_state)
 
     async def assistant_turns(self):
-        asst = self.conv_state.get("asst") or []
+        # Delegate to conversation() so scripted lazy state mutations apply,
+        # then derive per-turn {text, id} nodes from its asst list.
+        conv = await self.conversation()
+        asst = (conv or {}).get("asst") or []
         return [{"text": t, "id": f"turn-{i}"} for i, t in enumerate(asst)]
 
     async def focus_composer(self):
@@ -634,6 +637,37 @@ class TestResponseSettling(unittest.TestCase):
                         timeout=5, stage_timeouts={"RESPONSE_SETTLE": 0.02})
         result = asyncio.run(flow._wait_for_response(env))
         self.assertIn("VERDICT: PASS", result)
+
+    def test_second_dup_node_after_lock_does_not_switch(self):
+        # GPT-requested: once the response node is locked by data-message-id,
+        # a SECOND assistant node that also references the same request_id
+        # appearing later must NOT cause a switch. The relay keeps reading the
+        # originally locked node and ignores the duplicate.
+        env = make_envelope(req_id="REV_dup", repo="r/p", pr="1",
+                            head="h1", request="independent_review")
+        v1 = (f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\n"
+              f"REPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\n"
+              f"VERDICT: PASS\noriginal")
+        v2 = (f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\n"
+              f"REPO: {env['REPO']}\nPR: {env['PR']}\nHEAD: {env['HEAD']}\n"
+              f"VERDICT: PASS\nDUPLICATE")
+        state = {"n": 0}
+
+        async def reader():
+            state["n"] += 1
+            if state["n"] == 1:
+                probe.conv_state["asst"] = [v1]          # lock v1 (id turn-0)
+            else:
+                probe.conv_state["asst"] = [v1, v2]       # dup v2 appears (turn-1)
+            return dict(probe.conv_state)
+
+        probe = FakeProbe()
+        probe.conversation = reader
+        flow = SendFlow(probe, reviewer_url=self.URL,
+                        settle_poll_interval=0.01, settle_stable_reads=2, timeout=5)
+        result = asyncio.run(flow._wait_for_response(env))
+        self.assertIn("original", result)
+        self.assertNotIn("DUPLICATE", result)
 
 
 class TestConversationIdentity(unittest.TestCase):
