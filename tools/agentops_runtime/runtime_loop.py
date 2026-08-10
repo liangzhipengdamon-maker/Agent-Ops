@@ -78,21 +78,33 @@ def _load_scope_policy(task_id: str, repo: str, observed_branch: str,
     github = prof.get("github") or {}
     fw = prof.get("scope_firewall") or {}
     canonical_repo = github.get("repository") or ""
-    # Authoritative expected branch + baseline from project/task scope.
-    # Prefer the profile's explicit scope_firewall.authorized_branch /
-    # baseline_sha (the task's declared implementation branch and baseline);
-    # fall back to canonical_branch. Never from the PR's own metadata.
-    expected_branch = (fw.get("authorized_branch")
-                       or github.get("canonical_branch") or "main")
-    expected_base = fw.get("baseline_sha") or ""
+
+    # P0-1/R4: task-scope authority (authorized branch + baseline) comes from
+    # an IMMUTABLE, out-of-episode source: env vars established before
+    # execution (AGENTOPS_AUTHORIZED_BRANCH / AGENTOPS_BASELINE_SHA /
+    # AGENTOPS_AUTHORIZED_OPERATIONS), falling back to the profile. It is
+    # never derived from the PR's own metadata or from Builder-mutable state.
+    # If neither env nor profile supplies branch AND baseline, binding_ok=False
+    # (no self-derived authority -> fail closed).
+    expected_branch = (os.environ.get("AGENTOPS_AUTHORIZED_BRANCH", "").strip()
+                       or fw.get("authorized_branch")
+                       or github.get("canonical_branch") or "")
+    expected_base = (os.environ.get("AGENTOPS_BASELINE_SHA", "").strip()
+                     or fw.get("baseline_sha") or "")
+    env_ops = [o.strip() for o in
+               os.environ.get("AGENTOPS_AUTHORIZED_OPERATIONS", "").split(",")
+               if o.strip()]
+    allowed_ops = tuple(env_ops
+                        or fw.get("authorized_operations")
+                        or prof.get("allowed_operations")
+                        or ["fix", "continue", "complete"])
     binding_ok = bool(canonical_repo) and canonical_repo == repo
+    if not (expected_branch and expected_base):
+        binding_ok = False  # no out-of-episode authority bound
     protected = tuple((prof.get("protected_repositories")
                        or ["liangzhipengdamon-maker/LearnMind-English",
                            "liangzhipengdamon-maker/AI-Investment-Lab"]))
     auth_changed = tuple(prof.get("authoritative_changed_files") or ())
-    allowed_ops = tuple(fw.get("authorized_operations")
-                        or prof.get("allowed_operations")
-                        or ["fix", "continue", "complete"])
 
     return ScopePolicy(
         task_id=task_id,

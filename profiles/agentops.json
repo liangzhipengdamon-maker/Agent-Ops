@@ -4,11 +4,6 @@
     "repository": "liangzhipengdamon-maker/Agent-Ops",
     "canonical_branch": "main"
   },
-  "scope_firewall": {
-    "authorized_branch": "liangzhipengdamon/age-6-age-6-deterministic-scope-action-firewall",
-    "baseline_sha": "f93b1859bb63a2eb342789bf6bca3269b4f2c7de",
-    "authorized_operations": ["fix", "continue", "complete"]
-  },
   "linear": {
     "team_key": "AGE",
     "project_id": "cf3dc03e-83df-4698-b8da-4efb37553d4a"

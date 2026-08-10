@@ -449,6 +449,33 @@ class TestLoadScopePolicy(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertFalse(r["checks"]["binding_ok"])
 
+    def test_env_authority_is_out_of_episode(self):
+        # P0-1/R4: authority from env (immutable, not in worktree) is bound
+        # and used, overriding any self-derived value.
+        env = {"AGENTOPS_AUTHORIZED_BRANCH": "feature/env",
+               "AGENTOPS_BASELINE_SHA": "envbase"}
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
+            p = _load_scope_policy(
+                "AGE-6", "liangzhipengdamon-maker/Agent-Ops",
+                "feature/pr", "prbase", "head1", "7", profile_path=None)
+        self.assertEqual(p.branch, "feature/env")
+        self.assertEqual(p.base_sha, "envbase")
+        self.assertTrue(p.binding_ok)
+
+    def test_missing_authority_fails_closed(self):
+        # No env and no profile scope_firewall authority -> binding_ok=False.
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.dict(os.environ, {}, clear=True):
+            prof = os.path.join(td, "agentops.json")
+            with open(prof, "w") as f:
+                f.write('{"github": {"repository": '
+                        '"liangzhipengdamon-maker/Agent-Ops", '
+                        '"canonical_branch": "main"}}')
+            p = _load_scope_policy(
+                "AGE-6", "liangzhipengdamon-maker/Agent-Ops",
+                "feature/pr", "prbase", "head1", "7", profile_path=prof)
+        self.assertFalse(p.binding_ok)
+
 
 class TestDecideFirewallIntegration(unittest.TestCase):
     """decide() with the REAL builder_handoff: a correctly bound scope emits a
@@ -507,8 +534,16 @@ class TestDecideFirewallIntegration(unittest.TestCase):
         self.assertNotIn("findings.md", files)
 
     def test_bound_target_emits_wake(self):
-        # A correctly bound AgentOps target emits the Builder wake.
+        # A correctly bound AgentOps target (out-of-episode env authority)
+        # emits the Builder wake.
+        env = {
+            "AGENTOPS_AUTHORIZED_BRANCH":
+                "liangzhipengdamon/age-6-age-6-deterministic-scope-action-firewall",
+            "AGENTOPS_BASELINE_SHA":
+                "f93b1859bb63a2eb342789bf6bca3269b4f2c7de",
+        }
         with tempfile.TemporaryDirectory() as td, \
+             mock.patch.dict(os.environ, env), \
              self._open_pr(), \
              mock.patch("agentops_runtime.runtime_loop._bridge_dir",
                         return_value=td), \
