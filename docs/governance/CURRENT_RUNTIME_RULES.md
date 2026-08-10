@@ -13,6 +13,30 @@ This is the single current control contract. Older governance/architecture docs 
 - **Controller/Watcher**: keeps the task loop alive across Builder exits and waiting periods.
 - **LoopX/runtime state**: durable operational state only.
 
+## Positive authority
+
+Task intent is not positive runtime authority. Linear text, PR text, review output, Builder output, runtime state, mutable repository files, and raw process environment must not create missing authority.
+
+Canonical positive authority is **verify-only inside GovernLoop**. The runtime contains no signing key and exposes no command/API that can mint an authority document. An external operator/control identity must provision a pre-existing OpenSSH-signed authority document through an OS-protected control channel before the Builder episode.
+
+The control channel is resolved from the operating-system account home, not from `HOME` or `GOVERNLOOP_HOME`. The operator public key, control directory, and signed authority document must not be owned or writable by the Builder/runtime OS uid. If that ownership separation is absent, GovernLoop fails closed. This means strong local authority requires real process/credential separation; a same-uid convention or an `--operator-confirm` flag is not an authority boundary.
+
+The signed authority binds the exact:
+
+- task ID;
+- repository;
+- branch;
+- full baseline SHA;
+- allowed paths;
+- allowed non-lifecycle operations;
+- trusted reviewer GitHub identities.
+
+`run-auto`, `run-manual`, `watch`, and the legacy compatibility core independently verify the external signature. Directly importing `agentops_runtime` does not restore raw `AGENTOPS_*` as an executable authority channel.
+
+Raw positive `GOVERNLOOP_*` / `AGENTOPS_*` scope and trusted-reviewer values are ignored as authority. Repository profiles, task text, Builder output, and runtime state cannot fill missing signed fields. Trusted reviewer identity is positive authority too and must come from the signed operator document.
+
+Positive scope authority never contains Ready, Merge, Close/Reopen, Tag, Release, or Deploy permission. Those remain separate action-specific authorization decisions.
+
 ## Execution mode
 
 Before execution starts, every task must specify exactly one mode: `AUTO` or `MANUAL`.
@@ -29,7 +53,7 @@ CHANGES_REQUESTED / NOT_PASS → Builder fixes → new code HEAD → review agai
 PASS → continue in scope or finish when acceptance criteria are satisfied
 ```
 
-Do not stop merely because a phase, commit, push, PR update, report, or review round completed. AUTO may continue through lifecycle steps that are already inside the task scope; it must not invent unrelated work.
+Do not stop merely because a phase, commit, push, PR update, report, or review round completed. AUTO may continue through lifecycle steps already inside the task scope; it must not invent unrelated work.
 
 ### MANUAL
 
@@ -37,7 +61,7 @@ The task instruction must name the checkpoint or condition where PO input is req
 
 Run the same Builder ↔ GitHub ↔ GPT loop until that checkpoint is reached, then report the exact state and enter `WAITING_PO_AUTH`.
 
-`WAITING_PO_AUTH` is not Controller termination. Builder may idle/exit; Controller/Watcher stays alive until the PO decision arrives, then execution continues from that decision.
+`WAITING_PO_AUTH` is not Controller termination. Builder may idle/exit; Controller/Watcher stays alive until a valid PO decision arrives, then execution continues from that decision.
 
 ## Independent review response contract
 
