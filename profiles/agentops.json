@@ -1,5 +1,7 @@
 {
-  "project_identity": "AgentOps",
+  "project_identity": "AgentOps (pre-v0.1 compatibility)",
+  "status": "deprecated",
+  "superseded_by": "profiles/governloop.json",
   "github": {
     "repository": "liangzhipengdamon-maker/Agent-Ops",
     "canonical_branch": "main"
