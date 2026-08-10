@@ -2,7 +2,7 @@
 """Thin glue to the existing Neutral Relay (AGE-19).
 
 The Neutral Relay already owns GPT Web transport. This module only shells
-out to the existing relay CLI (`~/.agentops/relay/neutral_relay.py`); it
+out to the existing relay CLI (pre-v0.1 compatibility path shown below); it
 does NOT re-implement CDP/websocket transport or read-back.
 
 Delivery is fail-closed: the relay output file is the only confirmation.
@@ -13,6 +13,12 @@ import os
 import subprocess
 import uuid
 from typing import Optional
+
+from .review_protocol import (
+    REVIEW_MARKERS,
+    parse_formal_review_verdict,
+)
+
 
 RELAY_BIN = os.path.expanduser("~/.agentops/relay/neutral_relay.py")
 CONFIG_FILE = os.path.expanduser("~/.agentops/relay/config.json")
@@ -152,12 +158,14 @@ def parse_review_response(text: str, repo: str, pr: str, head: str,
                           req_id: str) -> dict:
     """Parse a captured independent_review response.
 
-    Strict (fail closed): the response must contain EXACTLY one
-    `AGENTOPS_REVIEW: PASS | CHANGES_REQUESTED | NOT_PASS` verdict AND
-    REVIEW_REQUEST_ID / REPO / PR / HEAD each exactly equal to the expected
-    values. Missing, duplicate, ambiguous, or mismatched fields -> verdict
-    INCOMPLETE (fail closed). Findings after a CHANGES_REQUESTED / NOT_PASS
-    verdict are retained verbatim for the Builder.
+    Strict (fail closed): the response must contain EXACTLY one formal
+    `GOVERNLOOP_REVIEW: PASS | CHANGES_REQUESTED | NOT_PASS` verdict (or one
+    legacy `AGENTOPS_REVIEW` compatibility marker) AND REVIEW_REQUEST_ID /
+    REPO / PR / HEAD each exactly equal to the expected values. Duplicate or
+    mixed canonical/legacy marker lines are ambiguous and INCOMPLETE.
+
+    Findings after a CHANGES_REQUESTED / NOT_PASS verdict are retained
+    verbatim for the Builder.
 
     Returns {verdict, review_request_id, repo, pr, head, findings, ok}."""
     fields = {}
@@ -186,27 +194,24 @@ def parse_review_response(text: str, repo: str, pr: str, head: str,
                 "findings": [], "ok": False,
                 "detail": "exact binding mismatch or duplicate field"}
 
-    verdicts = []
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if line.startswith("AGENTOPS_REVIEW:"):
-            verdicts.append(line.split(":", 1)[1].strip().upper())
-    if len(verdicts) != 1 or verdicts[0] not in (
-            "PASS", "CHANGES_REQUESTED", "NOT_PASS"):
+    formal = parse_formal_review_verdict(text)
+    if formal.status != "VALID":
         return {"verdict": "INCOMPLETE", "review_request_id": req_id,
                 "repo": repo, "pr": str(pr), "head": head,
                 "findings": [], "ok": False,
-                "detail": "missing/duplicate/invalid AGENTOPS_REVIEW verdict"}
+                "detail": formal.detail}
 
-    # Findings: everything after the AGENTOPS_REVIEW verdict line, excluding
-    # the envelope-binding header lines (they are binding fields, not
-    # findings), retained verbatim for the Builder.
+    verdict = formal.verdict
+
+    # Findings: everything after the one formal verdict line, excluding the
+    # envelope-binding header lines and any marker-prefixed line. Marker
+    # duplicates have already failed closed above.
     findings = []
-    if verdicts[0] in ("CHANGES_REQUESTED", "NOT_PASS"):
+    if verdict in ("CHANGES_REQUESTED", "NOT_PASS"):
         seen = False
         for line in (text or "").splitlines():
             line = line.strip()
-            if line.startswith("AGENTOPS_REVIEW:"):
+            if any(line.startswith(marker + ":") for marker in REVIEW_MARKERS):
                 seen = True
                 continue
             if seen and line:
@@ -214,9 +219,10 @@ def parse_review_response(text: str, repo: str, pr: str, head: str,
                                     "PR:", "MARKER:")):
                     continue
                 findings.append(line)
-    return {"verdict": verdicts[0], "review_request_id": req_id,
+    return {"verdict": verdict, "review_request_id": req_id,
             "repo": repo, "pr": str(pr), "head": head,
-            "findings": findings, "ok": True}
+            "findings": findings, "ok": True,
+            "marker": formal.marker}
 
 
 def _parse_status_payload(payload: str, repo: str, pr: str, head: str) -> dict:
