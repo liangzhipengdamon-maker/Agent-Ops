@@ -86,6 +86,39 @@ def _worktree_scope_check(verified):
                   data={"changed_paths": paths})
 
 
+def _baseline_history_check(baseline):
+    """Require the current HEAD to descend from the exact signed baseline.
+
+    A baseline merely existing in the object database is insufficient: before
+    a PR exists, the authorized branch must already be based on that exact
+    signed commit. Unreadable or unrelated history fails closed.
+    """
+    rc, head, err = _run(["git", "rev-parse", "HEAD"])
+    if rc != 0 or not head:
+        return _check(
+            "baseline_history", "BLOCKED",
+            err or "current HEAD unreadable",
+            next_action="restore readable git history; never infer baseline ancestry")
+
+    rc, _, err = _run(["git", "merge-base", "--is-ancestor", baseline, head])
+    if rc == 0:
+        return _check(
+            "baseline_history", "PASS",
+            f"current HEAD {head} descends from exact signed baseline {baseline}",
+            data={"head": head, "baseline_sha": baseline})
+    if rc == 1:
+        return _check(
+            "baseline_history", "BLOCKED",
+            f"current HEAD {head} does not descend from exact signed baseline {baseline}",
+            next_action="switch/recreate the authorized branch from the exact signed baseline; do not substitute another baseline",
+            data={"head": head, "baseline_sha": baseline})
+    return _check(
+        "baseline_history", "BLOCKED",
+        err or "cannot verify baseline ancestry",
+        next_action="repair/fetch git history until exact baseline ancestry can be verified",
+        data={"head": head, "baseline_sha": baseline})
+
+
 def _git_checks(repo, verified):
     checks = []
     rc, origin, err = _run(["git", "remote", "get-url", "origin"])
@@ -115,11 +148,20 @@ def _git_checks(repo, verified):
     baseline = payload.get("baseline_sha") if verified.get("ok") else None
     if baseline:
         rc, _, _ = _run(["git", "cat-file", "-e", f"{baseline}^{{commit}}"])
-        checks.append(_check("baseline_commit", "PASS" if rc == 0 else "BLOCKED",
-                             f"bound baseline {'exists' if rc == 0 else 'not present locally'}: {baseline}",
-                             next_action=None if rc == 0 else "fetch repository history; never substitute another baseline"))
+        if rc == 0:
+            checks.append(_check("baseline_commit", "PASS", f"bound baseline exists: {baseline}"))
+            checks.append(_baseline_history_check(baseline))
+        else:
+            checks.append(_check("baseline_commit", "BLOCKED",
+                                 f"bound baseline not present locally: {baseline}",
+                                 next_action="fetch repository history; never substitute another baseline"))
+            checks.append(_check("baseline_history", "BLOCKED",
+                                 "baseline ancestry cannot be verified because the signed baseline is unavailable",
+                                 next_action="fetch the exact signed baseline before Builder execution"))
     else:
         checks.append(_check("baseline_commit", "BLOCKED", "no verified baseline authority",
+                             next_action="external operator must provision an exact baseline SHA"))
+        checks.append(_check("baseline_history", "BLOCKED", "no verified baseline authority",
                              next_action="external operator must provision an exact baseline SHA"))
     checks.append(_worktree_scope_check(verified))
     return checks
