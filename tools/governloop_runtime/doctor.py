@@ -14,6 +14,18 @@ from typing import Optional
 from . import authority, setup_wizard
 
 _GITHUB_RE = re.compile(r"(?:github\.com[:/]|git@github\.com:)([^/\s]+/[^/\s]+?)(?:\.git)?$")
+_NEXT_ACTION_ORDER = (
+    "git_repository",
+    "positive_authority",
+    "git_branch",
+    "baseline_commit",
+    "baseline_history",
+    "worktree_scope",
+    "github_auth",
+    "linear_task",
+    "reviewer_binding",
+    "pull_request",
+)
 
 
 def _run(args, timeout=20):
@@ -39,9 +51,34 @@ def _origin_repo(url):
     return match.group(1).removesuffix(".git") if match else None
 
 
+def _concise_command_error(err, fallback):
+    """Return a short deterministic diagnostic, never a command usage dump."""
+    text = (err or "").strip()
+    if not text:
+        return fallback
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line in lines:
+        lower = line.lower()
+        if "not a git repository" in lower:
+            return "current directory is not a git worktree"
+        if line.startswith("fatal:"):
+            return line
+    for line in lines:
+        lower = line.lower()
+        if not lower.startswith(("usage:", "or:", "    -", "git diff", "git rev-parse")):
+            return line[:240]
+    return fallback
+
+
 def _path_allowed(path, allowed_paths):
     from agentops_runtime.scope_firewall import _is_path_allowed
     return _is_path_allowed(path, tuple(allowed_paths or ()))
+
+
+def _git_worktree_available():
+    rc, out, err = _run(["git", "rev-parse", "--is-inside-work-tree"])
+    return rc == 0 and out.strip().lower() == "true", _concise_command_error(
+        err, "current directory is not a git worktree")
 
 
 def _changed_worktree_paths():
@@ -51,7 +88,7 @@ def _changed_worktree_paths():
                     ["git", "ls-files", "--others", "--exclude-standard"]):
         rc, out, err = _run(command)
         if rc != 0:
-            errors.append(err or " ".join(command) + " failed")
+            errors.append(_concise_command_error(err, "git worktree state unreadable"))
             continue
         for raw in out.splitlines():
             value = raw.strip()
@@ -87,17 +124,12 @@ def _worktree_scope_check(verified):
 
 
 def _baseline_history_check(baseline):
-    """Require the current HEAD to descend from the exact signed baseline.
-
-    A baseline merely existing in the object database is insufficient: before
-    a PR exists, the authorized branch must already be based on that exact
-    signed commit. Unreadable or unrelated history fails closed.
-    """
+    """Require the current HEAD to descend from the exact signed baseline."""
     rc, head, err = _run(["git", "rev-parse", "HEAD"])
     if rc != 0 or not head:
         return _check(
             "baseline_history", "BLOCKED",
-            err or "current HEAD unreadable",
+            _concise_command_error(err, "current HEAD unreadable"),
             next_action="restore readable git history; never infer baseline ancestry")
 
     rc, _, err = _run(["git", "merge-base", "--is-ancestor", baseline, head])
@@ -114,12 +146,23 @@ def _baseline_history_check(baseline):
             data={"head": head, "baseline_sha": baseline})
     return _check(
         "baseline_history", "BLOCKED",
-        err or "cannot verify baseline ancestry",
+        _concise_command_error(err, "cannot verify baseline ancestry"),
         next_action="repair/fetch git history until exact baseline ancestry can be verified",
         data={"head": head, "baseline_sha": baseline})
 
 
 def _git_checks(repo, verified):
+    available, detail = _git_worktree_available()
+    if not available:
+        action = f"clone/open the target repository `{repo}` and rerun doctor from that worktree"
+        return [
+            _check("git_repository", "BLOCKED", detail, next_action=action),
+            _check("git_branch", "BLOCKED", "git branch unavailable until a target worktree is open", next_action=action),
+            _check("baseline_commit", "BLOCKED", "baseline cannot be verified outside a target worktree", next_action=action),
+            _check("baseline_history", "BLOCKED", "baseline ancestry cannot be verified outside a target worktree", next_action=action),
+            _check("worktree_scope", "BLOCKED", "worktree scope cannot be verified outside a target worktree", next_action=action),
+        ]
+
     checks = []
     rc, origin, err = _run(["git", "remote", "get-url", "origin"])
     observed = _origin_repo(origin) if rc == 0 else None
@@ -127,14 +170,14 @@ def _git_checks(repo, verified):
         checks.append(_check("git_repository", "PASS", f"origin = {repo}"))
     else:
         checks.append(_check("git_repository", "BLOCKED",
-                             f"expected {repo}; observed {observed or origin or err or 'unreadable'}",
-                             next_action="run GovernLoop from the intended repository/worktree; do not rewrite authority to match the directory"))
+                             f"expected {repo}; observed {observed or _concise_command_error(err, 'unreadable origin')}",
+                             next_action="open the intended repository/worktree; do not rewrite authority to match the directory"))
 
     payload = verified.get("payload") or {}
     expected_branch = payload.get("branch") if verified.get("ok") else None
     rc, branch, err = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
     if rc != 0:
-        checks.append(_check("git_branch", "BLOCKED", err or "current branch unreadable"))
+        checks.append(_check("git_branch", "BLOCKED", _concise_command_error(err, "current branch unreadable")))
     elif not expected_branch:
         checks.append(_check("git_branch", "BLOCKED", f"current branch = {branch}; no verified branch authority",
                              next_action="external operator must provision signed authority before Builder execution"))
@@ -171,7 +214,7 @@ def _github_auth_check():
     rc, out, err = _run(["gh", "auth", "status"], timeout=30)
     if rc == 0:
         return _check("github_auth", "PASS", "GitHub CLI authentication available")
-    return _check("github_auth", "BLOCKED", err or out or "GitHub CLI authentication unavailable",
+    return _check("github_auth", "BLOCKED", _concise_command_error(err or out, "GitHub CLI authentication unavailable"),
                   next_action="authenticate GitHub CLI for the target repository")
 
 
@@ -204,12 +247,12 @@ def _reviewer_check(repo, *, probe):
         config = setup_wizard.load_config()
     except Exception as exc:
         return _check("reviewer_binding", "BLOCKED", f"reviewer config unreadable: {exc}",
-                      next_action=f"run `python -m governloop_runtime setup --repo {repo}`")
+                      next_action=f"run `governloop setup --repo {repo}`")
     route = (config.get("routes") or {}).get(repo)
     runtime = config.get("runtime") or {}
     if not isinstance(route, dict):
         return _check("reviewer_binding", "BLOCKED", f"no reviewer route is bound for {repo}",
-                      next_action=f"run `python -m governloop_runtime setup --repo {repo}`")
+                      next_action=f"run `governloop setup --repo {repo}`")
     try:
         url = setup_wizard.normalize_conversation_url(route.get("conversation_url"))
         port = setup_wizard.normalize_cdp_port(route.get("cdp_port") or runtime.get("cdp_port"))
@@ -236,7 +279,7 @@ def _pr_check(repo, pr: Optional[str], verified):
     rc, out, err = _run(["gh", "pr", "view", str(pr), "--repo", repo, "--json",
                          "number,state,isDraft,headRefName,headRefOid,baseRefOid,baseRefName"], timeout=30)
     if rc != 0:
-        return _check("pull_request", "BLOCKED", err or out or f"PR {pr} unreadable",
+        return _check("pull_request", "BLOCKED", _concise_command_error(err or out, f"PR {pr} unreadable"),
                       next_action="verify the exact PR/repository; never substitute another PR")
     try:
         data = json.loads(out)
@@ -257,7 +300,7 @@ def _pr_check(repo, pr: Optional[str], verified):
     allowed = payload.get("allowed_paths") or []
     rc, names, err = _run(["gh", "pr", "diff", str(pr), "--repo", repo, "--name-only"], timeout=30)
     if rc != 0:
-        return _check("pull_request", "BLOCKED", err or "PR changed-file list unreadable",
+        return _check("pull_request", "BLOCKED", _concise_command_error(err, "PR changed-file list unreadable"),
                       next_action="restore GitHub evidence readability; never assume unreadable files are in scope", data=data)
     changed = [line.strip() for line in names.splitlines() if line.strip()]
     outside = [p for p in changed if not _path_allowed(p, allowed)]
@@ -268,6 +311,28 @@ def _pr_check(repo, pr: Optional[str], verified):
     return _check("pull_request", "PASS",
                   f"PR #{pr} is {'Draft' if data.get('isDraft') else 'open'}; branch/baseline/files match bound scope",
                   data={**data, "changed_files": changed})
+
+
+def _is_external_action(check):
+    if check.get("name") == "positive_authority":
+        return True
+    if check.get("name") == "linear_task" and "Execution Mode" in check.get("detail", ""):
+        return True
+    return False
+
+
+def _select_next_action(checks):
+    by_name = {check.get("name"): check for check in checks}
+    for name in _NEXT_ACTION_ORDER:
+        check = by_name.get(name)
+        if not check or check.get("status") not in ("BLOCKED", "EXPECTED_GATE"):
+            continue
+        action = check.get("next_action")
+        if not action:
+            continue
+        key = "next_required_external_action" if _is_external_action(check) else "next_required_action"
+        return key, {"check": name, "action": action}
+    return None, None
 
 
 def run_doctor(task_id, repo, pr=None, *, probe_reviewer=True):
@@ -299,6 +364,10 @@ def run_doctor(task_id, repo, pr=None, *, probe_reviewer=True):
     checks.append(_pr_check(repo, pr, verified))
     status = "BLOCKED" if any(c["status"] == "BLOCKED" for c in checks) else (
         "BOOTSTRAP_REQUIRED" if any(c["status"] == "EXPECTED_GATE" for c in checks) else "READY")
-    return {"tool": "GovernLoop Doctor", "task_id": task_id, "repo": repo,
-            "pr": str(pr) if pr else None, "status": status, "checks": checks,
-            "mutations_performed": False}
+    result = {"tool": "GovernLoop Doctor", "task_id": task_id, "repo": repo,
+              "pr": str(pr) if pr else None, "status": status, "checks": checks,
+              "mutations_performed": False}
+    key, next_action = _select_next_action(checks)
+    if key:
+        result[key] = next_action
+    return result
