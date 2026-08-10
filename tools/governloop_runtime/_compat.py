@@ -44,17 +44,17 @@ def relay_bin() -> str:
 def apply_env_aliases() -> None:
     """Map canonical GovernLoop authority env into the tested legacy reader.
 
-    Canonical values win. Legacy values are accepted only as a migration
-    convenience and are mirrored back to the canonical name so child code has
-    one visible effective value. No defaults grant authority.
+    Presence of a canonical variable wins even when its value is empty. This
+    matters for revocation: an explicitly empty GOVERNLOOP_* value must not be
+    repopulated from stale AGENTOPS_* process state. Legacy values are used
+    only when the canonical variable is genuinely absent. No defaults grant
+    authority.
     """
     for canonical, legacy in ENV_ALIASES.items():
-        canonical_value = os.environ.get(canonical, "").strip()
-        legacy_value = os.environ.get(legacy, "").strip()
-        if canonical_value:
-            os.environ[legacy] = canonical_value
-        elif legacy_value:
-            os.environ[canonical] = legacy_value
+        if canonical in os.environ:
+            os.environ[legacy] = os.environ.get(canonical, "").strip()
+        elif legacy in os.environ:
+            os.environ[canonical] = os.environ.get(legacy, "").strip()
 
 
 def configure_legacy_relay() -> None:
