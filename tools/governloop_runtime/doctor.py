@@ -65,8 +65,9 @@ def _concise_command_error(err, fallback):
             return line
     for line in lines:
         lower = line.lower()
-        if not lower.startswith(("usage:", "or:", "options:", "--", "git diff", "git rev-parse")):
-            return line[:240]
+        if line.startswith("-") or lower.startswith(("usage:", "or:", "git diff", "git rev-parse")):
+            continue
+        return line[:240]
     return fallback
 
 
@@ -321,15 +322,22 @@ def _is_external_action(check):
     return False
 
 
+def _fallback_next_action(check):
+    name = check.get("name") or "unknown"
+    return (
+        f"resolve the blocked prerequisite `{name}` using its diagnostic detail, then rerun doctor; "
+        "do not skip to a later gate or broaden authority"
+    )
+
+
 def _select_next_action(checks):
+    """Return an action for the earliest unsatisfied gate, never a later one."""
     by_name = {check.get("name"): check for check in checks}
     for name in _NEXT_ACTION_ORDER:
         check = by_name.get(name)
         if not check or check.get("status") not in ("BLOCKED", "EXPECTED_GATE"):
             continue
-        action = check.get("next_action")
-        if not action:
-            continue
+        action = check.get("next_action") or _fallback_next_action(check)
         key = "next_required_external_action" if _is_external_action(check) else "next_required_action"
         return key, {"check": name, "action": action}
     return None, None
