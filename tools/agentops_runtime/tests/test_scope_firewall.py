@@ -366,7 +366,8 @@ class TestBuilderHandoffFirewall(unittest.TestCase):
                                  LIFECYCLE_ACTIONS)
 
 
-def make_scope_env(branch="feature/x", base="base1", repo=None,
+def make_scope_env(branch="feature/x", base="base1",
+                   repo="liangzhipengdamon-maker/Agent-Ops",
                    paths=None, ops=None, **extra):
     """Full out-of-episode authorization env (all authorization-bearing
     fields explicitly scoped)."""
@@ -426,17 +427,39 @@ class TestLoadScopePolicy(unittest.TestCase):
         self.assertFalse(r["checks"]["branch_exact"])
         self.assertFalse(r["checks"]["base_sha_exact"])
 
-    def test_profile_repo_mismatch_binding_fails_closed(self):
-        # P0-1: invocation repo differs from the independent profile's
-        # canonical repository -> policy binding_ok=False.
-        with tempfile.TemporaryDirectory() as td:
+    def test_repo_authority_must_be_explicit_env(self):
+        # R7-P0-1: repository authority must come from explicit env, not the
+        # mutable profile. Profile has a matching repo but env repo is missing
+        # -> binding_ok=False, no Builder wake.
+        env = make_scope_env(repo=None)
+        env.pop("AGENTOPS_SCOPE_REPOSITORY", None)  # ensure absent
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.dict(os.environ, env, clear=True):
             prof = os.path.join(td, "agentops.json")
             with open(prof, "w") as f:
                 f.write('{"github": {"repository": "liangzhipengdamon-maker/Agent-Ops",'
                         ' "canonical_branch": "main"}}')
             p = _load_scope_policy(
-                "AGE-6", "other/repo", "feature/x", "base1", "head1", "7",
-                profile_path=prof)
+                "AGE-6", "liangzhipengdamon-maker/Agent-Ops",
+                "feature/x", "base1", "head1", "7", profile_path=prof)
+        self.assertFalse(p.binding_ok)
+
+    def test_repo_authority_explicit_env_passes(self):
+        # Explicit matching env repository authority -> pass.
+        env = make_scope_env(repo="liangzhipengdamon-maker/Agent-Ops")
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
+            p = _load_scope_policy(
+                "AGE-6", "liangzhipengdamon-maker/Agent-Ops",
+                "feature/x", "base1", "head1", "7", profile_path=None)
+        self.assertTrue(p.binding_ok)
+
+    def test_repo_authority_env_mismatch_fails_closed(self):
+        # Env repository differs from the invocation repo -> fail closed.
+        env = make_scope_env(repo="other/org")
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
+            p = _load_scope_policy(
+                "AGE-6", "liangzhipengdamon-maker/Agent-Ops",
+                "feature/x", "base1", "head1", "7", profile_path=None)
         self.assertFalse(p.binding_ok)
 
     def test_default_allowed_paths_has_no_implicit_dot(self):

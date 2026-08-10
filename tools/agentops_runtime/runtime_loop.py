@@ -75,16 +75,12 @@ def _load_scope_policy(task_id: str, repo: str, observed_branch: str,
         except (OSError, json.JSONDecodeError):
             prof = {}
 
-    github = prof.get("github") or {}
-
-    # R5-P0-1: ALL authorization-bearing fields come from ONE immutable,
-    # out-of-episode source (env established before execution). NO
-    # mutable-worktree fallback for authorization fields. The profile is used
-    # ONLY for non-authorization identity (project name / repo) and even the
-    # repo identity is verified against the local origin at wake time, so a
-    # Builder cannot broaden its own authorization.
-    canonical_repo = (os.environ.get("AGENTOPS_SCOPE_REPOSITORY", "").strip()
-                      or github.get("repository") or "")
+    # R5/R7-P0-1: ALL authorization-bearing fields come from ONE immutable,
+    # out-of-episode env source. NO mutable-worktree fallback for any
+    # authorization field, including repository identity. The profile is used
+    # only for non-authorization identity (project name) and is never an
+    # authority source.
+    canonical_repo = os.environ.get("AGENTOPS_SCOPE_REPOSITORY", "").strip()
     expected_branch = os.environ.get("AGENTOPS_AUTHORIZED_BRANCH", "").strip()
     expected_base = os.environ.get("AGENTOPS_BASELINE_SHA", "").strip()
     env_ops = [o.strip() for o in
@@ -106,12 +102,14 @@ def _load_scope_policy(task_id: str, repo: str, observed_branch: str,
     allow_rmd = os.environ.get("AGENTOPS_ALLOW_READY_MERGE_DEPLOY",
                                "").strip().lower() in ("1", "true", "yes")
 
-    # R6-P0-1: repository, branch, baseline, allowed-paths, and allowed-
+    # R6/R7: repository, branch, baseline, allowed-paths, and allowed-
     # operations are authorization-bearing and MUST be explicitly scoped via
-    # env. Missing/empty -> binding_ok=False -> firewall BLOCKs with no
-    # Builder wake. Only deny-side defaults (protected repos) are allowed.
+    # env (no mutable-worktree fallback). Missing/empty -> binding_ok=False ->
+    # firewall BLOCKs with no Builder wake. Only deny-side defaults (protected
+    # repos) are allowed.
     binding_ok = bool(canonical_repo) and canonical_repo == repo
-    if not (expected_branch and expected_base and allowed_paths and allowed_ops):
+    if not (expected_branch and expected_base and allowed_paths and allowed_ops
+            and canonical_repo):
         binding_ok = False  # authorization not fully explicitly scoped
     auth_changed = tuple(prof.get("authoritative_changed_files") or ())
 
