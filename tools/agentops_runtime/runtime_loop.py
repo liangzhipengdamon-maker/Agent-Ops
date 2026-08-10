@@ -76,34 +76,38 @@ def _load_scope_policy(task_id: str, repo: str, observed_branch: str,
             prof = {}
 
     github = prof.get("github") or {}
-    fw = prof.get("scope_firewall") or {}
-    canonical_repo = github.get("repository") or ""
 
-    # P0-1/R4: task-scope authority (authorized branch + baseline) comes from
-    # an IMMUTABLE, out-of-episode source: env vars established before
-    # execution (AGENTOPS_AUTHORIZED_BRANCH / AGENTOPS_BASELINE_SHA /
-    # AGENTOPS_AUTHORIZED_OPERATIONS), falling back to the profile. It is
-    # never derived from the PR's own metadata or from Builder-mutable state.
-    # If neither env nor profile supplies branch AND baseline, binding_ok=False
-    # (no self-derived authority -> fail closed).
-    expected_branch = (os.environ.get("AGENTOPS_AUTHORIZED_BRANCH", "").strip()
-                       or fw.get("authorized_branch")
-                       or github.get("canonical_branch") or "")
-    expected_base = (os.environ.get("AGENTOPS_BASELINE_SHA", "").strip()
-                     or fw.get("baseline_sha") or "")
+    # R5-P0-1: ALL authorization-bearing fields come from ONE immutable,
+    # out-of-episode source (env established before execution). NO
+    # mutable-worktree fallback for authorization fields. The profile is used
+    # ONLY for non-authorization identity (project name / repo) and even the
+    # repo identity is verified against the local origin at wake time, so a
+    # Builder cannot broaden its own authorization.
+    canonical_repo = (os.environ.get("AGENTOPS_SCOPE_REPOSITORY", "").strip()
+                      or github.get("repository") or "")
+    expected_branch = os.environ.get("AGENTOPS_AUTHORIZED_BRANCH", "").strip()
+    expected_base = os.environ.get("AGENTOPS_BASELINE_SHA", "").strip()
     env_ops = [o.strip() for o in
                os.environ.get("AGENTOPS_AUTHORIZED_OPERATIONS", "").split(",")
                if o.strip()]
-    allowed_ops = tuple(env_ops
-                        or fw.get("authorized_operations")
-                        or prof.get("allowed_operations")
-                        or ["fix", "continue", "complete"])
+    allowed_ops = tuple(env_ops or ["fix", "continue", "complete"])
+    env_paths = [p.strip() for p in
+                 os.environ.get("AGENTOPS_ALLOWED_PATHS", "").split(",")
+                 if p.strip()]
+    allowed_paths = tuple(env_paths or ["tools/agentops_runtime/",
+                                        "scripts/", "docs/", "tests/"])
+    env_protected = [r.strip() for r in
+                     os.environ.get("AGENTOPS_PROTECTED_REPOSITORIES",
+                                    "").split(",") if r.strip()]
+    protected = tuple(env_protected
+                      or ["liangzhipengdamon-maker/LearnMind-English",
+                          "liangzhipengdamon-maker/AI-Investment-Lab"])
+    allow_rmd = os.environ.get("AGENTOPS_ALLOW_READY_MERGE_DEPLOY",
+                               "").strip().lower() in ("1", "true", "yes")
+
     binding_ok = bool(canonical_repo) and canonical_repo == repo
     if not (expected_branch and expected_base):
         binding_ok = False  # no out-of-episode authority bound
-    protected = tuple((prof.get("protected_repositories")
-                       or ["liangzhipengdamon-maker/LearnMind-English",
-                           "liangzhipengdamon-maker/AI-Investment-Lab"]))
     auth_changed = tuple(prof.get("authoritative_changed_files") or ())
 
     return ScopePolicy(
@@ -112,12 +116,10 @@ def _load_scope_policy(task_id: str, repo: str, observed_branch: str,
         branch=expected_branch,
         base_sha=expected_base,
         head_sha=head_sha,
-        allowed_paths=tuple(prof.get("allowed_paths")
-                            or ["tools/agentops_runtime/",
-                                "scripts/", "docs/", "tests/"]),
+        allowed_paths=allowed_paths,
         allowed_operations=allowed_ops,
         protected_repositories=protected,
-        allowed_ready_merge_deploy=bool(prof.get("allowed_ready_merge_deploy")),
+        allowed_ready_merge_deploy=allow_rmd,
         binding_ok=binding_ok,
         authoritative_changed_files=auth_changed,
     )

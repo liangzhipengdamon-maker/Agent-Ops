@@ -368,13 +368,13 @@ class TestBuilderHandoffFirewall(unittest.TestCase):
 
 class TestLoadScopePolicy(unittest.TestCase):
     def test_default_policy_binds_context(self):
-        with tempfile.TemporaryDirectory() as td:
+        env = {"AGENTOPS_AUTHORIZED_BRANCH": "feature/x",
+               "AGENTOPS_BASELINE_SHA": "base1"}
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
             prof = os.path.join(td, "agentops.json")
             with open(prof, "w") as f:
                 f.write('{"github": {"repository": "liangzhipengdamon-maker/Agent-Ops",'
-                        ' "canonical_branch": "main"},'
-                        ' "scope_firewall": {"authorized_branch": "feature/x",'
-                        ' "baseline_sha": "base1"}}')
+                        ' "canonical_branch": "main"}}')
             p = _load_scope_policy(
                 "AGE-6", "liangzhipengdamon-maker/Agent-Ops",
                 "feature/x", "base1", "head1", "7", profile_path=prof)
@@ -388,19 +388,15 @@ class TestLoadScopePolicy(unittest.TestCase):
         self.assertTrue(p.binding_ok)
 
     def test_profile_branch_base_not_self_derived(self):
-        # P0-1: expected branch/base come from the profile, NOT from the
-        # observed PR metadata. A drifted PR branch/base fails closed.
-        with tempfile.TemporaryDirectory() as td:
-            prof = os.path.join(td, "agentops.json")
-            with open(prof, "w") as f:
-                f.write('{"github": {"repository": "liangzhipengdamon-maker/Agent-Ops",'
-                        ' "canonical_branch": "main"},'
-                        ' "scope_firewall": {"authorized_branch": "feature/x",'
-                        ' "baseline_sha": "base1"}}')
+        # P0-1: expected branch/base come from env (out-of-episode), NOT from
+        # the observed PR metadata. A drifted PR branch/base fails closed.
+        env = {"AGENTOPS_AUTHORIZED_BRANCH": "feature/x",
+               "AGENTOPS_BASELINE_SHA": "base1"}
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, env):
             p = _load_scope_policy(
                 "AGE-6", "liangzhipengdamon-maker/Agent-Ops",
-                "feature/y", "base2", "head1", "7", profile_path=prof)
-        self.assertEqual(p.branch, "feature/x")   # profile, not observed
+                "feature/y", "base2", "head1", "7", profile_path=None)
+        self.assertEqual(p.branch, "feature/x")   # env, not observed
         self.assertEqual(p.base_sha, "base1")
         # Drift detected when evaluated with observed branch/base.
         a = ActionScope(task_id="AGE-6",
