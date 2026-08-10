@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """AGE-30 thin AUTO/MANUAL runtime adapter — compatibility entrypoint.
 
-`complete` is retained only for pre-v0.1 bridge compatibility and is
-non-authoritative. Live PO authority and accepted completion are verified
-through external signed control channels by the runtime.
+`po-decision` and `complete` are retained only for pre-v0.1 bridge
+compatibility. Their files are non-authoritative; live PO authority and
+accepted completion are verified through external signed control channels.
 """
 
 import argparse
@@ -25,6 +25,21 @@ def cmd_setup(args):
         setup_port=args.setup_port,
         no_open=args.no_open,
     )
+
+
+def cmd_po_decision(args):
+    """Write legacy bridge evidence only; never executable PO authority."""
+    import os
+    from .runtime_loop import _bridge_dir
+    bd = _bridge_dir()
+    os.makedirs(bd, exist_ok=True)
+    decision = {"repo": args.repo, "pr": str(args.pr), "head": args.head,
+                "decision": args.decision.upper()}
+    with open(os.path.join(bd, "po_decision.json"), "w") as f:
+        json.dump(decision, f, indent=2)
+    print(json.dumps({"written": True, "authoritative": False,
+                      "decision": decision}, indent=2))
+    return 0
 
 
 def cmd_complete(args):
@@ -124,6 +139,13 @@ def main(argv=None):
     p.add_argument("--status-report", required=True)
     p.add_argument("--timeout", type=int, default=400)
 
+    p = sub.add_parser("po-decision")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--pr", required=True)
+    p.add_argument("--head", required=True)
+    p.add_argument("--decision", required=True,
+                   choices=["APPROVE", "REJECT", "CHANGES"])
+
     p = sub.add_parser("complete")
     p.add_argument("--repo", required=True)
     p.add_argument("--pr", required=True)
@@ -140,6 +162,8 @@ def main(argv=None):
         return cmd_report(args)
     if args.command == "final-result-review":
         return cmd_final_result_review(args)
+    if args.command == "po-decision":
+        return cmd_po_decision(args)
     if args.command == "complete":
         return cmd_complete(args)
     parser.print_help()
