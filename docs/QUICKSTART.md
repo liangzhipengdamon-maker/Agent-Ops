@@ -1,45 +1,44 @@
 # GovernLoop Quick Start
 
-This guide demonstrates the current v0.1 pre-release runtime without hiding integration prerequisites. GovernLoop is still repository-first; it is not yet a one-command installed package.
+GovernLoop v0.1 keeps a Local Agent in a bounded Builder → Review → Remediation loop while preserving explicit Product Owner lifecycle authority.
+
+The intended first-task flow is:
+
+```text
+Clone / expose runtime
+→ bind one ChatGPT reviewer conversation
+→ authenticate GitHub + Linear
+→ external operator provisions signed positive authority
+→ governloop doctor
+→ Builder works only on the exact authorized branch/scope
+→ Draft PR
+→ governloop doctor --pr <number>
+→ GovernLoop review/remediation loop
+→ AUTO completion or MANUAL WAITING_PO_AUTH
+```
+
+Missing authority or evidence is reported. It is never reconstructed from task text, PR text, Builder output, mutable repository files, or raw process environment variables.
 
 ## 1. Prerequisites
-
-Required for the core decision loop:
 
 - Python 3.10+
 - Git
 - GitHub CLI (`gh`) authenticated for the target repository
+- `LINEAR_ACCESS_TOKEN` in the controller/operator environment
 - a Linear task containing exactly one `Execution Mode: AUTO` or `Execution Mode: MANUAL`
-- an existing GitHub pull request for the controlled task
-- `LINEAR_ACCESS_TOKEN` in the environment
+- one dedicated ChatGPT reviewer conversation configured through GovernLoop setup
+- externally signed positive authority provisioned before the Builder episode
 
-Integration-specific dependencies:
-
-- `loopx-canary` for durable LoopX refresh-state integration
-- the repository Neutral Relay for automated ChatGPT reviewer delivery
-- an external Builder/runner consuming `.agent-bridge/status.json` and `.agent-bridge/findings.md`
-
-GovernLoop does not silently emulate missing integrations. Unreadable authority or evidence is surfaced as degraded/BLOCKED rather than success.
-
-## 2. Clone and expose the runtime
-
-After the repository naming freeze is complete:
+Expose the runtime:
 
 ```bash
 git clone https://github.com/liangzhipengdamon-maker/GovernLoop.git
 cd GovernLoop
 export PYTHONPATH="$PWD/tools"
-```
-
-Verify the canonical CLI:
-
-```bash
 python -m governloop_runtime --help
 ```
 
-## 3. Bind your ChatGPT reviewer conversation
-
-Open the dedicated Chrome runtime you intend GovernLoop to use, sign in to ChatGPT normally, and create or open one dedicated reviewer conversation. Do not provide GovernLoop your password, cookie, session token, or OpenAI API key.
+## 2. Bind the ChatGPT reviewer
 
 Run:
 
@@ -47,271 +46,187 @@ Run:
 python -m governloop_runtime setup --repo owner/repository
 ```
 
-The setup server binds only to `127.0.0.1` on an ephemeral local port. The form asks for:
+Use one dedicated ChatGPT conversation in the configured Chrome/CDP runtime. GovernLoop should never receive your ChatGPT password, cookie, or session token.
 
-- repository: `owner/repository`
-- dedicated ChatGPT conversation URL: `https://chatgpt.com/c/<conversation-id>`
-- GovernLoop Chrome CDP port: default `9233`
-- GovernLoop Chrome profile path: default `~/.governloop/chrome-profile`
-
-The URL must identify one exact `/c/<id>` conversation. Generic ChatGPT home pages, shared links, GPT pages, non-HTTPS URLs, query strings, fragments, credentials-in-URL, or a different host are rejected.
-
-### Test Connection
-
-The wizard probes only the local Chrome DevTools endpoint:
-
-```text
-http://127.0.0.1:<cdp-port>/json/version
-http://127.0.0.1:<cdp-port>/json
-```
-
-The check succeeds only when exactly one open page has the configured conversation ID.
-
-- zero matching tabs -> fail closed (`REVIEWER_CONVERSATION_NOT_FOUND`)
-- multiple matching tabs -> fail closed (`AMBIGUOUS_REVIEWER_CONVERSATION`)
-- unreachable/invalid CDP -> fail closed
-
-### Bind Conversation
-
-The wizard atomically writes/updates:
-
-```text
-~/.governloop/relay/config.json
-```
-
-Unrelated existing config fields are preserved. The runtime marker is created under the selected browser profile. Only routing/runtime settings are stored; no ChatGPT credentials are collected.
-
-For headless use:
-
-```bash
-python -m governloop_runtime setup \
-  --repo owner/repository \
-  --no-open
-```
-
-The command prints `SETUP_URL: http://127.0.0.1:<port>/`; open that loopback URL yourself.
-
-For isolated testing:
-
-```bash
-python -m governloop_runtime setup \
-  --repo owner/repository \
-  --config-file /tmp/governloop-relay-config.json \
-  --browser-profile /tmp/governloop-chrome-profile \
-  --cdp-port 9233
-```
-
-## 4. Authenticate external sources
-
-Authenticate GitHub CLI:
+## 3. Authenticate external sources
 
 ```bash
 gh auth status
-```
-
-Provide a Linear token:
-
-```bash
 export LINEAR_ACCESS_TOKEN="<your-linear-token>"
 ```
 
-The current Linear adapter is read-only. If the token is absent or the issue cannot be read, GovernLoop does not invent a task specification.
+The Linear adapter is read-only. If the task cannot be read, GovernLoop fails closed instead of inventing a task specification.
 
-## 5. Bind explicit scope authority
+## 4. Positive authority is external and verify-only
 
-The Scope & Action Firewall requires positive authority from the controller environment before a Builder wake can occur:
+GovernLoop **cannot mint its own positive authority**. There is no canonical `bind-authority` command.
 
-```bash
-export GOVERNLOOP_SCOPE_REPOSITORY="owner/repository"
-export GOVERNLOOP_AUTHORIZED_BRANCH="governloop/example-task"
-export GOVERNLOOP_BASELINE_SHA="0123456789abcdef0123456789abcdef01234567"
-export GOVERNLOOP_ALLOWED_PATHS="src/,tests/"
-export GOVERNLOOP_AUTHORIZED_OPERATIONS="fix,continue,complete"
-```
+Before the Builder episode, an external operator/control identity must provision an OpenSSH-signed authority document through the OS-protected GovernLoop control channel. The signed payload binds the exact:
 
-Recommended deny-side configuration:
+- task ID
+- repository
+- branch
+- full baseline SHA
+- allowed paths
+- allowed non-lifecycle operations (`fix`, `continue`, `complete`)
+- trusted reviewer GitHub identities
 
-```bash
-export GOVERNLOOP_PROTECTED_REPOSITORIES="owner/production-repo,owner/other-sensitive-repo"
-export GOVERNLOOP_ALLOW_READY_MERGE_DEPLOY="false"
-```
-
-Optional trusted-reviewer binding:
+The runtime verifies this evidence with:
 
 ```bash
-export GOVERNLOOP_TRUSTED_REVIEWERS="your-github-login"
+python -m governloop_runtime authority-check \
+  --task-id AGE-123 \
+  --repo owner/repository
 ```
 
-Important properties:
+Raw `GOVERNLOOP_*` / `AGENTOPS_*` scope or trusted-reviewer variables are **not positive authority**. A Local Agent must not fill missing signed fields from the task description or current worktree.
 
-- missing repository / branch / baseline / paths / operations -> fail closed
-- repository mismatch -> fail closed
-- wrong current worktree branch -> fail closed
-- local git origin mismatch/unreadable -> fail closed
-- changed PR files outside allowed paths -> fail closed
-- uncommitted unrelated paths -> fail closed
-- review or Builder text cannot expand these values
+Ready, Merge, Close/Reopen, Tag, Release, and Deploy are never scope operations. They require separate lifecycle authorization.
 
-Establish authority **before** the Builder episode. Do not source positive authority from a mutable file controlled by the same Builder.
+## 5. Run `doctor` before Builder work
 
-## 6. Create a compatible task
+```bash
+python -m governloop_runtime doctor \
+  --task-id AGE-123 \
+  --repo owner/repository
+```
 
-Minimal AUTO task:
+`doctor` is read-only and reports `mutations_performed: false`. It checks:
+
+- external signed positive authority and trusted reviewers
+- git origin, exact branch, and bound baseline
+- dirty worktree paths against allowed scope
+- GitHub CLI authentication
+- Linear task readability and execution mode
+- configured ChatGPT reviewer/CDP reachability
+- optional PR branch/base/file-scope binding
+
+Overall states:
+
+- `READY` — all checks for the supplied stage pass
+- `BOOTSTRAP_REQUIRED` — only an expected first-task gate remains, normally the first Draft PR
+- `BLOCKED` — a prerequisite is absent, unreadable, or mismatched
+
+For config-only checks without probing the local reviewer tab:
+
+```bash
+python -m governloop_runtime doctor \
+  --task-id AGE-123 \
+  --repo owner/repository \
+  --no-reviewer-probe
+```
+
+## 6. First-PR bootstrap
+
+A new user does not need to arrive with a PR already created. If `doctor` reports the pull request as `EXPECTED_GATE`, use the **already authorized** branch and baseline; do not invent new values or broaden authority.
+
+The Builder may implement, test, and push only inside the signed scope. Then create a **Draft PR** from that exact branch. Draft PR creation is delivery evidence, not Ready/Merge authorization.
+
+After the Draft PR exists:
+
+```bash
+python -m governloop_runtime doctor \
+  --task-id AGE-123 \
+  --repo owner/repository \
+  --pr 42
+```
+
+GovernLoop checks that the PR is open, its head branch and base SHA match the signed authority, and all changed files remain in scope.
+
+## 7. Task modes
+
+AUTO example:
 
 ```text
 Execution Mode: AUTO
 
 Acceptance Criteria
-- implement the requested change
+- implement the requested bounded change
 - tests pass
 - exact current PR HEAD receives independent review
 ```
 
-Minimal MANUAL task:
+MANUAL example:
 
 ```text
 Execution Mode: MANUAL
 Checkpoint: review approval
 
 Acceptance Criteria
-- implement the requested change
+- implement the requested bounded change
 - tests pass
 - exact current PR HEAD receives independent review
 - stop at WAITING_PO_AUTH after PASS
 ```
 
-In v0.1, `review approval` maps to the review-PASS checkpoint. Unsupported checkpoint text fails closed instead of being guessed.
+If mode is missing or ambiguous, GovernLoop blocks rather than choosing one.
 
-## 7. Run one bounded decision step
+## 8. Run the loop
 
-AUTO:
-
-```bash
-python -m governloop_runtime run-auto \
-  --task-id AGE-123 \
-  --repo owner/repository \
-  --pr 42
-```
-
-MANUAL:
+One bounded step:
 
 ```bash
-python -m governloop_runtime run-manual \
-  --task-id AGE-123 \
-  --repo owner/repository \
-  --pr 42
+python -m governloop_runtime run-auto --task-id AGE-123 --repo owner/repository --pr 42
 ```
 
-Typical phases include `REVIEW`, `FIX`, `PASSED`, `WAITING_PO_AUTH`, `BLOCKED`, `COMPLETE`, and `TERMINAL`.
+or:
 
-A `CHANGES_REQUESTED` / `NOT_PASS` review can wake the Builder only when the scope firewall passes.
+```bash
+python -m governloop_runtime run-manual --task-id AGE-123 --repo owner/repository --pr 42
+```
 
-## 8. Keep the Controller alive
+Keep the Controller alive:
 
 ```bash
 python -m governloop_runtime watch \
   --task-id AGE-123 \
   --repo owner/repository \
   --pr 42 \
-  --interval 60
+  --interval 600
 ```
 
-The Watcher survives Builder exits and waiting periods. `WAITING_PO_AUTH` is intentionally not terminal.
+`WAITING_PO_AUTH` is not terminal. The Watcher remains alive and lifecycle mutations remain frozen unless the exact action is separately authorized by valid external signed PO evidence.
 
-## 9. Exact-HEAD completion and PO decisions
+## 9. Independent review envelope
 
-A bare review PASS does not create completion evidence.
-
-Record accepted completion:
-
-```bash
-python -m governloop_runtime complete \
-  --repo owner/repository \
-  --pr 42 \
-  --head <exact-head-sha>
-```
-
-Bind a MANUAL Product Owner decision:
-
-```bash
-python -m governloop_runtime po-decision \
-  --repo owner/repository \
-  --pr 42 \
-  --head <exact-head-sha> \
-  --decision APPROVE
-```
-
-This resumes the control loop. It is not GitHub Ready/Merge/Deploy permission unless separate governance explicitly grants that lifecycle action.
-
-## 10. Independent final-result review
-
-```bash
-python -m governloop_runtime final-result-review \
-  --repo owner/repository \
-  --pr 42 \
-  --head <exact-head-sha> \
-  --status-report /path/to/status-report.txt
-```
-
-Independent review is automatically requested only after a delivered `STATE: WAITING_REVIEW` report whose repo/PR/HEAD binding matches the invocation. `WAITING_PO_AUTH` does not trigger review.
-
-## 11. Pre-release naming migration
-
-Canonical v0.1 names are:
+Machine-executable independent review is exact-bound:
 
 ```text
-GovernLoop
-governloop_runtime
-GOVERNLOOP_*
-~/.governloop/
+GOVERNLOOP_REVIEW: PASS|CHANGES_REQUESTED|NOT_PASS
+REVIEW_REQUEST_ID: <exact request id>
+REPO: <exact owner/repository>
+PR: <exact PR number>
+HEAD: <exact full current HEAD SHA>
 ```
 
-Existing pre-v0.1 local environments may still contain `agentops_runtime`, `AGENTOPS_*`, or `~/.agentops/`. The v0.1 branch retains a thin compatibility bridge, but new integrations should use only the canonical names. See [`REBRAND_MIGRATION.md`](REBRAND_MIGRATION.md).
+`GOVERNLOOP_REVIEW` is canonical. `AGENTOPS_REVIEW` is pre-v0.1 compatibility only. Duplicate or mixed markers fail closed. Review PASS is technical evidence only; it never grants Ready, Merge, Release, or Deploy.
 
-## 12. What to test first
+## 10. Completion and Product Owner decisions
 
-Choose a reversible, low-blast-radius pilot such as a documentation-backed implementation, isolated UI behavior, test integration, or small adapter change. Avoid destructive data operations, production deployment, account/auth changes, and broad refactors for a first pilot.
+A bare review PASS does not create completion evidence. Accepted COMPLETE requires exact-bound external signed completion evidence.
+
+For MANUAL tasks, Product Owner decisions are also verify-only external signed evidence. Generic APPROVE may resume the loop but does not authorize lifecycle actions. Ready/Merge/Close/Tag/Release/Deploy require exact action-specific authorization.
+
+Legacy bridge files such as `.agent-bridge/completion.json` or `.agent-bridge/po_decision.json` are non-authoritative compatibility evidence.
 
 ## Troubleshooting
 
-### Setup page does not open
+### `AUTHORITY_UNBOUND`
 
-Run with `--no-open` and copy the printed `SETUP_URL`. The server intentionally listens only on `127.0.0.1`.
+Do not export guessed scope variables and do not modify repository profiles to create authority. Ask the external operator/Product Owner to provision the signed authority document through the protected control channel.
 
-### `REVIEWER_CONVERSATION_NOT_FOUND`
+### `pull_request: EXPECTED_GATE`
 
-Open the exact dedicated ChatGPT conversation in the Chrome runtime using the configured CDP port.
-
-### `AMBIGUOUS_REVIEWER_CONVERSATION`
-
-Close duplicate tabs showing the same bound conversation. GovernLoop does not choose arbitrarily.
-
-### CDP unreachable
-
-Confirm the GovernLoop Chrome process uses remote debugging on the configured port. Default: `9233`.
-
-### `LINEAR_UNREADABLE`
-
-Check `LINEAR_ACCESS_TOKEN` and the task identifier/team.
+Complete bounded work on the exact authorized branch, push it, create a Draft PR, then rerun `doctor --pr <number>`.
 
 ### `SCOPE_BLOCKED`
 
-Inspect `builder.reason` and `checks`. Common causes are missing scope env, repo/branch/base mismatch, out-of-scope PR files, a dirty unrelated worktree, or an unverifiable git origin.
+Run `doctor`. Typical causes are wrong repository/branch/baseline, out-of-scope PR files, dirty unrelated worktree files, or unreadable Git/GitHub evidence.
 
-### `CHECKPOINT_UNEVALUABLE`
+### Reviewer binding failure
 
-Use a supported checkpoint such as `Checkpoint: review approval`.
+Run setup again and ensure exactly one configured ChatGPT reviewer conversation is open in the configured Chrome/CDP runtime.
 
-### LoopX degraded
+## Canonical contract
 
-LoopX refresh failure is surfaced and is not silently converted into durable-state success.
-
-### Relay delivery failed
-
-Delivery is fail closed. Retry the delivery path; do not reinterpret an unconfirmed send as ACKed.
-
-## Next steps
-
-- [`governance/CURRENT_RUNTIME_RULES.md`](governance/CURRENT_RUNTIME_RULES.md)
-- [`../SECURITY.md`](../SECURITY.md)
-- [`../CONTRIBUTING.md`](../CONTRIBUTING.md)
+See [`governance/CURRENT_RUNTIME_RULES.md`](governance/CURRENT_RUNTIME_RULES.md). When historical documentation conflicts with that file, the current runtime rules win.
