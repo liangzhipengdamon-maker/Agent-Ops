@@ -1,6 +1,6 @@
 # Code of Conduct
 
-AgentOps welcomes contributors with different backgrounds, levels of experience, tools, and viewpoints.
+GovernLoop welcomes contributors with different backgrounds, levels of experience, tools, and viewpoints.
 
 ## Our standard
 
@@ -18,7 +18,7 @@ Unacceptable behavior includes harassment, threats, discriminatory or demeaning 
 
 ## Governance discussions
 
-AgentOps intentionally distinguishes technical evidence from authorization. Disagreement about governance decisions is welcome when expressed with concrete reasoning and without attempting to bypass repository controls or pressure maintainers into unsafe actions.
+GovernLoop intentionally distinguishes technical evidence from authorization. Disagreement about governance decisions is welcome when expressed with concrete reasoning and without attempting to bypass repository controls or pressure maintainers into unsafe actions.
 
 ## Enforcement
 
@@ -28,4 +28,4 @@ For sensitive conduct concerns, contact the maintainer privately rather than ope
 
 ## Scope
 
-This policy applies in AgentOps repository spaces and in project-related interactions where a participant is representing the project.
+This policy applies in GovernLoop repository spaces and project-related interactions where a participant is representing the project.
