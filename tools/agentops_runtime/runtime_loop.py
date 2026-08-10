@@ -34,16 +34,33 @@ def _bridge_dir() -> str:
 def _load_scope_policy(task_id: str, repo: str, branch: str, base_sha: str,
                        head_sha: str, pr: str,
                        profile_path: Optional[str] = None) -> "ScopePolicy":
-    """Build the immutable scope policy for one episode from the repo profile
-    + the explicit invocation context. The policy is NEVER derived from
-    runtime state, review verdicts, Builder findings, or prompt text.
+    """Build the immutable scope policy for one episode from an INDEPENDENT,
+    authoritative project profile + the explicit invocation context. The
+    policy is NEVER derived from runtime state, review verdicts, Builder
+    findings, or prompt text.
 
-    Allowed paths default to the whole repo (explicit boundary '.') and the
-    controlled runtime/scripts/docs/tests prefixes; operations default to
-    fix/continue/complete. Ready/Merge/Deploy are excluded unless a profile
-    explicitly authorizes them.
+    P0-1: the invocation `repo` must exactly equal the profile's canonical
+    repository (project identity). A wrong local repository/origin therefore
+    cannot self-bind a policy. If no profile or the profile's canonical repo
+    does not match, this returns a policy with `binding_ok=False` so the
+    firewall fails closed.
+
+    Allowed paths default to the explicit controlled directories (NO implicit
+    '.'); operations default to fix/continue/complete. Ready/Merge/Deploy are
+    excluded unless a profile explicitly authorizes them.
     """
     from .scope_firewall import ScopePolicy
+
+    if profile_path is None:
+        # Resolve the authoritative project profile from the repo root.
+        import pathlib
+        here = pathlib.Path(__file__).resolve().parent
+        for base in (pathlib.Path.cwd(), here, here.parent, here.parent.parent,
+                     here.parent.parent.parent):
+            cand = base / "profiles" / "agentops.json"
+            if cand.exists():
+                profile_path = str(cand)
+                break
 
     prof = {}
     if profile_path and os.path.exists(profile_path):
@@ -54,7 +71,9 @@ def _load_scope_policy(task_id: str, repo: str, branch: str, base_sha: str,
             prof = {}
 
     github = prof.get("github") or {}
+    canonical_repo = github.get("repository") or ""
     canonical_branch = github.get("canonical_branch") or "main"
+    binding_ok = bool(canonical_repo) and canonical_repo == repo
     protected = tuple((prof.get("protected_repositories")
                        or ["liangzhipengdamon-maker/LearnMind-English",
                            "liangzhipengdamon-maker/AI-Investment-Lab"]))
@@ -66,12 +85,13 @@ def _load_scope_policy(task_id: str, repo: str, branch: str, base_sha: str,
         base_sha=base_sha,
         head_sha=head_sha,
         allowed_paths=tuple(prof.get("allowed_paths")
-                            or [".", "tools/agentops_runtime/",
+                            or ["tools/agentops_runtime/",
                                 "scripts/", "profiles/", "docs/", "tests/"]),
         allowed_operations=tuple(prof.get("allowed_operations")
                                  or ["fix", "continue", "complete"]),
         protected_repositories=protected,
         allowed_ready_merge_deploy=bool(prof.get("allowed_ready_merge_deploy")),
+        binding_ok=binding_ok,
     )
 
 
@@ -361,6 +381,7 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
         outcome["builder"] = builder_handoff(
             task_id, repo, pr, head, "BUILDER_FIXING", review.findings,
             policy=policy)
+        _apply_builder_result(outcome)
     elif review.decision == "PASS":
         if spec.mode == "MANUAL":
             if not _checkpoint_evaluable(spec):
@@ -384,6 +405,7 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
                         outcome["builder"] = builder_handoff(
                             task_id, repo, pr, head, "CONTINUE", [],
                             policy=policy)
+                        _apply_builder_result(outcome)
                 elif po in ("REJECT", "CHANGES", "CHANGES_REQUESTED"):
                     outcome["phase"] = "FIX"
                     outcome["po_decision"] = po
@@ -391,6 +413,7 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
                         task_id, repo, pr, head, "BUILDER_FIXING",
                         [f"PO decision {po} at checkpoint "
                          f"{spec.checkpoint}"], policy=policy)
+                    _apply_builder_result(outcome)
                 else:
                     outcome["phase"] = "WAITING_PO_AUTH"
                     outcome["gate_report"] = _gate_status_report(
@@ -400,6 +423,7 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
                 outcome["builder"] = builder_handoff(
                     task_id, repo, pr, head, "CONTINUE", [],
                     policy=policy)
+                _apply_builder_result(outcome)
         else:
             # P0-1: AUTO PASS wakes the Builder to continue in scope; accepted
             # completion is derived from evidence, not a bare PASS.
@@ -410,9 +434,22 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
                 outcome["builder"] = builder_handoff(
                     task_id, repo, pr, head, "CONTINUE", [],
                     policy=policy)
+                _apply_builder_result(outcome)
 
     outcome["loopx"] = _loopx_refresh(task_id, outcome["phase"], pr)
     return outcome
+
+
+def _apply_builder_result(outcome: dict) -> None:
+    """P0-3: when the firewall blocks a Builder wake, the runtime phase must
+    become BLOCKED (AGE-6 requires a fail-closed outcome), never FIX/PASSED
+    with an executable-looking continue."""
+    builder = outcome.get("builder") or {}
+    if builder.get("ok") is False and builder.get("blocked"):
+        outcome["phase"] = "BLOCKED"
+        outcome["review_decision"] = "SCOPE_BLOCKED"
+        outcome["decision_request"] = (
+            f"scope firewall blocked Builder wake: {builder.get('reason')}")
 
 
 def _pr_json_full(repo: str, pr: int) -> Optional[dict]:

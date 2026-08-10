@@ -55,7 +55,8 @@ class ControlWatcher:
                 builder = outcome.get("builder") or {}
                 if builder.get("ok") is False:
                     print(f"WATCHER_BUILDER_HANDOFF_FAILED: "
-                          f"{builder.get('detail')}")
+                          f"detail={builder.get('detail')} "
+                          f"reason={builder.get('reason')}")
                 gate = outcome.get("gate_report") or {}
                 if gate.get("sent") and not gate.get("delivered"):
                     print(f"WATCHER_GATE_REPORT_FAILED: "

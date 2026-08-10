@@ -46,6 +46,7 @@ class ScopePolicy:
     protected_repositories: Tuple[str, ...] = dataclasses.field(
         default_factory=tuple)
     allowed_ready_merge_deploy: bool = False
+    binding_ok: bool = True
 
 
 @dataclasses.dataclass(frozen=True)
@@ -113,6 +114,11 @@ def evaluate_scope(policy: ScopePolicy, action: ActionScope,
     reason = None
 
     # 1. Project / repository exact binding.
+    checks["binding_ok"] = policy.binding_ok
+    if not checks["binding_ok"]:
+        reason = ("policy not bound to an independent authoritative "
+                  "project profile (canonical repository mismatch)")
+
     checks["repository_exact"] = (
         action.repository == policy.repository
         and bool(action.repository))
@@ -233,6 +239,11 @@ def _evaluate_scope_without_path_gate(policy, action, worktree) -> dict:
     for Builder wakes, which do not propose concrete paths)."""
     checks: dict = {}
     reason = None
+
+    checks["binding_ok"] = policy.binding_ok
+    if not checks["binding_ok"]:
+        reason = ("policy not bound to an independent authoritative "
+                  "project profile (canonical repository mismatch)")
 
     checks["repository_exact"] = (
         action.repository == policy.repository and bool(action.repository))

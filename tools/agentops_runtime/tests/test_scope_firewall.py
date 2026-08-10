@@ -282,6 +282,44 @@ class TestLoadScopePolicy(unittest.TestCase):
         self.assertIn("liangzhipengdamon-maker/LearnMind-English",
                       p.protected_repositories)
         self.assertFalse(p.allowed_ready_merge_deploy)
+        self.assertTrue(p.binding_ok)
+
+    def test_profile_repo_mismatch_binding_fails_closed(self):
+        # P0-1: invocation repo differs from the independent profile's
+        # canonical repository -> policy binding_ok=False.
+        with tempfile.TemporaryDirectory() as td:
+            prof = os.path.join(td, "agentops.json")
+            with open(prof, "w") as f:
+                f.write('{"github": {"repository": "liangzhipengdamon-maker/Agent-Ops",'
+                        ' "canonical_branch": "main"}}')
+            p = _load_scope_policy(
+                "AGE-6", "other/repo", "feature/x", "base1", "head1", "7",
+                profile_path=prof)
+        self.assertFalse(p.binding_ok)
+
+    def test_default_allowed_paths_has_no_implicit_dot(self):
+        # P0-2: production default allowed paths must NOT include '.' (no
+        # implicit whole-repo bypass). Explicit paths only.
+        with tempfile.TemporaryDirectory() as td:
+            prof = os.path.join(td, "agentops.json")
+            with open(prof, "w") as f:
+                f.write('{"github": {"repository": "liangzhipengdamon-maker/Agent-Ops"}}')
+            p = _load_scope_policy(
+                "AGE-6", "liangzhipengdamon-maker/Agent-Ops",
+                "feature/x", "base1", "head1", "7", profile_path=prof)
+        self.assertNotIn(".", p.allowed_paths)
+        self.assertIn("tools/agentops_runtime/", p.allowed_paths)
+
+    def test_binding_ok_false_blocks_evaluate(self):
+        p = ScopePolicy(task_id="AGE-6",
+                        repository="liangzhipengdamon-maker/Agent-Ops",
+                        branch="b", base_sha="s", binding_ok=False)
+        a = ActionScope(task_id="AGE-6",
+                        repository="liangzhipengdamon-maker/Agent-Ops",
+                        branch="b", base_sha="s", target_paths=("x.py",))
+        r = evaluate_scope(p, a)
+        self.assertFalse(r["ok"])
+        self.assertFalse(r["checks"]["binding_ok"])
 
 
 class TestDecideFirewallIntegration(unittest.TestCase):
@@ -331,7 +369,10 @@ class TestDecideFirewallIntegration(unittest.TestCase):
             out = decide("AGE-6",
                          "liangzhipengdamon-maker/LearnMind-English", "1")
             files = os.listdir(td)
-        self.assertEqual(out["phase"], "FIX")
+        # P0-3: firewall rejection -> phase BLOCKED (AGE-6 fail-closed), never
+        # FIX with an executable-looking wake.
+        self.assertEqual(out["phase"], "BLOCKED")
+        self.assertEqual(out["review_decision"], "SCOPE_BLOCKED")
         self.assertFalse(out["builder"]["ok"])
         self.assertTrue(out["builder"]["blocked"])
         self.assertNotIn("status.json", files)
