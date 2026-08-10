@@ -84,13 +84,12 @@ The environment is intended to be established by the controller/launcher **befor
 
 ## 5. Create a compatible task
 
-The current task adapter reads the task description from Linear.
+The current task adapter reads the task description from Linear. For portable task definitions, use the explicit field syntax below rather than relying on fallback marker detection.
 
 Minimal AUTO example:
 
 ```text
-Execution Mode
-AUTO
+Execution Mode: AUTO
 
 Acceptance Criteria
 - implement the requested change
@@ -101,11 +100,8 @@ Acceptance Criteria
 Minimal MANUAL example:
 
 ```text
-Execution Mode
-MANUAL
-
-Named checkpoint
-review approval
+Execution Mode: MANUAL
+Checkpoint: review approval
 
 Acceptance Criteria
 - implement the requested change
@@ -114,7 +110,7 @@ Acceptance Criteria
 - stop at WAITING_PO_AUTH after PASS
 ```
 
-The supported MANUAL checkpoint in v0.1 maps `review approval` to a review-PASS stage.
+The supported MANUAL checkpoint in v0.1 maps `review approval` to a review-PASS stage. Unsupported checkpoint text fails closed instead of being guessed.
 
 ## 6. Run one bounded decision step
 
@@ -227,6 +223,10 @@ Check `LINEAR_ACCESS_TOKEN` and that the task identifier belongs to a supported 
 ### `SCOPE_BLOCKED`
 
 Inspect the returned `builder.reason` / `checks`. Common causes are missing scope env, repo/branch/base mismatch, changed files outside allowed paths, a dirty unrelated worktree, or an unverifiable git origin.
+
+### `CHECKPOINT_UNEVALUABLE`
+
+Use an explicitly supported MANUAL checkpoint such as `Checkpoint: review approval`. The v0.1 parser does not interpret arbitrary release/deploy checkpoint text.
 
 ### LoopX degraded
 
