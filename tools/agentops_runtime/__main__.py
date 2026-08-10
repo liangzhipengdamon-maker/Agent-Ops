@@ -1,33 +1,9 @@
 #!/usr/bin/env python3
-"""AGE-30 thin AUTO/MANUAL runtime adapter — production entrypoint.
+"""AGE-30 thin AUTO/MANUAL runtime adapter — compatibility entrypoint.
 
-Commands:
-  setup      [--repo R] [--no-open]
-             Open a localhost-only first-run wizard that binds a dedicated
-             ChatGPT reviewer conversation to the Neutral Relay config.
-  run-auto   --task-id T --repo R --pr N
-             One AUTO decision step (reads Linear mode + GitHub review).
-  run-manual --task-id T --repo R --pr N
-             One MANUAL decision step; pauses only at the named checkpoint.
-  watch      --task-id T --repo R --pr N [--interval I]
-             Persistent watcher; survives Builder exit; stops on PR/task
-             closure or accepted completion.
-  report     --task-id T --repo R --pr N --status-report S
-             Send a status_report via the existing Neutral Relay (thin glue).
-  final-result-review --repo R --pr N --head H --status-report S [--timeout T]
-             Final Result Auto-Review: send status_report; ONLY if
-             delivered=true AND STATE=WAITING_REVIEW, auto-send
-             REQUEST: independent_review via the existing Neutral Relay and
-             parse the verdict. WAITING_PO_AUTH never triggers review.
-  po-decision --repo R --pr N --head H --decision APPROVE|REJECT|CHANGES
-             Write a PO decision to the bridge so a WAITING_PO_AUTH loop
-             resumes at the named MANUAL checkpoint (P0-2).
-  complete   --repo R --pr N --head H
-             Write accepted-completion evidence to the bridge (Builder writes
-             only when acceptance is satisfied; drives COMPLETE).
-
-Durable state is LoopX's job; GPT Web transport is the existing Neutral
-Relay's job. This is only the AUTO/MANUAL control glue plus first-run setup.
+`po-decision` and `complete` are retained only for pre-v0.1 bridge compatibility.
+Their files are non-authoritative. Live PO authority and accepted completion are
+verified through external signed control channels by the runtime.
 """
 
 import argparse
@@ -52,9 +28,7 @@ def cmd_setup(args):
 
 
 def cmd_po_decision(args):
-    """Write a PO decision to the bridge so a WAITING_PO_AUTH loop resumes
-    (P0-2). The decision binds the exact PR+HEAD and is consumed by
-    runtime_loop._po_decision on the next step."""
+    """Write legacy bridge evidence only; never executable PO authority."""
     import os
     from .runtime_loop import _bridge_dir
     bd = _bridge_dir()
@@ -63,15 +37,13 @@ def cmd_po_decision(args):
                 "decision": args.decision.upper()}
     with open(os.path.join(bd, "po_decision.json"), "w") as f:
         json.dump(decision, f, indent=2)
-    print(json.dumps({"written": True, "decision": decision}, indent=2))
+    print(json.dumps({"written": True, "authoritative": False,
+                      "decision": decision}, indent=2))
     return 0
 
 
 def cmd_complete(args):
-    """Write accepted-completion evidence to the bridge (R5-P0-1). The
-    Builder writes this ONLY when the task's acceptance criteria are
-    satisfied; runtime_loop._accepted_completion requires the exact PR+HEAD
-    binding before producing COMPLETE. Bare PASS never becomes COMPLETE."""
+    """Write legacy bridge completion only; runtime ignores it for COMPLETE."""
     import os
     from .runtime_loop import _bridge_dir
     bd = _bridge_dir()
@@ -80,7 +52,8 @@ def cmd_complete(args):
                   "completion": "COMPLETE"}
     with open(os.path.join(bd, "completion.json"), "w") as f:
         json.dump(completion, f, indent=2)
-    print(json.dumps({"written": True, "completion": completion}, indent=2))
+    print(json.dumps({"written": True, "authoritative": False,
+                      "completion": completion}, indent=2))
     return 0
 
 
@@ -98,12 +71,6 @@ def cmd_watch(args):
 
 
 def cmd_final_result_review(args):
-    """Final Result Auto-Review: send status_report; ONLY if delivered=true
-    AND STATE=WAITING_REVIEW, auto-send REQUEST: independent_review via the
-    existing Neutral Relay and parse the captured verdict. WAITING_PO_AUTH
-    never triggers a review; deduped per PR+HEAD. P1-1: returns non-zero when
-    the status report was not delivered or the independent review did not
-    parse successfully, so callers never see process success on failure."""
     import os
     from .runtime_loop import _bridge_dir
     with open(args.status_report) as f:
@@ -114,18 +81,17 @@ def cmd_final_result_review(args):
         timeout=args.timeout)
     print(json.dumps(out, indent=2, ensure_ascii=False))
     if not out.get("status_delivered"):
-        return 1  # status_report not delivered
+        return 1
     if out.get("status_delivered") and out.get("binding_ok") is False:
-        return 3  # ACKed but payload binding failed -> no auto-review ran
+        return 3
     if out.get("review_sent") and not out.get("succeeded"):
-        return 2  # independent_review sent but failed to parse
+        return 2
     if out.get("review_sent") and not (out.get("review") or {}).get("ok"):
         return 2
     return 0
 
 
 def cmd_report(args):
-    # Thin glue to the existing Neutral Relay (transport only).
     with open(args.status_report) as f:
         payload = f.read()
     out = relay_client.send_status_report(payload, "/tmp/agentops_runtime_report")
@@ -139,16 +105,11 @@ def main(argv=None):
 
     p = sub.add_parser("setup")
     p.add_argument("--repo", help="Repository to prefill as owner/repo")
-    p.add_argument("--config-file", default=setup_wizard.DEFAULT_CONFIG_PATH,
-                   help="Neutral Relay config path")
-    p.add_argument("--cdp-port", type=int,
-                   help="AgentOps Chrome CDP port (defaults to existing config or 9233)")
-    p.add_argument("--browser-profile",
-                   help="AgentOps Chrome profile path (defaults to existing config)")
-    p.add_argument("--setup-port", type=int, default=0,
-                   help="Local setup UI port; 0 chooses an ephemeral port")
-    p.add_argument("--no-open", action="store_true",
-                   help="Do not auto-open the setup page; print its URL instead")
+    p.add_argument("--config-file", default=setup_wizard.DEFAULT_CONFIG_PATH)
+    p.add_argument("--cdp-port", type=int)
+    p.add_argument("--browser-profile")
+    p.add_argument("--setup-port", type=int, default=0)
+    p.add_argument("--no-open", action="store_true")
 
     p = sub.add_parser("run-auto")
     p.add_argument("--task-id", required=True)
@@ -192,7 +153,6 @@ def main(argv=None):
     p.add_argument("--head", required=True)
 
     args = parser.parse_args(argv)
-
     if args.command == "setup":
         return cmd_setup(args)
     if args.command in ("run-auto", "run-manual"):

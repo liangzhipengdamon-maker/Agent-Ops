@@ -2,8 +2,12 @@
 
 Public configuration is GOVERNLOOP_* / ~/.governloop. The already-tested
 pre-release implementation still reads a few AGENTOPS_* symbols internally;
-this module maps the canonical names into that implementation at process
-startup without allowing review/runtime state to create new authority.
+this module maps canonical names into that implementation at process startup.
+
+For task execution, positive scope authority is special: raw process values
+are cleared and replaced only by a verified operator authority bundle before
+legacy aliases are populated. Task/prompt/Builder text therefore cannot become
+positive scope authority merely by exporting GOVERNLOOP_* values.
 """
 
 import os
@@ -42,13 +46,18 @@ def relay_bin() -> str:
 
 
 def apply_env_aliases() -> None:
-    """Map canonical GovernLoop authority env into the tested legacy reader.
+    """Map canonical GovernLoop config into the tested legacy reader.
 
     Presence of a canonical variable wins even when its value is empty. This
     matters for revocation: an explicitly empty GOVERNLOOP_* value must not be
     repopulated from stale AGENTOPS_* process state. Legacy values are used
     only when the canonical variable is genuinely absent. No defaults grant
     authority.
+
+    Public task execution does not call this on raw positive authority: see
+    ``configure_process(task_id=...)`` below, which verifies an operator bundle
+    first. The standalone function remains for pre-v0.1 compatibility tests
+    and non-task setup paths.
     """
     for canonical, legacy in ENV_ALIASES.items():
         if canonical in os.environ:
@@ -65,6 +74,20 @@ def configure_legacy_relay() -> None:
     relay_client.CONFIG_FILE = CONFIG_FILE
 
 
-def configure_process() -> None:
+def configure_process(task_id=None, expected_repo=None):
+    """Configure one canonical GovernLoop process.
+
+    When ``task_id`` is supplied, task execution requires a verified signed
+    operator authority bundle. Raw positive scope values already present in
+    the process are ignored/cleared by ``apply_verified_authority`` before the
+    compatibility aliases are populated. The returned status is suitable for
+    a deterministic CLI preflight.
+    """
+    authority_status = {"ok": True, "status": "NOT_REQUIRED"}
+    if task_id:
+        from .authority import apply_verified_authority
+        authority_status = apply_verified_authority(
+            task_id, expected_repo=expected_repo)
     apply_env_aliases()
     configure_legacy_relay()
+    return authority_status

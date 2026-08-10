@@ -7,6 +7,9 @@ sentinel), so missing/mismatched REVIEW_REQUEST_ID / REPO / PR / HEAD fails
 closed. ``review_from_github`` can still be used as a structural unit-test
 helper when ``expected_request_id`` is omitted; that helper-only mode is not
 used by the live runtime.
+
+Executable reviewer identity is projected only from externally verified
+operator authority. Mutable repository profiles are never an authority source.
 """
 
 import dataclasses
@@ -19,30 +22,21 @@ from typing import Optional
 from .review_protocol import has_formal_review_marker, parse_formal_review_verdict
 
 
-def _profile_path() -> Optional[str]:
-    import pathlib
-    here = pathlib.Path(__file__).resolve().parent
-    for base in (pathlib.Path.cwd(), here, here.parent, here.parent.parent,
-                 here.parent.parent.parent):
-        p = base / "profiles" / "agentops.json"
-        if p.exists():
-            return str(p)
-    return None
-
-
 def trusted_reviewers() -> set:
+    """Return externally verified trusted reviewer identities only.
+
+    ``AGENTOPS_TRUSTED_REVIEWERS`` is a compatibility projection written by
+    GovernLoop only after external operator authority verification. The
+    companion verification flag must be present. There is deliberately NO
+    fallback to profiles/agentops.json or any other mutable repository file.
+    Empty/unverified input fails closed.
+    """
+    if os.environ.get("AGENTOPS_AUTHORITY_VERIFIED", "") != "1":
+        return set()
     env = os.environ.get("AGENTOPS_TRUSTED_REVIEWERS", "").strip()
-    if env:
-        return {x.strip() for x in env.split(",") if x.strip()}
-    path = _profile_path()
-    if not path:
+    if not env:
         return set()
-    try:
-        with open(path) as f:
-            prof = json.load(f)
-        return set((prof.get("governance") or {}).get("trusted_reviewers") or [])
-    except (OSError, json.JSONDecodeError):
-        return set()
+    return {x.strip() for x in env.split(",") if x.strip()}
 
 
 def _author_trusted(review: dict) -> bool:
