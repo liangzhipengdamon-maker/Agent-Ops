@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """First-run browser setup for binding a ChatGPT reviewer conversation.
 
-The wizard is intentionally a thin configuration layer in front of the
-existing Neutral Relay. It never handles ChatGPT credentials and never
-weakens the relay's exact-conversation identity binding.
+This is a thin configuration layer in front of the existing Neutral Relay.
+It never handles ChatGPT credentials and never weakens exact-conversation
+identity binding.
 """
 
 import copy
@@ -44,20 +44,18 @@ def normalize_repository(repository):
 
 
 def normalize_conversation_url(url):
-    """Return the canonical exact ChatGPT /c/<id> URL or fail closed.
-
-    This deliberately accepts only a dedicated conversation URL. Generic
-    ChatGPT home, shared links, GPT pages, HTTP URLs, credentials-in-URL,
-    query strings, and fragments are rejected.
-    """
+    """Return canonical https://chatgpt.com/c/<id> or fail closed."""
     raw = (url or "").strip()
+    if not raw:
+        raise SetupError("ChatGPT conversation URL is required")
     try:
         parsed = urllib.parse.urlparse(raw)
+        parsed_port = parsed.port  # Access can itself raise ValueError.
     except ValueError as exc:
         raise SetupError(f"invalid ChatGPT conversation URL: {exc}") from exc
     if parsed.scheme.lower() != "https":
         raise SetupError("ChatGPT conversation URL must use https")
-    if parsed.username or parsed.password or parsed.port:
+    if parsed.username or parsed.password or parsed_port:
         raise SetupError("ChatGPT conversation URL must not contain credentials or a port")
     host = (parsed.hostname or "").lower()
     if host not in ("chatgpt.com", "www.chatgpt.com"):
@@ -66,17 +64,18 @@ def normalize_conversation_url(url):
         raise SetupError("conversation URL must not contain query parameters or fragments")
     match = _CONVERSATION_PATH_RE.fullmatch(parsed.path or "")
     if not match:
-        raise SetupError("use a dedicated ChatGPT conversation URL: https://chatgpt.com/c/<conversation-id>")
-    conversation_id = match.group(1).lower()
-    return f"https://chatgpt.com/c/{conversation_id}"
+        raise SetupError(
+            "use a dedicated ChatGPT conversation URL: "
+            "https://chatgpt.com/c/<conversation-id>")
+    cid = match.group(1).lower()
+    return f"https://chatgpt.com/c/{cid}"
 
 
 def conversation_id_from_url(url):
     try:
-        canonical = normalize_conversation_url(url)
+        return normalize_conversation_url(url).rsplit("/", 1)[-1]
     except SetupError:
         return None
-    return canonical.rsplit("/", 1)[-1]
 
 
 def normalize_cdp_port(port):
@@ -84,20 +83,27 @@ def normalize_cdp_port(port):
         value = int(port)
     except (TypeError, ValueError) as exc:
         raise SetupError("CDP port must be an integer") from exc
-    if value < 1 or value > 65535:
+    if not 1 <= value <= 65535:
         raise SetupError("CDP port must be between 1 and 65535")
     return value
 
 
 def normalize_profile_path(path):
-    value = os.path.abspath(os.path.expanduser((path or "").strip()))
-    if not value:
+    raw = (path or "").strip()
+    if not raw:
         raise SetupError("browser profile path is required")
-    return value
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+def normalize_config_path(path):
+    raw = (path or "").strip()
+    if not raw:
+        raise SetupError("config path is required")
+    return os.path.abspath(os.path.expanduser(raw))
 
 
 def load_config(config_path=DEFAULT_CONFIG_PATH):
-    path = os.path.abspath(os.path.expanduser(config_path))
+    path = normalize_config_path(config_path)
     if not os.path.exists(path):
         return {}
     try:
@@ -112,7 +118,7 @@ def load_config(config_path=DEFAULT_CONFIG_PATH):
 
 def prepare_config(existing, repository, conversation_url, cdp_port,
                    browser_profile):
-    """Build an updated relay config while preserving unrelated fields."""
+    """Build an updated config while preserving unrelated existing fields."""
     repository = normalize_repository(repository)
     conversation_url = normalize_conversation_url(conversation_url)
     cdp_port = normalize_cdp_port(cdp_port)
@@ -130,8 +136,8 @@ def prepare_config(existing, repository, conversation_url, cdp_port,
     if not isinstance(runtime, dict):
         raise SetupError("existing config.runtime must be an object")
 
-    # Neutral Relay currently uses one browser runtime for all routes. Do not
-    # silently rewrite another route to a different CDP port.
+    # Neutral Relay currently binds all routes to one browser runtime. Never
+    # silently rewrite a pre-existing route onto a different CDP port.
     for name, route in routes.items():
         if not isinstance(route, dict):
             raise SetupError(f"existing route {name!r} must be an object")
@@ -139,21 +145,22 @@ def prepare_config(existing, repository, conversation_url, cdp_port,
         if route_port is not None and normalize_cdp_port(route_port) != cdp_port:
             raise SetupError(
                 f"existing route {name!r} uses CDP port {route_port}; "
-                f"all routes in one AgentOps runtime must use the same port")
+                "all routes in one AgentOps runtime must use the same port")
 
-    runtime_existing_port = runtime.get("cdp_port")
-    if runtime_existing_port is not None:
-        existing_port = normalize_cdp_port(runtime_existing_port)
-        if routes and existing_port != cdp_port:
+    existing_runtime_port = runtime.get("cdp_port")
+    if existing_runtime_port is not None and routes:
+        existing_runtime_port = normalize_cdp_port(existing_runtime_port)
+        if existing_runtime_port != cdp_port:
             raise SetupError(
-                f"existing runtime uses CDP port {existing_port}; "
+                f"existing runtime uses CDP port {existing_runtime_port}; "
                 "choose that port or use a separate config")
 
     runtime_updated = copy.deepcopy(runtime)
     runtime_updated["name"] = runtime_updated.get("name") or RUNTIME_NAME
     runtime_updated["cdp_port"] = cdp_port
     runtime_updated["browser_profile"] = browser_profile
-    runtime_updated["runtime_marker"] = runtime_updated.get("runtime_marker") or RUNTIME_MARKER
+    runtime_updated["runtime_marker"] = (
+        runtime_updated.get("runtime_marker") or RUNTIME_MARKER)
 
     route_updated = copy.deepcopy(routes.get(repository) or {})
     route_updated["conversation_url"] = conversation_url
@@ -166,50 +173,47 @@ def prepare_config(existing, repository, conversation_url, cdp_port,
     return config
 
 
-def ensure_runtime_marker(browser_profile, marker=RUNTIME_MARKER):
-    profile = normalize_profile_path(browser_profile)
-    os.makedirs(profile, mode=0o700, exist_ok=True)
-    marker_path = os.path.join(profile, "AGENTOPS_MARKER")
-    tmp_fd, tmp_path = tempfile.mkstemp(prefix=".AGENTOPS_MARKER.", dir=profile)
+def _atomic_write_text(path, text, mode=0o600):
+    parent = os.path.dirname(path)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix=".agentops.", dir=parent)
     try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
-            handle.write(str(marker).strip() + "\n")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, marker_path)
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
     finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-    return marker_path
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+    return path
+
+
+def ensure_runtime_marker(browser_profile, marker=RUNTIME_MARKER):
+    profile = normalize_profile_path(browser_profile)
+    marker_value = str(marker or "").strip()
+    if not marker_value:
+        raise SetupError("runtime marker must not be empty")
+    os.makedirs(profile, mode=0o700, exist_ok=True)
+    return _atomic_write_text(
+        os.path.join(profile, "AGENTOPS_MARKER"), marker_value + "\n")
 
 
 def atomic_write_config(config, config_path=DEFAULT_CONFIG_PATH):
-    path = os.path.abspath(os.path.expanduser(config_path))
-    parent = os.path.dirname(path)
-    os.makedirs(parent, mode=0o700, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(prefix=".config.", suffix=".json", dir=parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(config, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, path)
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-    return path
+    path = normalize_config_path(config_path)
+    payload = json.dumps(config, indent=2, sort_keys=True) + "\n"
+    return _atomic_write_text(path, payload)
 
 
 def save_binding(config_path, repository, conversation_url, cdp_port,
                  browser_profile):
     existing = load_config(config_path)
-    updated = prepare_config(existing, repository, conversation_url, cdp_port,
-                             browser_profile)
+    updated = prepare_config(
+        existing, repository, conversation_url, cdp_port, browser_profile)
     runtime = updated["runtime"]
-    ensure_runtime_marker(runtime["browser_profile"], runtime["runtime_marker"])
+    ensure_runtime_marker(
+        runtime["browser_profile"], runtime["runtime_marker"])
     path = atomic_write_config(updated, config_path)
     return {
         "ok": True,
@@ -222,7 +226,7 @@ def save_binding(config_path, repository, conversation_url, cdp_port,
 
 
 def evaluate_targets(targets, conversation_url):
-    """Require exactly one open page with the exact configured conversation."""
+    """Require exactly one open page with the configured conversation ID."""
     canonical = normalize_conversation_url(conversation_url)
     expected_id = conversation_id_from_url(canonical)
     matches = []
@@ -231,7 +235,7 @@ def evaluate_targets(targets, conversation_url):
             continue
         if conversation_id_from_url(target.get("url") or "") == expected_id:
             matches.append(target)
-    if len(matches) == 0:
+    if not matches:
         return {
             "ok": False,
             "code": "REVIEWER_CONVERSATION_NOT_FOUND",
@@ -245,13 +249,14 @@ def evaluate_targets(targets, conversation_url):
             "detail": f"{len(matches)} open tabs match; close duplicates and retry",
             "matches": len(matches),
         }
+    target = matches[0]
     return {
         "ok": True,
         "code": "CONNECTED",
         "detail": "exact reviewer conversation found",
         "matches": 1,
-        "target_url": matches[0].get("url"),
-        "target_id": matches[0].get("id") or matches[0].get("targetId"),
+        "target_url": target.get("url"),
+        "target_id": target.get("id") or target.get("targetId"),
     }
 
 
@@ -266,14 +271,16 @@ def test_connection(conversation_url, cdp_port, opener=None):
     try:
         canonical = normalize_conversation_url(conversation_url)
         port = normalize_cdp_port(cdp_port)
-        version = _read_json(f"http://127.0.0.1:{port}/json/version", opener=opener)
+        version = _read_json(
+            f"http://127.0.0.1:{port}/json/version", opener=opener)
         if not isinstance(version, dict) or not version.get("webSocketDebuggerUrl"):
             return {
                 "ok": False,
                 "code": "CDP_INVALID_RESPONSE",
                 "detail": "CDP /json/version did not return webSocketDebuggerUrl",
             }
-        targets = _read_json(f"http://127.0.0.1:{port}/json", opener=opener)
+        targets = _read_json(
+            f"http://127.0.0.1:{port}/json", opener=opener)
         if not isinstance(targets, list):
             return {
                 "ok": False,
@@ -285,18 +292,14 @@ def test_connection(conversation_url, cdp_port, opener=None):
         result["cdp_port"] = port
         return result
     except (SetupError, OSError, ValueError, json.JSONDecodeError) as exc:
-        return {
-            "ok": False,
-            "code": "CDP_UNREACHABLE",
-            "detail": str(exc),
-        }
+        return {"ok": False, "code": "CDP_UNREACHABLE", "detail": str(exc)}
 
 
 def _contains_secret_field(value):
     if isinstance(value, dict):
         for key, item in value.items():
-            low = str(key).lower()
-            if any(word in low for word in _SECRET_WORDS):
+            lowered = str(key).lower()
+            if any(word in lowered for word in _SECRET_WORDS):
                 return True
             if _contains_secret_field(item):
                 return True
@@ -306,7 +309,7 @@ def _contains_secret_field(value):
 
 
 def generated_config_contains_secret_fields(config):
-    """Test/support helper: wizard-generated fields must never be secrets."""
+    """Support/test helper: wizard-generated fields must never be secrets."""
     return _contains_secret_field(config)
 
 
@@ -327,7 +330,9 @@ def initial_values(config_path, repository=None, cdp_port=None,
         "repository": repo,
         "conversation_url": route.get("conversation_url", ""),
         "cdp_port": str(cdp_port or runtime.get("cdp_port") or DEFAULT_CDP_PORT),
-        "browser_profile": browser_profile or runtime.get("browser_profile") or DEFAULT_BROWSER_PROFILE,
+        "browser_profile": (
+            browser_profile or runtime.get("browser_profile") or
+            DEFAULT_BROWSER_PROFILE),
     }
 
 
@@ -338,58 +343,30 @@ def _render_page(values, csrf_token, config_path, status="", error=""):
     status_html = f'<div class="ok">{esc(status)}</div>' if status else ""
     error_html = f'<div class="error">{esc(error)}</div>' if error else ""
     return f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AgentOps Setup</title>
 <style>
-:root {{ color-scheme: light dark; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }}
-body {{ margin:0; background:#111318; color:#edf1f7; }}
-main {{ max-width:720px; margin:48px auto; padding:0 20px 48px; }}
-.card {{ background:#1b1f27; border:1px solid #303744; border-radius:16px; padding:28px; box-shadow:0 14px 40px #0005; }}
-h1 {{ margin:0 0 8px; font-size:28px; }}
-p {{ color:#b9c2d0; line-height:1.55; }}
-label {{ display:block; margin-top:18px; font-weight:650; }}
-input {{ box-sizing:border-box; width:100%; margin-top:7px; padding:12px 13px; border-radius:9px; border:1px solid #465064; background:#101319; color:#f6f8fb; font:inherit; }}
-.row {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }}
-.actions {{ display:flex; gap:10px; margin-top:24px; flex-wrap:wrap; }}
-button {{ border:0; border-radius:9px; padding:11px 16px; font:inherit; font-weight:700; cursor:pointer; }}
-.primary {{ background:#e8edf6; color:#101319; }}
-.secondary {{ background:#303744; color:#edf1f7; }}
-.note {{ margin-top:20px; padding:14px; border-radius:10px; background:#141922; color:#aeb8c8; font-size:14px; }}
-.ok {{ margin:16px 0; padding:12px; border-radius:9px; background:#153821; color:#b9f2c9; }}
-.error {{ margin:16px 0; padding:12px; border-radius:9px; background:#451b20; color:#ffc5ca; }}
-code {{ color:#d7e2f5; }}
-@media (max-width:620px) {{ .row {{ grid-template-columns:1fr; }} }}
-</style>
-</head>
-<body><main><div class="card">
+:root{{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
+body{{margin:0;background:#111318;color:#edf1f7}}main{{max-width:720px;margin:48px auto;padding:0 20px 48px}}
+.card{{background:#1b1f27;border:1px solid #303744;border-radius:16px;padding:28px;box-shadow:0 14px 40px #0005}}
+h1{{margin:0 0 8px;font-size:28px}}p{{color:#b9c2d0;line-height:1.55}}label{{display:block;margin-top:18px;font-weight:650}}
+input{{box-sizing:border-box;width:100%;margin-top:7px;padding:12px 13px;border-radius:9px;border:1px solid #465064;background:#101319;color:#f6f8fb;font:inherit}}
+.row{{display:grid;grid-template-columns:1fr 1fr;gap:14px}}.actions{{display:flex;gap:10px;margin-top:24px;flex-wrap:wrap}}
+button{{border:0;border-radius:9px;padding:11px 16px;font:inherit;font-weight:700;cursor:pointer}}.primary{{background:#e8edf6;color:#101319}}.secondary{{background:#303744;color:#edf1f7}}
+.note{{margin-top:20px;padding:14px;border-radius:10px;background:#141922;color:#aeb8c8;font-size:14px}}.ok{{margin:16px 0;padding:12px;border-radius:9px;background:#153821;color:#b9f2c9}}.error{{margin:16px 0;padding:12px;border-radius:9px;background:#451b20;color:#ffc5ca}}code{{color:#d7e2f5}}
+@media(max-width:620px){{.row{{grid-template-columns:1fr}}}}
+</style></head><body><main><div class="card">
 <h1>Connect your ChatGPT reviewer</h1>
 <p>Open a dedicated ChatGPT conversation in the AgentOps Chrome window, copy its <code>https://chatgpt.com/c/...</code> URL, and bind it below.</p>
 {status_html}{error_html}
-<form method="post">
-<input type="hidden" name="csrf" value="{esc(csrf_token)}">
-<label>Repository
-<input name="repository" required placeholder="owner/repository" value="{esc(values.get('repository'))}">
-</label>
-<label>Dedicated ChatGPT conversation URL
-<input name="conversation_url" required placeholder="https://chatgpt.com/c/..." value="{esc(values.get('conversation_url'))}">
-</label>
-<div class="row">
-<label>AgentOps CDP port
-<input name="cdp_port" inputmode="numeric" required value="{esc(values.get('cdp_port'))}">
-</label>
-<label>Browser profile
-<input name="browser_profile" required value="{esc(values.get('browser_profile'))}">
-</label>
-</div>
-<div class="actions">
-<button class="secondary" formaction="/test" type="submit">Test Connection</button>
-<button class="primary" formaction="/save" type="submit">Bind Conversation</button>
-</div>
-</form>
-<div class="note"><strong>Privacy:</strong> AgentOps never asks for or stores your ChatGPT password, cookies, OpenAI API key, or session token. You sign in directly on ChatGPT. This page stores only the exact reviewer conversation URL and local browser runtime settings.<br><br>Config: <code>{esc(os.path.abspath(os.path.expanduser(config_path)))}</code></div>
+<form method="post"><input type="hidden" name="csrf" value="{esc(csrf_token)}">
+<label>Repository<input name="repository" required placeholder="owner/repository" value="{esc(values.get('repository'))}"></label>
+<label>Dedicated ChatGPT conversation URL<input name="conversation_url" required placeholder="https://chatgpt.com/c/..." value="{esc(values.get('conversation_url'))}"></label>
+<div class="row"><label>AgentOps CDP port<input name="cdp_port" inputmode="numeric" required value="{esc(values.get('cdp_port'))}"></label>
+<label>Browser profile<input name="browser_profile" required value="{esc(values.get('browser_profile'))}"></label></div>
+<div class="actions"><button class="secondary" formaction="/test" type="submit">Test Connection</button><button class="primary" formaction="/save" type="submit">Bind Conversation</button></div></form>
+<div class="note"><strong>Privacy:</strong> AgentOps never asks for or stores your ChatGPT password, cookies, OpenAI API key, or session token. You sign in directly on ChatGPT. This page stores only the exact reviewer conversation URL and local browser runtime settings.<br><br>Config: <code>{esc(normalize_config_path(config_path))}</code></div>
 </div></main></body></html>"""
 
 
@@ -409,7 +386,7 @@ def create_setup_server(config_path=DEFAULT_CONFIG_PATH, repository=None,
                         cdp_port=None, browser_profile=None, setup_port=0,
                         connection_tester=None):
     """Create a localhost-only setup server. Caller owns serve/close."""
-    config_path = os.path.abspath(os.path.expanduser(config_path))
+    config_path = normalize_config_path(config_path)
     values = initial_values(config_path, repository, cdp_port, browser_profile)
     csrf_token = secrets.token_urlsafe(24)
     tester = connection_tester or test_connection
@@ -419,6 +396,10 @@ def create_setup_server(config_path=DEFAULT_CONFIG_PATH, repository=None,
         def log_message(self, fmt, *args):
             return
 
+        def _host_is_local(self):
+            host = (self.headers.get("Host") or "").split(":", 1)[0].lower()
+            return host in ("127.0.0.1", "localhost")
+
         def _send(self, body, status_code=200):
             encoded = body.encode("utf-8")
             self.send_response(status_code)
@@ -427,17 +408,26 @@ def create_setup_server(config_path=DEFAULT_CONFIG_PATH, repository=None,
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
-            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'none'; style-src 'unsafe-inline'; "
+                "form-action 'self'; frame-ancestors 'none'")
             self.end_headers()
             self.wfile.write(encoded)
 
         def do_GET(self):
+            if not self._host_is_local():
+                self.send_error(421, "local Host required")
+                return
             if self.path != "/":
                 self.send_error(404)
                 return
             self._send(_render_page(values, csrf_token, config_path))
 
         def do_POST(self):
+            if not self._host_is_local():
+                self.send_error(421, "local Host required")
+                return
             if self.path not in ("/test", "/save"):
                 self.send_error(404)
                 return
@@ -451,7 +441,6 @@ def create_setup_server(config_path=DEFAULT_CONFIG_PATH, repository=None,
                     "cdp_port": form.get("cdp_port", "").strip(),
                     "browser_profile": form.get("browser_profile", "").strip(),
                 }
-                # Validate all user-controlled values before any action.
                 normalize_repository(submitted["repository"])
                 normalize_conversation_url(submitted["conversation_url"])
                 normalize_cdp_port(submitted["cdp_port"])
@@ -459,14 +448,21 @@ def create_setup_server(config_path=DEFAULT_CONFIG_PATH, repository=None,
                 values.update(submitted)
 
                 if self.path == "/test":
-                    result = tester(submitted["conversation_url"], submitted["cdp_port"])
+                    result = tester(
+                        submitted["conversation_url"], submitted["cdp_port"])
                     state["last_result"] = result
                     if result.get("ok"):
-                        message = f"Connected: exactly one reviewer conversation found on CDP port {submitted['cdp_port']}."
-                        self._send(_render_page(values, csrf_token, config_path, status=message))
+                        message = (
+                            "Connected: exactly one reviewer conversation "
+                            f"found on CDP port {submitted['cdp_port']}.")
+                        self._send(_render_page(
+                            values, csrf_token, config_path, status=message))
                     else:
-                        message = f"{result.get('code', 'CONNECTION_FAILED')}: {result.get('detail', 'connection test failed')}"
-                        self._send(_render_page(values, csrf_token, config_path, error=message))
+                        message = (
+                            f"{result.get('code', 'CONNECTION_FAILED')}: "
+                            f"{result.get('detail', 'connection test failed')}")
+                        self._send(_render_page(
+                            values, csrf_token, config_path, error=message))
                     return
 
                 result = save_binding(
@@ -477,19 +473,21 @@ def create_setup_server(config_path=DEFAULT_CONFIG_PATH, repository=None,
                 state["last_result"] = result
                 self._send(_render_page(
                     values, csrf_token, config_path,
-                    status="Reviewer conversation bound successfully. You can close this tab."))
-                # Return control to the CLI after the success response is sent.
-                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                    status=("Reviewer conversation bound successfully. "
+                            "You can close this tab.")))
+                threading.Thread(
+                    target=self.server.shutdown, daemon=True).start()
             except SetupError as exc:
-                self._send(_render_page(values, csrf_token, config_path, error=str(exc)), 400)
+                self._send(_render_page(
+                    values, csrf_token, config_path, error=str(exc)), 400)
             except OSError as exc:
-                self._send(_render_page(values, csrf_token, config_path,
-                                        error=f"configuration write failed: {exc}"), 500)
+                self._send(_render_page(
+                    values, csrf_token, config_path,
+                    error=f"configuration write failed: {exc}"), 500)
 
     server = ThreadingHTTPServer(("127.0.0.1", int(setup_port or 0)), Handler)
-    host, port = server.server_address[:2]
-    url = f"http://127.0.0.1:{port}/"
-    return server, state, url
+    port = server.server_address[1]
+    return server, state, f"http://127.0.0.1:{port}/"
 
 
 def run_setup(config_path=DEFAULT_CONFIG_PATH, repository=None, cdp_port=None,
@@ -499,7 +497,7 @@ def run_setup(config_path=DEFAULT_CONFIG_PATH, repository=None, cdp_port=None,
         browser_profile=browser_profile, setup_port=setup_port)
     print("SETUP_BIND_HOST: 127.0.0.1")
     print(f"SETUP_URL: {url}")
-    print(f"CONFIG_PATH: {os.path.abspath(os.path.expanduser(config_path))}")
+    print(f"CONFIG_PATH: {normalize_config_path(config_path)}")
     print("Open a dedicated ChatGPT conversation in the AgentOps Chrome window before Test Connection.")
     if not no_open:
         webbrowser.open(url)
