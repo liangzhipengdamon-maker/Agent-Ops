@@ -203,9 +203,9 @@ def _gate_status_report(task_id: str, repo: str, pr: str, head: str) -> dict:
             "correlation_id": out.get("correlation_id")}
 
 
-def _po_decision(task_id: str, repo: str, pr: str, head: str,
-                 reviews: list) -> Optional[str]:
-    """Historical parser helper only; never called by the live decision loop."""
+def _legacy_po_decision(task_id: str, repo: str, pr: str, head: str,
+                        reviews: list) -> Optional[str]:
+    """Historical structural parser; its output is not used by live authority."""
     del task_id, repo, pr
     trusted = review_intake.trusted_reviewers()
     for review in reviews or []:
@@ -235,6 +235,20 @@ def _authenticated_po_decision(repo: str, pr: str, head: str) -> Optional[str]:
     if not decision:
         return None
     return str(decision.get("decision") or "").upper() or None
+
+
+def _po_decision(*args) -> Optional[str]:
+    """Compatibility seam with a strict live/legacy split.
+
+    Three arguments (repo, pr, head) are the live path and verify external
+    signed PO evidence. Five arguments preserve the historical parser solely
+    for structural regression compatibility; `decide()` never calls that form.
+    """
+    if len(args) == 3:
+        return _authenticated_po_decision(*args)
+    if len(args) == 5:
+        return _legacy_po_decision(*args)
+    raise TypeError("_po_decision expects live (repo, pr, head) or legacy 5-arg form")
 
 
 def _checkpoint_reached(spec, review) -> bool:
@@ -345,7 +359,6 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
                              "ok": bool(authority_status.get("ok"))}}
 
     pr_json = _pr_json_full(repo, int(pr))
-    reviews = (pr_json or {}).get("reviews") or []
     observed_base = (pr_json or {}).get("baseRefOid") or ""
     observed_branch = (pr_json or {}).get("headRefName") or ""
     policy = _load_scope_policy(task_id, repo, observed_branch, observed_base, head, pr)
@@ -367,7 +380,7 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
                 outcome["review_decision"] = "CHECKPOINT_UNEVALUABLE"
             elif _checkpoint_reached(spec, review):
                 outcome["checkpoint_reached"] = True
-                po = _authenticated_po_decision(repo, pr, head)
+                po = _po_decision(repo, pr, head)
                 if po == "APPROVE":
                     if _accepted_completion(repo, pr, head):
                         outcome["phase"] = "COMPLETE"
