@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """AGE-30 thin AUTO/MANUAL runtime adapter — compatibility entrypoint.
 
-`po-decision` and `complete` are retained only for pre-v0.1 bridge compatibility.
-Their files are non-authoritative. Live PO authority and accepted completion are
-verified through external signed control channels by the runtime.
+`po-decision` and `complete` are retained only for pre-v0.1 bridge
+compatibility. Their files are non-authoritative; live PO authority and
+accepted completion are verified through external signed control channels.
 """
 
 import argparse
@@ -71,7 +71,6 @@ def cmd_watch(args):
 
 
 def cmd_final_result_review(args):
-    import os
     from .runtime_loop import _bridge_dir
     with open(args.status_report) as f:
         payload = f.read()

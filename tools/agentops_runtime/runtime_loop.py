@@ -2,10 +2,8 @@
 """Thin AUTO/MANUAL runtime adapter.
 
 AGE-44 invariant: there is exactly one executable positive authority channel.
-Direct imports of this legacy compatibility module verify the same external
-operator-signed bundle as the canonical GovernLoop CLI. Raw AGENTOPS_* /
-GOVERNLOOP_* values may be parsed by compatibility helpers, but can never
-become executable authority without independent external verification.
+AGE-45 invariant: active MANUAL lifecycle mutations are accepted only through
+exact action-specific externally signed Product Owner authority.
 """
 
 import dataclasses
@@ -15,7 +13,7 @@ import re
 import subprocess
 from typing import Optional
 
-from . import linear_adapter, review_intake, relay_client
+from . import linear_adapter, review_intake, relay_client, lifecycle_guard
 from .task_intake import spec_from_linear, evaluate_checkpoint
 from .review_intake import read_github_pr, read_pr_head
 
@@ -38,22 +36,16 @@ def _verified_scope_policy(task_id: str, repo: str, head_sha: str) -> "ScopePoli
         protected = ("liangzhipengdamon-maker/LearnMind-English",
                      "liangzhipengdamon-maker/AI-Investment-Lab")
     return ScopePolicy(
-        task_id=task_id,
-        repository=repo,
+        task_id=task_id, repository=repo,
         branch=str(payload.get("branch") or ""),
-        base_sha=str(payload.get("baseline_sha") or ""),
-        head_sha=head_sha,
+        base_sha=str(payload.get("baseline_sha") or ""), head_sha=head_sha,
         allowed_paths=tuple(payload.get("allowed_paths") or ()),
         allowed_operations=tuple(payload.get("allowed_operations") or ()),
-        protected_repositories=protected,
-        allowed_ready_merge_deploy=False,
+        protected_repositories=protected, allowed_ready_merge_deploy=False,
         binding_ok=bool(
-            verified.get("ok")
-            and payload.get("repository") == repo
-            and payload.get("branch")
-            and payload.get("baseline_sha")
-            and payload.get("allowed_paths")
-            and payload.get("allowed_operations")),
+            verified.get("ok") and payload.get("repository") == repo
+            and payload.get("branch") and payload.get("baseline_sha")
+            and payload.get("allowed_paths") and payload.get("allowed_operations")),
         authoritative_changed_files=(),
     )
 
@@ -64,7 +56,6 @@ def _load_scope_policy(task_id: str, repo: str, observed_branch: str,
     """Parse the pre-v0.1 structural scope shape without granting authority."""
     from .scope_firewall import ScopePolicy
     del observed_branch, observed_base, pr
-
     prof = {}
     if profile_path and os.path.exists(profile_path):
         try:
@@ -72,41 +63,28 @@ def _load_scope_policy(task_id: str, repo: str, observed_branch: str,
                 prof = json.load(f)
         except (OSError, json.JSONDecodeError):
             prof = {}
-
     canonical_repo = os.environ.get("AGENTOPS_SCOPE_REPOSITORY", "").strip()
     expected_branch = os.environ.get("AGENTOPS_AUTHORIZED_BRANCH", "").strip()
     expected_base = os.environ.get("AGENTOPS_BASELINE_SHA", "").strip()
-    allowed_ops = tuple(
-        o.strip() for o in os.environ.get(
-            "AGENTOPS_AUTHORIZED_OPERATIONS", "").split(",") if o.strip())
-    allowed_paths = tuple(
-        p.strip() for p in os.environ.get(
-            "AGENTOPS_ALLOWED_PATHS", "").split(",") if p.strip())
-    protected = tuple(
-        r.strip() for r in os.environ.get(
-            "AGENTOPS_PROTECTED_REPOSITORIES", "").split(",") if r.strip())
+    allowed_ops = tuple(o.strip() for o in
+        os.environ.get("AGENTOPS_AUTHORIZED_OPERATIONS", "").split(",") if o.strip())
+    allowed_paths = tuple(p.strip() for p in
+        os.environ.get("AGENTOPS_ALLOWED_PATHS", "").split(",") if p.strip())
+    protected = tuple(r.strip() for r in
+        os.environ.get("AGENTOPS_PROTECTED_REPOSITORIES", "").split(",") if r.strip())
     if not protected:
         protected = ("liangzhipengdamon-maker/LearnMind-English",
                      "liangzhipengdamon-maker/AI-Investment-Lab")
-
     lifecycle = {"ready", "merge", "close", "tag", "release", "deploy"}
     contains_lifecycle = any(op.lower() in lifecycle for op in allowed_ops)
-    binding_ok = bool(
-        canonical_repo and canonical_repo == repo
-        and expected_branch and expected_base and allowed_paths and allowed_ops
-        and not contains_lifecycle)
-
+    binding_ok = bool(canonical_repo and canonical_repo == repo
+                      and expected_branch and expected_base and allowed_paths
+                      and allowed_ops and not contains_lifecycle)
     return ScopePolicy(
-        task_id=task_id,
-        repository=repo,
-        branch=expected_branch,
-        base_sha=expected_base,
-        head_sha=head_sha,
-        allowed_paths=allowed_paths,
-        allowed_operations=allowed_ops,
-        protected_repositories=protected,
-        allowed_ready_merge_deploy=False,
-        binding_ok=binding_ok,
+        task_id=task_id, repository=repo, branch=expected_branch,
+        base_sha=expected_base, head_sha=head_sha, allowed_paths=allowed_paths,
+        allowed_operations=allowed_ops, protected_repositories=protected,
+        allowed_ready_merge_deploy=False, binding_ok=binding_ok,
         authoritative_changed_files=tuple(
             prof.get("authoritative_changed_files") or ()),
     )
@@ -122,7 +100,6 @@ def builder_handoff(task_id: str, repo: str, pr: str, head: str,
     if policy is None:
         return {"ok": False, "blocked": True, "state": phase,
                 "bridge": bd, "reason": "no scope policy bound for Builder wake"}
-
     verified_policy = _verified_scope_policy(task_id, repo, head)
     if not verified_policy.binding_ok:
         return {"ok": False, "blocked": True, "state": phase,
@@ -134,7 +111,6 @@ def builder_handoff(task_id: str, repo: str, pr: str, head: str,
         authoritative_changed_files=getattr(policy, "authoritative_changed_files", ()),
     )
     policy = verified_policy
-
     origin_repo = _git_origin()
     if origin_repo:
         policy = dataclasses.replace(policy, origin_repo=origin_repo)
@@ -145,7 +121,6 @@ def builder_handoff(task_id: str, repo: str, pr: str, head: str,
         return {"ok": False, "blocked": True, "state": phase,
                 "bridge": bd, "checks": {"changed_files_readable": False},
                 "reason": "authoritative PR changed-file set could not be read"}
-
     try:
         cb = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
                             capture_output=True, text=True, timeout=15)
@@ -159,7 +134,6 @@ def builder_handoff(task_id: str, repo: str, pr: str, head: str,
     except Exception:
         return {"ok": False, "blocked": True, "state": phase,
                 "bridge": bd, "reason": "local git/worktree state unverifiable; fail closed"}
-
     operation = "continue" if phase == "CONTINUE" else (
         "complete" if phase == "COMPLETE" else "fix")
     verdict = evaluate_builder_wake(
@@ -229,8 +203,9 @@ def _gate_status_report(task_id: str, repo: str, pr: str, head: str) -> dict:
             "correlation_id": out.get("correlation_id")}
 
 
-def _po_decision(task_id: str, repo: str, pr: str, head: str,
-                 reviews: list) -> Optional[str]:
+def _legacy_po_decision(task_id: str, repo: str, pr: str, head: str,
+                        reviews: list) -> Optional[str]:
+    """Historical structural parser; its output is not used by live authority."""
     del task_id, repo, pr
     trusted = review_intake.trusted_reviewers()
     for review in reviews or []:
@@ -254,6 +229,28 @@ def _po_decision(task_id: str, repo: str, pr: str, head: str,
     return None
 
 
+def _authenticated_po_decision(repo: str, pr: str, head: str) -> Optional[str]:
+    """Executable PO decision path: verify-only external signed evidence."""
+    decision = lifecycle_guard.read_po_decision(_bridge_dir(), repo, pr, head)
+    if not decision:
+        return None
+    return str(decision.get("decision") or "").upper() or None
+
+
+def _po_decision(*args) -> Optional[str]:
+    """Compatibility seam with a strict live/legacy split.
+
+    Three arguments (repo, pr, head) are the live path and verify external
+    signed PO evidence. Five arguments preserve the historical parser solely
+    for structural regression compatibility; `decide()` never calls that form.
+    """
+    if len(args) == 3:
+        return _authenticated_po_decision(*args)
+    if len(args) == 5:
+        return _legacy_po_decision(*args)
+    raise TypeError("_po_decision expects live (repo, pr, head) or legacy 5-arg form")
+
+
 def _checkpoint_reached(spec, review) -> bool:
     return bool(spec.checkpoint and evaluate_checkpoint(spec.checkpoint) == "REVIEW_PASS"
                 and review.decision == "PASS")
@@ -270,6 +267,12 @@ def _accepted_completion(repo: str, pr: str, head: str) -> bool:
         return bool(verify_completion(repo, str(pr), head).get("ok"))
     except Exception:
         return False
+
+
+def _task_is_terminal(lin: Optional[dict]) -> bool:
+    return bool(lin and (
+        lin.get("state_type") in ("canceled", "completed")
+        or lin.get("state_name") in ("Canceled", "Done")))
 
 
 def decide(task_id: str, repo: str, pr: str) -> dict:
@@ -295,7 +298,58 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
         authority_status = {"ok": False, "status": "BLOCKED",
                             "detail": f"authority verifier unavailable: {exc}"}
 
+    lin = linear_adapter.read_linear_issue(task_id)
+    if _task_is_terminal(lin):
+        return {"mode": spec.mode, "phase": "TERMINAL",
+                "review_decision": "INCOMPLETE", "findings": [],
+                "checkpoint_reached": False,
+                "authority": {"status": authority_status.get("status"),
+                              "authority_id": authority_status.get("authority_id"),
+                              "ok": bool(authority_status.get("ok"))},
+                "loopx": _loopx_refresh(task_id, "TERMINAL", pr)}
+
     head = read_pr_head(repo, int(pr)) or ""
+    gh_state = _pr_state(repo, int(pr))
+    if gh_state is None:
+        return {"mode": spec.mode, "phase": "BLOCKED",
+                "review_decision": "UNREADABLE_REMOTE", "findings": [],
+                "checkpoint_reached": False, "head": head,
+                "authority": {"status": authority_status.get("status"),
+                              "authority_id": authority_status.get("authority_id"),
+                              "ok": bool(authority_status.get("ok"))},
+                "loopx": _loopx_refresh(task_id, "BLOCKED", pr)}
+
+    if gh_state.get("state") in ("MERGED", "CLOSED"):
+        if spec.mode == "MANUAL":
+            if not head:
+                return {"mode": spec.mode, "phase": "BLOCKED",
+                        "review_decision": "LIFECYCLE_HEAD_UNREADABLE",
+                        "findings": [], "checkpoint_reached": True, "head": head,
+                        "authority": {"status": authority_status.get("status"),
+                                      "authority_id": authority_status.get("authority_id"),
+                                      "ok": bool(authority_status.get("ok"))},
+                        "decision_request": "active MANUAL terminal mutation cannot be exact-bound",
+                        "loopx": _loopx_refresh(task_id, "BLOCKED", pr)}
+            violation = lifecycle_guard.active_manual_terminal_violation(
+                _bridge_dir(), repo, str(pr), head, gh_state.get("state"))
+            if violation:
+                return {"mode": spec.mode, "phase": "BLOCKED",
+                        "review_decision": "LIFECYCLE_VIOLATION",
+                        "findings": [], "checkpoint_reached": True, "head": head,
+                        "authority": {"status": authority_status.get("status"),
+                                      "authority_id": authority_status.get("authority_id"),
+                                      "ok": bool(authority_status.get("ok"))},
+                        "lifecycle_violation": violation,
+                        "decision_request": "active MANUAL task was closed/merged without exact signed lifecycle authorization",
+                        "loopx": _loopx_refresh(task_id, "BLOCKED", pr)}
+        return {"mode": spec.mode, "phase": "TERMINAL",
+                "review_decision": "INCOMPLETE", "findings": [],
+                "checkpoint_reached": False, "head": head,
+                "authority": {"status": authority_status.get("status"),
+                              "authority_id": authority_status.get("authority_id"),
+                              "ok": bool(authority_status.get("ok"))},
+                "loopx": _loopx_refresh(task_id, "TERMINAL", pr)}
+
     review = read_github_pr(repo, int(pr), head)
     outcome = {"mode": spec.mode, "phase": "REVIEW",
                "review_decision": review.decision, "findings": review.findings,
@@ -303,25 +357,8 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
                "authority": {"status": authority_status.get("status"),
                              "authority_id": authority_status.get("authority_id"),
                              "ok": bool(authority_status.get("ok"))}}
-    gh_state = _pr_state(repo, int(pr))
-    if gh_state is None:
-        outcome["phase"] = "BLOCKED"
-        outcome["review_decision"] = "UNREADABLE_REMOTE"
-        outcome["loopx"] = _loopx_refresh(task_id, "BLOCKED", pr)
-        return outcome
-    if gh_state.get("state") in ("MERGED", "CLOSED"):
-        outcome["phase"] = "TERMINAL"
-        outcome["loopx"] = _loopx_refresh(task_id, "TERMINAL", pr)
-        return outcome
-    lin = linear_adapter.read_linear_issue(task_id)
-    if lin and (lin.get("state_type") in ("canceled", "completed")
-                or lin.get("state_name") in ("Canceled", "Done")):
-        outcome["phase"] = "TERMINAL"
-        outcome["loopx"] = _loopx_refresh(task_id, "TERMINAL", pr)
-        return outcome
 
     pr_json = _pr_json_full(repo, int(pr))
-    reviews = (pr_json or {}).get("reviews") or []
     observed_base = (pr_json or {}).get("baseRefOid") or ""
     observed_branch = (pr_json or {}).get("headRefName") or ""
     policy = _load_scope_policy(task_id, repo, observed_branch, observed_base, head, pr)
@@ -343,7 +380,7 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
                 outcome["review_decision"] = "CHECKPOINT_UNEVALUABLE"
             elif _checkpoint_reached(spec, review):
                 outcome["checkpoint_reached"] = True
-                po = _po_decision(task_id, repo, pr, head, reviews)
+                po = _po_decision(repo, pr, head)
                 if po == "APPROVE":
                     if _accepted_completion(repo, pr, head):
                         outcome["phase"] = "COMPLETE"
