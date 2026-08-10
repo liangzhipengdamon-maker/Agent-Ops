@@ -53,7 +53,7 @@ CHANGES_REQUESTED / NOT_PASS → Builder fixes → new code HEAD → review agai
 PASS → continue in scope or finish when acceptance criteria are satisfied
 ```
 
-Do not stop merely because a phase, commit, push, PR update, report, or review round completed. AUTO may continue through lifecycle steps already inside the task scope; it must not invent unrelated work.
+Do not stop merely because a phase, commit, push, PR update, report, or review round completed. AUTO may continue through in-scope implementation steps, but execution mode itself never grants lifecycle authority.
 
 ### MANUAL
 
@@ -62,6 +62,20 @@ The task instruction must name the checkpoint or condition where PO input is req
 Run the same Builder ↔ GitHub ↔ GPT loop until that checkpoint is reached, then report the exact state and enter `WAITING_PO_AUTH`.
 
 `WAITING_PO_AUTH` is not Controller termination. Builder may idle/exit; Controller/Watcher stays alive until a valid PO decision arrives, then execution continues from that decision.
+
+### MANUAL lifecycle authority
+
+Product Owner decisions are positive authority and are **verify-only** inside GovernLoop. A Builder-written `.agent-bridge/po_decision.json`, GitHub review text, runtime state, ACK, CI result, or ordinary process environment is not executable PO authority.
+
+The live MANUAL path accepts only an externally provisioned OpenSSH-signed PO decision from the OS-protected control channel. The signed payload is exact-bound to repository, PR, full current HEAD, and decision. A lifecycle permission additionally requires the exact `lifecycle_action`.
+
+A generic signed `APPROVE` may resume the MANUAL implementation loop, but it does **not** authorize Ready, Merge, Close/Reopen, Tag, Release, or Deploy. An action-specific signed `APPROVE` authorizes only that exact lifecycle action on the exact bound object.
+
+Once a MANUAL task is still active, remote `CLOSED` or `MERGED` state must pass the lifecycle guard before it can be treated as `TERMINAL`. This check does not depend on mutable `gate_report.json`; deleting, losing, or redirecting gate evidence cannot turn an unauthorized terminal mutation into normal completion. If the exact current HEAD cannot be established, the runtime blocks rather than accepting the mutation.
+
+The Controller/Watcher is **decide-first**: it does not independently accept remote PR terminal state before the canonical runtime lifecycle guard runs. An unauthorized close/merge is surfaced as `LIFECYCLE_VIOLATION`, and the Watcher remains alive. Later authorization does not erase already-recorded violation evidence.
+
+An explicitly completed or canceled Linear task remains accepted terminal evidence. Preventing a hostile Builder that already holds unrestricted repository-owner credentials from mutating GitHub outside GovernLoop requires separate process/credential isolation; GovernLoop does not treat possession of such credentials as runtime authorization.
 
 ## Independent review response contract
 
@@ -95,4 +109,4 @@ For code work, the live remote HEAD must contain the real code change. Docs-only
 
 Delivery is fail-closed: unconfirmed send/read-back is `DELIVERY_FAILED`; ACK closes only the delivery episode, never the Controller.
 
-The Controller terminates only on accepted completion, closure, or cancellation.
+The Controller terminates only on accepted completion, authorized/accepted closure, or cancellation.
