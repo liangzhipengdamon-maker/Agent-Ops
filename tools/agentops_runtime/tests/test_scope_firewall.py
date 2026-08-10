@@ -214,11 +214,14 @@ class TestEvaluateScope(unittest.TestCase):
         p = make_policy(authoritative_changed_files=(
             "tools/agentops_runtime/scope_firewall.py",
             "tools/agentops_runtime/runtime_loop.py"))
+        wt = WorktreeState(
+            current_branch="liangzhipengdamon/age-6-age-6-deterministic-scope-action-firewall",
+            has_uncommitted_changes=False)
         r = evaluate_builder_wake(p, "AGE-6",
                                   "liangzhipengdamon-maker/Agent-Ops",
                                   "liangzhipengdamon/age-6-age-6-deterministic-scope-action-firewall",
                                   "f93b1859bb63a2eb342789bf6bca3269b4f2c7de",
-                                  "abc123")
+                                  "abc123", worktree=wt)
         self.assertTrue(r["ok"])
         self.assertTrue(r["checks"]["changed_files_in_scope"])
 
@@ -227,22 +230,28 @@ class TestEvaluateScope(unittest.TestCase):
         # blocks the wake even when the worktree is clean.
         p = make_policy(authoritative_changed_files=(
             "LearnMind-English/src/a.py",))
+        wt = WorktreeState(
+            current_branch="liangzhipengdamon/age-6-age-6-deterministic-scope-action-firewall",
+            has_uncommitted_changes=False)
         r = evaluate_builder_wake(p, "AGE-6",
                                   "liangzhipengdamon-maker/Agent-Ops",
                                   "liangzhipengdamon/age-6-age-6-deterministic-scope-action-firewall",
                                   "f93b1859bb63a2eb342789bf6bca3269b4f2c7de",
-                                  "abc123")
+                                  "abc123", worktree=wt)
         self.assertFalse(r["ok"])
         self.assertFalse(r["checks"]["changed_files_in_scope"])
 
     def test_authoritative_changed_file_protected_path_fails(self):
         p = make_policy(authoritative_changed_files=(
             "liangzhipengdamon-maker/AI-Investment-Lab/config.yaml",))
+        wt = WorktreeState(
+            current_branch="liangzhipengdamon/age-6-age-6-deterministic-scope-action-firewall",
+            has_uncommitted_changes=False)
         r = evaluate_builder_wake(p, "AGE-6",
                                   "liangzhipengdamon-maker/Agent-Ops",
                                   "liangzhipengdamon/age-6-age-6-deterministic-scope-action-firewall",
                                   "f93b1859bb63a2eb342789bf6bca3269b4f2c7de",
-                                  "abc123")
+                                  "abc123", worktree=wt)
         self.assertFalse(r["ok"])
         self.assertFalse(r["checks"]["changed_files_in_scope"])
 
@@ -264,7 +273,9 @@ class TestBuilderHandoffFirewall(unittest.TestCase):
         p = make_policy()
         with tempfile.TemporaryDirectory() as td, \
              mock.patch("agentops_runtime.runtime_loop._bridge_dir",
-                        return_value=td):
+                        return_value=td), \
+             mock.patch("agentops_runtime.runtime_loop._git_origin",
+                        return_value="liangzhipengdamon-maker/Agent-Ops"):
             r = builder_handoff("AGE-6",
                                 "liangzhipengdamon-maker/LearnMind-English",
                                 "1", "h", "BUILDER_FIXING", ["x"],
@@ -280,6 +291,8 @@ class TestBuilderHandoffFirewall(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td, \
              mock.patch("agentops_runtime.runtime_loop._bridge_dir",
                         return_value=td), \
+             mock.patch("agentops_runtime.runtime_loop._git_origin",
+                        return_value="liangzhipengdamon-maker/Agent-Ops"), \
              mock.patch("agentops_runtime.runtime_loop.subprocess.run",
                         return_value=mock.Mock(returncode=0, stdout="")) as m:
             r = builder_handoff("AGE-6",
@@ -293,6 +306,56 @@ class TestBuilderHandoffFirewall(unittest.TestCase):
         self.assertFalse(r.get("blocked"))
         self.assertIn("status.json", files)
         self.assertIn("findings.md", files)
+
+    def test_origin_mismatch_blocks_wake(self):
+        # P0-1: local git origin differs from the bound repo -> block.
+        p = make_policy()
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch("agentops_runtime.runtime_loop._bridge_dir",
+                        return_value=td), \
+             mock.patch("agentops_runtime.runtime_loop._git_origin",
+                        return_value="other/org"):
+            r = builder_handoff("AGE-6",
+                                "liangzhipengdamon-maker/Agent-Ops",
+                                "1", "abc123", "BUILDER_FIXING", ["x"],
+                                policy=p)
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["blocked"])
+
+    def test_changed_files_unreadable_blocks_wake(self):
+        # P0-2: authoritative changed-file retrieval failure -> block, never
+        # treated as zero changes.
+        p = make_policy(changed_files_unreadable=True)
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch("agentops_runtime.runtime_loop._bridge_dir",
+                        return_value=td), \
+             mock.patch("agentops_runtime.runtime_loop._git_origin",
+                        return_value="liangzhipengdamon-maker/Agent-Ops"):
+            r = builder_handoff("AGE-6",
+                                "liangzhipengdamon-maker/Agent-Ops",
+                                "1", "abc123", "BUILDER_FIXING", ["x"],
+                                policy=p)
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["blocked"])
+
+    def test_git_unverifiable_blocks_wake(self):
+        # P0-3: git rev-parse/status unverifiable -> block, never skip
+        # contamination checks.
+        p = make_policy()
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch("agentops_runtime.runtime_loop._bridge_dir",
+                        return_value=td), \
+             mock.patch("agentops_runtime.runtime_loop._git_origin",
+                        return_value="liangzhipengdamon-maker/Agent-Ops"), \
+             mock.patch("agentops_runtime.runtime_loop.subprocess.run",
+                        return_value=mock.Mock(returncode=1, stdout="")):
+            r = builder_handoff("AGE-6",
+                                "liangzhipengdamon-maker/Agent-Ops",
+                                "1", "abc123", "BUILDER_FIXING", ["x"],
+                                policy=p)
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["blocked"])
+        self.assertIn("unverifiable", r["reason"])
 
     def test_merge_operation_never_emitted_by_runtime_phase(self):
         # The runtime only ever hands off fix/continue/complete phases; verify
@@ -453,6 +516,8 @@ class TestDecideFirewallIntegration(unittest.TestCase):
              mock.patch("agentops_runtime.runtime_loop._pr_changed_files",
                         return_value=[
                             "tools/agentops_runtime/scope_firewall.py"]), \
+             mock.patch("agentops_runtime.runtime_loop._git_origin",
+                        return_value="liangzhipengdamon-maker/Agent-Ops"), \
              mock.patch("agentops_runtime.runtime_loop.spec_from_linear",
                         return_value=__import__(
                             "agentops_runtime.task_intake", fromlist=["TaskSpec"]

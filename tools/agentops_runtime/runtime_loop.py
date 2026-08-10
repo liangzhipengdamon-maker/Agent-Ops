@@ -102,7 +102,7 @@ def _load_scope_policy(task_id: str, repo: str, observed_branch: str,
         head_sha=head_sha,
         allowed_paths=tuple(prof.get("allowed_paths")
                             or ["tools/agentops_runtime/",
-                                "scripts/", "profiles/", "docs/", "tests/"]),
+                                "scripts/", "docs/", "tests/"]),
         allowed_operations=allowed_ops,
         protected_repositories=protected,
         allowed_ready_merge_deploy=bool(prof.get("allowed_ready_merge_deploy")),
@@ -136,15 +136,42 @@ def builder_handoff(task_id: str, repo: str, pr: str, head: str,
                 "bridge": bd,
                 "reason": "no scope policy bound for Builder wake"}
 
+    # P0-1 (local origin): bind the policy to the actual local git origin.
+    origin_repo = _git_origin()
+    if origin_repo:
+        policy = dataclasses.replace(policy, origin_repo=origin_repo)
+    else:
+        # Origin unverifiable -> fail closed (never skip origin binding).
+        return {"ok": False, "blocked": True, "state": phase,
+                "bridge": bd,
+                "reason": "local git origin unverifiable; fail closed"}
+
+    # P0-2: if the authoritative changed-file retrieval failed, mark the
+    # policy so the firewall blocks (never treat as zero changes).
+    if getattr(policy, "changed_files_unreadable", False):
+        return {"ok": False, "blocked": True, "state": phase,
+                "bridge": bd, "checks": {"changed_files_readable": False},
+                "reason": ("authoritative PR changed-file set could not be "
+                           "read; fail closed, no Builder wake")}
+
     # Clean-worktree contamination: observe current branch + uncommitted
     # changes (all changed paths must be inside the policy's allowed paths).
+    # P0-3: an unverifiable local worktree (exception) must BLOCK, never skip.
     wt = None
     try:
         cb = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
                             capture_output=True, text=True, timeout=15)
-        cur_branch = cb.stdout.strip() if cb.returncode == 0 else ""
+        if cb.returncode != 0:
+            return {"ok": False, "blocked": True, "state": phase,
+                    "bridge": bd,
+                    "reason": "git rev-parse HEAD unverifiable; fail closed"}
+        cur_branch = cb.stdout.strip()
         st = subprocess.run(["git", "status", "--porcelain"],
                             capture_output=True, text=True, timeout=15)
+        if st.returncode != 0:
+            return {"ok": False, "blocked": True, "state": phase,
+                    "bridge": bd,
+                    "reason": "git status unverifiable; fail closed"}
         changed = []
         for line in (st.stdout or "").splitlines():
             if len(line) > 3:
@@ -153,7 +180,9 @@ def builder_handoff(task_id: str, repo: str, pr: str, head: str,
                            has_uncommitted_changes=bool(st.stdout.strip()),
                            changed_paths=tuple(changed))
     except Exception:
-        wt = None
+        return {"ok": False, "blocked": True, "state": phase,
+                "bridge": bd,
+                "reason": "local git/worktree state unverifiable; fail closed"}
 
     operation = "fix"
     if phase == "CONTINUE":
@@ -396,9 +425,12 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
     policy = _load_scope_policy(task_id, repo, observed_branch,
                                 observed_base, head, pr)
     # P0-2: authoritative changed-file set from the real PR diff vs base.
-    auth_changed = _pr_changed_files(repo, int(pr)) or ()
-    policy = dataclasses.replace(
-        policy, authoritative_changed_files=tuple(auth_changed))
+    auth_changed = _pr_changed_files(repo, int(pr))
+    if auth_changed is None:
+        policy = dataclasses.replace(policy, changed_files_unreadable=True)
+    else:
+        policy = dataclasses.replace(
+            policy, authoritative_changed_files=tuple(auth_changed))
 
     if review.decision in ("CHANGES_REQUESTED", "NOT_PASS"):
         outcome["phase"] = "FIX"          # findings -> Builder execution chain
@@ -496,6 +528,22 @@ def _pr_json_full(repo: str, pr: int) -> Optional[dict]:
              "baseRefOid,headRefName"],
             capture_output=True, text=True, check=True, timeout=30)
         return _json.loads(res.stdout)
+    except Exception:
+        return None
+
+
+def _git_origin() -> Optional[str]:
+    """Local git origin URL -> canonical owner/repo, or None if unreadable."""
+    try:
+        res = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=15)
+        if res.returncode != 0:
+            return None
+        url = res.stdout.strip()
+        # Accept ssh/git@/https forms -> owner/repo (strip .git).
+        m = re.search(r"(?:github\.com[:/]|git@github\.com:)([^/\s]+/[^/\s]+?)(?:\.git)?$", url)
+        return m.group(1) if m else url.rstrip("/")
     except Exception:
         return None
 

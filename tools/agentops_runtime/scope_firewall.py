@@ -49,6 +49,8 @@ class ScopePolicy:
     binding_ok: bool = True
     authoritative_changed_files: Tuple[str, ...] = dataclasses.field(
         default_factory=tuple)
+    changed_files_unreadable: bool = False
+    origin_repo: Optional[str] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -281,6 +283,27 @@ def _evaluate_scope_without_path_gate(policy, action, worktree) -> dict:
             checks["paths_allowed"] = False
             reason = f"path {p!r} outside allowed paths {policy.allowed_paths!r}"
             break
+
+    # P0-2: unreadable authoritative changed-file set is fail-closed, never
+    # treated as "zero changes".
+    checks["changed_files_readable"] = not policy.changed_files_unreadable
+    if not checks["changed_files_readable"]:
+        reason = ("authoritative PR changed-file set could not be read; "
+                  "fail closed, no Builder wake")
+
+    # P0-1 (local origin): the local git origin must equal the bound repo.
+    checks["origin_repo_exact"] = True
+    if policy.origin_repo:
+        if not action.repository == policy.origin_repo:
+            checks["origin_repo_exact"] = False
+            reason = (f"local origin {policy.origin_repo!r} != bound "
+                      f"repository {action.repository!r}")
+
+    # P0-3: an unverifiable local worktree (None) must BLOCK contamination
+    # checks, never skip them.
+    checks["worktree_verifiable"] = worktree is not None
+    if worktree is None:
+        reason = "local git/worktree state unverifiable; fail closed"
 
     checks["operation_allowed"] = action.operation in policy.allowed_operations
     if not checks["operation_allowed"]:
