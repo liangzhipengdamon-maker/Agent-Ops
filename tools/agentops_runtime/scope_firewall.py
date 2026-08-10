@@ -47,6 +47,8 @@ class ScopePolicy:
         default_factory=tuple)
     allowed_ready_merge_deploy: bool = False
     binding_ok: bool = True
+    authoritative_changed_files: Tuple[str, ...] = dataclasses.field(
+        default_factory=tuple)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -284,6 +286,22 @@ def _evaluate_scope_without_path_gate(policy, action, worktree) -> dict:
     if not checks["operation_allowed"]:
         reason = (f"operation {action.operation!r} not in "
                   f"{policy.allowed_operations!r}")
+
+    # P0-2 (wake path): validate the AUTHORITATIVE changed-file set (e.g.
+    # `gh pr diff --name-only` vs the base) against the allowed-path /
+    # protected-path boundary. This catches committed out-of-scope files that
+    # are invisible once the worktree is clean, not just pre-wake dirty state.
+    checks["changed_files_in_scope"] = True
+    for f in policy.authoritative_changed_files:
+        if _is_protected(f, policy.protected_repositories):
+            checks["changed_files_in_scope"] = False
+            reason = f"authoritative changed file {f!r} is a protected path"
+            break
+        if not _is_path_allowed(f, policy.allowed_paths):
+            checks["changed_files_in_scope"] = False
+            reason = (f"authoritative changed file {f!r} outside allowed "
+                      f"paths {policy.allowed_paths!r}")
+            break
 
     checks["no_implied_ready_merge_deploy"] = True
     if action.operation.lower() in LIFECYCLE_ACTIONS:

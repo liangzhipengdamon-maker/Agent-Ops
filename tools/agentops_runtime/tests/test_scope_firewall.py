@@ -210,6 +210,42 @@ class TestEvaluateScope(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertFalse(r["checks"]["paths_allowed"])
 
+    def test_authoritative_changed_file_in_scope_passes(self):
+        p = make_policy(authoritative_changed_files=(
+            "tools/agentops_runtime/scope_firewall.py",
+            "tools/agentops_runtime/runtime_loop.py"))
+        r = evaluate_builder_wake(p, "AGE-6",
+                                  "liangzhipengdamon-maker/Agent-Ops",
+                                  "liangzhipengdamon/age-6-age-6-deterministic-scope-action-firewall",
+                                  "f93b1859bb63a2eb342789bf6bca3269b4f2c7de",
+                                  "abc123")
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["checks"]["changed_files_in_scope"])
+
+    def test_authoritative_changed_file_out_of_scope_fails(self):
+        # P0-2: a committed out-of-scope file in the authoritative PR diff
+        # blocks the wake even when the worktree is clean.
+        p = make_policy(authoritative_changed_files=(
+            "LearnMind-English/src/a.py",))
+        r = evaluate_builder_wake(p, "AGE-6",
+                                  "liangzhipengdamon-maker/Agent-Ops",
+                                  "liangzhipengdamon/age-6-age-6-deterministic-scope-action-firewall",
+                                  "f93b1859bb63a2eb342789bf6bca3269b4f2c7de",
+                                  "abc123")
+        self.assertFalse(r["ok"])
+        self.assertFalse(r["checks"]["changed_files_in_scope"])
+
+    def test_authoritative_changed_file_protected_path_fails(self):
+        p = make_policy(authoritative_changed_files=(
+            "liangzhipengdamon-maker/AI-Investment-Lab/config.yaml",))
+        r = evaluate_builder_wake(p, "AGE-6",
+                                  "liangzhipengdamon-maker/Agent-Ops",
+                                  "liangzhipengdamon/age-6-age-6-deterministic-scope-action-firewall",
+                                  "f93b1859bb63a2eb342789bf6bca3269b4f2c7de",
+                                  "abc123")
+        self.assertFalse(r["ok"])
+        self.assertFalse(r["checks"]["changed_files_in_scope"])
+
 
 class TestBuilderHandoffFirewall(unittest.TestCase):
     def test_no_policy_fails_closed_no_wake(self):
@@ -249,7 +285,9 @@ class TestBuilderHandoffFirewall(unittest.TestCase):
             r = builder_handoff("AGE-6",
                                 "liangzhipengdamon-maker/Agent-Ops",
                                 "1", "abc123", "BUILDER_FIXING", ["x"],
-                                policy=p)
+                                policy=p,
+                                observed_branch=p.branch,
+                                observed_base=p.base_sha)
             files = os.listdir(td)
         self.assertTrue(r["ok"])
         self.assertFalse(r.get("blocked"))
@@ -271,7 +309,9 @@ class TestLoadScopePolicy(unittest.TestCase):
             prof = os.path.join(td, "agentops.json")
             with open(prof, "w") as f:
                 f.write('{"github": {"repository": "liangzhipengdamon-maker/Agent-Ops",'
-                        ' "canonical_branch": "main"}}')
+                        ' "canonical_branch": "main"},'
+                        ' "scope_firewall": {"authorized_branch": "feature/x",'
+                        ' "baseline_sha": "base1"}}')
             p = _load_scope_policy(
                 "AGE-6", "liangzhipengdamon-maker/Agent-Ops",
                 "feature/x", "base1", "head1", "7", profile_path=prof)
@@ -283,6 +323,31 @@ class TestLoadScopePolicy(unittest.TestCase):
                       p.protected_repositories)
         self.assertFalse(p.allowed_ready_merge_deploy)
         self.assertTrue(p.binding_ok)
+
+    def test_profile_branch_base_not_self_derived(self):
+        # P0-1: expected branch/base come from the profile, NOT from the
+        # observed PR metadata. A drifted PR branch/base fails closed.
+        with tempfile.TemporaryDirectory() as td:
+            prof = os.path.join(td, "agentops.json")
+            with open(prof, "w") as f:
+                f.write('{"github": {"repository": "liangzhipengdamon-maker/Agent-Ops",'
+                        ' "canonical_branch": "main"},'
+                        ' "scope_firewall": {"authorized_branch": "feature/x",'
+                        ' "baseline_sha": "base1"}}')
+            p = _load_scope_policy(
+                "AGE-6", "liangzhipengdamon-maker/Agent-Ops",
+                "feature/y", "base2", "head1", "7", profile_path=prof)
+        self.assertEqual(p.branch, "feature/x")   # profile, not observed
+        self.assertEqual(p.base_sha, "base1")
+        # Drift detected when evaluated with observed branch/base.
+        a = ActionScope(task_id="AGE-6",
+                        repository="liangzhipengdamon-maker/Agent-Ops",
+                        branch="feature/y", base_sha="base2",
+                        target_paths=("x.py",))
+        r = evaluate_scope(p, a)
+        self.assertFalse(r["ok"])
+        self.assertFalse(r["checks"]["branch_exact"])
+        self.assertFalse(r["checks"]["base_sha_exact"])
 
     def test_profile_repo_mismatch_binding_fails_closed(self):
         # P0-1: invocation repo differs from the independent profile's
@@ -385,6 +450,9 @@ class TestDecideFirewallIntegration(unittest.TestCase):
              mock.patch("agentops_runtime.runtime_loop._bridge_dir",
                         return_value=td), \
              self._base_pr(), \
+             mock.patch("agentops_runtime.runtime_loop._pr_changed_files",
+                        return_value=[
+                            "tools/agentops_runtime/scope_firewall.py"]), \
              mock.patch("agentops_runtime.runtime_loop.spec_from_linear",
                         return_value=__import__(
                             "agentops_runtime.task_intake", fromlist=["TaskSpec"]

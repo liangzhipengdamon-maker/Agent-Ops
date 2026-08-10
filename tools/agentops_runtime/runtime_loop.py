@@ -13,6 +13,7 @@ condition), and resume from the PO decision. No parallel JSON/PID state
 kernel, no risk classifier.
 """
 
+import dataclasses
 import json
 import os
 import re
@@ -31,18 +32,22 @@ def _bridge_dir() -> str:
     return os.environ.get("AGENT_BRIDGE_DIR", ".agent-bridge")
 
 
-def _load_scope_policy(task_id: str, repo: str, branch: str, base_sha: str,
-                       head_sha: str, pr: str,
+def _load_scope_policy(task_id: str, repo: str, observed_branch: str,
+                       observed_base: str, head_sha: str, pr: str,
                        profile_path: Optional[str] = None) -> "ScopePolicy":
     """Build the immutable scope policy for one episode from an INDEPENDENT,
     authoritative project profile + the explicit invocation context. The
     policy is NEVER derived from runtime state, review verdicts, Builder
     findings, or prompt text.
 
-    P0-1: the invocation `repo` must exactly equal the profile's canonical
-    repository (project identity). A wrong local repository/origin therefore
-    cannot self-bind a policy. If no profile or the profile's canonical repo
-    does not match, this returns a policy with `binding_ok=False` so the
+    P0-1: expected branch and baseline come from the profile's
+    `canonical_branch` and `baseline_sha` (authoritative project/task scope),
+    NOT from the PR's own headRefName/baseRefOid. The PR-observed branch and
+    base are only compared against these expected values for drift detection,
+    so a PR cannot self-certify its own branch/base.
+
+    The invocation `repo` must exactly equal the profile's canonical
+    repository (project identity); otherwise binding_ok=False and the
     firewall fails closed.
 
     Allowed paths default to the explicit controlled directories (NO implicit
@@ -71,33 +76,46 @@ def _load_scope_policy(task_id: str, repo: str, branch: str, base_sha: str,
             prof = {}
 
     github = prof.get("github") or {}
+    fw = prof.get("scope_firewall") or {}
     canonical_repo = github.get("repository") or ""
-    canonical_branch = github.get("canonical_branch") or "main"
+    # Authoritative expected branch + baseline from project/task scope.
+    # Prefer the profile's explicit scope_firewall.authorized_branch /
+    # baseline_sha (the task's declared implementation branch and baseline);
+    # fall back to canonical_branch. Never from the PR's own metadata.
+    expected_branch = (fw.get("authorized_branch")
+                       or github.get("canonical_branch") or "main")
+    expected_base = fw.get("baseline_sha") or ""
     binding_ok = bool(canonical_repo) and canonical_repo == repo
     protected = tuple((prof.get("protected_repositories")
                        or ["liangzhipengdamon-maker/LearnMind-English",
                            "liangzhipengdamon-maker/AI-Investment-Lab"]))
+    auth_changed = tuple(prof.get("authoritative_changed_files") or ())
+    allowed_ops = tuple(fw.get("authorized_operations")
+                        or prof.get("allowed_operations")
+                        or ["fix", "continue", "complete"])
 
     return ScopePolicy(
         task_id=task_id,
         repository=repo,
-        branch=branch or canonical_branch,
-        base_sha=base_sha,
+        branch=expected_branch,
+        base_sha=expected_base,
         head_sha=head_sha,
         allowed_paths=tuple(prof.get("allowed_paths")
                             or ["tools/agentops_runtime/",
                                 "scripts/", "profiles/", "docs/", "tests/"]),
-        allowed_operations=tuple(prof.get("allowed_operations")
-                                 or ["fix", "continue", "complete"]),
+        allowed_operations=allowed_ops,
         protected_repositories=protected,
         allowed_ready_merge_deploy=bool(prof.get("allowed_ready_merge_deploy")),
         binding_ok=binding_ok,
+        authoritative_changed_files=auth_changed,
     )
 
 
 def builder_handoff(task_id: str, repo: str, pr: str, head: str,
                     phase: str, findings: list,
-                    policy: Optional["ScopePolicy"] = None) -> dict:
+                    policy: Optional["ScopePolicy"] = None,
+                    observed_branch: str = "",
+                    observed_base: str = "") -> dict:
     """Wake the existing Builder execution chain via the `.agent-bridge`
     protocol (status.json + findings.md). This is the established Builder
     handoff (AGENT_RUNNER_PROMPT.md); the runtime does not re-implement a
@@ -144,7 +162,7 @@ def builder_handoff(task_id: str, repo: str, pr: str, head: str,
         operation = "complete"
 
     verdict = evaluate_builder_wake(
-        policy, task_id, repo, policy.branch, policy.base_sha, head,
+        policy, task_id, repo, observed_branch, observed_base, head,
         operation=operation, target_paths=None, worktree=wt)
     if not verdict.get("ok"):
         return {"ok": False, "blocked": True, "state": phase,
@@ -370,17 +388,25 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
     reviews = (pr_json or {}).get("reviews") or []
 
     # AGE-6: bind the deterministic scope policy for this episode. Branch and
-    # base SHA come from the authoritative PR metadata; never from runtime
-    # state / review text / Builder findings.
-    base_sha = (pr_json or {}).get("baseRefOid") or ""
-    branch = (pr_json or {}).get("headRefName") or ""
-    policy = _load_scope_policy(task_id, repo, branch, base_sha, head, pr)
+    # base come from the authoritative project profile (canonical_branch +
+    # baseline_sha), NEVER from runtime state / review text / Builder
+    # findings / the PR's own headRefName/baseRefOid (P0-1: no self-binding).
+    observed_base = (pr_json or {}).get("baseRefOid") or ""
+    observed_branch = (pr_json or {}).get("headRefName") or ""
+    policy = _load_scope_policy(task_id, repo, observed_branch,
+                                observed_base, head, pr)
+    # P0-2: authoritative changed-file set from the real PR diff vs base.
+    auth_changed = _pr_changed_files(repo, int(pr)) or ()
+    policy = dataclasses.replace(
+        policy, authoritative_changed_files=tuple(auth_changed))
 
     if review.decision in ("CHANGES_REQUESTED", "NOT_PASS"):
         outcome["phase"] = "FIX"          # findings -> Builder execution chain
         outcome["builder"] = builder_handoff(
             task_id, repo, pr, head, "BUILDER_FIXING", review.findings,
-            policy=policy)
+            policy=policy,
+                            observed_branch=observed_branch,
+                            observed_base=observed_base)
         _apply_builder_result(outcome)
     elif review.decision == "PASS":
         if spec.mode == "MANUAL":
@@ -404,7 +430,9 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
                         outcome["po_decision"] = "APPROVE"
                         outcome["builder"] = builder_handoff(
                             task_id, repo, pr, head, "CONTINUE", [],
-                            policy=policy)
+                            policy=policy,
+                            observed_branch=observed_branch,
+                            observed_base=observed_base)
                         _apply_builder_result(outcome)
                 elif po in ("REJECT", "CHANGES", "CHANGES_REQUESTED"):
                     outcome["phase"] = "FIX"
@@ -412,7 +440,9 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
                     outcome["builder"] = builder_handoff(
                         task_id, repo, pr, head, "BUILDER_FIXING",
                         [f"PO decision {po} at checkpoint "
-                         f"{spec.checkpoint}"], policy=policy)
+                         f"{spec.checkpoint}"], policy=policy,
+                            observed_branch=observed_branch,
+                            observed_base=observed_base)
                     _apply_builder_result(outcome)
                 else:
                     outcome["phase"] = "WAITING_PO_AUTH"
@@ -422,7 +452,9 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
                 outcome["phase"] = "PASSED"  # checkpoint not reached; continue
                 outcome["builder"] = builder_handoff(
                     task_id, repo, pr, head, "CONTINUE", [],
-                    policy=policy)
+                    policy=policy,
+                            observed_branch=observed_branch,
+                            observed_base=observed_base)
                 _apply_builder_result(outcome)
         else:
             # P0-1: AUTO PASS wakes the Builder to continue in scope; accepted
@@ -433,7 +465,9 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
                 outcome["phase"] = "PASSED"
                 outcome["builder"] = builder_handoff(
                     task_id, repo, pr, head, "CONTINUE", [],
-                    policy=policy)
+                    policy=policy,
+                            observed_branch=observed_branch,
+                            observed_base=observed_base)
                 _apply_builder_result(outcome)
 
     outcome["loopx"] = _loopx_refresh(task_id, outcome["phase"], pr)
@@ -462,6 +496,17 @@ def _pr_json_full(repo: str, pr: int) -> Optional[dict]:
              "baseRefOid,headRefName"],
             capture_output=True, text=True, check=True, timeout=30)
         return _json.loads(res.stdout)
+    except Exception:
+        return None
+
+
+def _pr_changed_files(repo: str, pr: int) -> Optional[list]:
+    """Authoritative changed-file set for a PR (vs its base), via gh."""
+    try:
+        res = subprocess.run(
+            ["gh", "pr", "diff", str(pr), "--repo", repo, "--name-only"],
+            capture_output=True, text=True, check=True, timeout=30)
+        return [ln.strip() for ln in res.stdout.splitlines() if ln.strip()]
     except Exception:
         return None
 
