@@ -737,6 +737,173 @@ class TestCLIEntrypoint(unittest.TestCase):
         self.assertEqual(d["completion"], "COMPLETE")
         self.assertEqual(d["head"], "abc")
 
+    def test_final_result_review_uses_auto_review(self):
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch("agentops_runtime.runtime_loop._bridge_dir",
+                        return_value=td):
+            p = os.path.join(td, "status.txt")
+            with open(p, "w") as f:
+                f.write("REVIEW_REQUEST_ID: x\nREPO: o/r\nPR: 7\nHEAD: h\n"
+                        "REQUEST: status_report\nSTATE: WAITING_REVIEW\n")
+            with mock.patch("agentops_runtime.__main__.relay_client"
+                            ".final_result_auto_review",
+                            return_value={"status_delivered": True,
+                                          "review_sent": True,
+                                          "review": {"verdict": "PASS"}}):
+                rc = cli.main(["final-result-review", "--repo", "o/r",
+                               "--pr", "7", "--head", "h",
+                               "--status-report", p, "--timeout", "10"])
+        self.assertEqual(rc, 0)
+
+
+class TestParseReviewResponse(unittest.TestCase):
+    def _text(self, verdict="PASS", req="AR-1", repo="o/r", pr="7",
+              head="abc", findings=""):
+        lines = [f"AGENTOPS_REVIEW: {verdict}", f"HEAD: {head}",
+                 f"REVIEW_REQUEST_ID: {req}", f"REPO: {repo}", f"PR: {pr}"]
+        if findings:
+            lines.append(findings)
+        return "\n".join(lines)
+
+    def test_pass_parsed(self):
+        r = relay_client.parse_review_response(
+            self._text(), "o/r", "7", "abc", "AR-1")
+        self.assertEqual(r["verdict"], "PASS")
+        self.assertTrue(r["ok"])
+
+    def test_changes_requested_findings_retained(self):
+        r = relay_client.parse_review_response(
+            self._text(verdict="CHANGES_REQUESTED",
+                       findings="- fix P0-1\n- also P0-2"),
+            "o/r", "7", "abc", "AR-1")
+        self.assertEqual(r["verdict"], "CHANGES_REQUESTED")
+        self.assertEqual(r["findings"], ["- fix P0-1", "- also P0-2"])
+
+    def test_not_pass_findings_retained(self):
+        r = relay_client.parse_review_response(
+            self._text(verdict="NOT_PASS", findings="blocked reason"),
+            "o/r", "7", "abc", "AR-1")
+        self.assertEqual(r["verdict"], "NOT_PASS")
+        self.assertEqual(r["findings"], ["blocked reason"])
+
+    def test_head_mismatch_fail_closed(self):
+        r = relay_client.parse_review_response(
+            self._text(head="WRONG"), "o/r", "7", "abc", "AR-1")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["verdict"], "INCOMPLETE")
+
+    def test_req_id_mismatch_fail_closed(self):
+        r = relay_client.parse_review_response(
+            self._text(req="OTHER"), "o/r", "7", "abc", "AR-1")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["verdict"], "INCOMPLETE")
+
+    def test_missing_verdict_fail_closed(self):
+        r = relay_client.parse_review_response(
+            "REVIEW_REQUEST_ID: AR-1\nREPO: o/r\nPR: 7\nHEAD: abc\n",
+            "o/r", "7", "abc", "AR-1")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["verdict"], "INCOMPLETE")
+
+    def test_invalid_verdict_fail_closed(self):
+        r = relay_client.parse_review_response(
+            self._text(verdict="MAYBE"), "o/r", "7", "abc", "AR-1")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["verdict"], "INCOMPLETE")
+
+    def test_duplicate_verdict_fail_closed(self):
+        r = relay_client.parse_review_response(
+            self._text(verdict="PASS") + "\nAGENTOPS_REVIEW: PASS",
+            "o/r", "7", "abc", "AR-1")
+        self.assertFalse(r["ok"])
+
+    def test_duplicate_head_fail_closed(self):
+        r = relay_client.parse_review_response(
+            self._text() + "\nHEAD: abc", "o/r", "7", "abc", "AR-1")
+        self.assertFalse(r["ok"])
+
+
+class TestFinalResultAutoReview(unittest.TestCase):
+    STATUS_WAITING = ("REVIEW_REQUEST_ID: s1\nREPO: o/r\nPR: 7\nHEAD: h\n"
+                      "REQUEST: status_report\nSTATE: WAITING_REVIEW\n")
+    STATUS_WAITING_PO = ("REVIEW_REQUEST_ID: s1\nREPO: o/r\nPR: 7\nHEAD: h\n"
+                         "REQUEST: status_report\nSTATE: WAITING_PO_AUTH\n")
+
+    def test_waiting_review_ack_success_review_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch("agentops_runtime.relay_client.send_status_report",
+                            return_value={"delivered": True,
+                                          "detail": "ack"}), \
+                 mock.patch("agentops_runtime.relay_client"
+                            ".send_independent_review",
+                            return_value={"sent": True,
+                                          "review_request_id": "AR-1",
+                                          "raw_response":
+                                              "AGENTOPS_REVIEW: PASS\n"
+                                              "HEAD: h\n"
+                                              "REVIEW_REQUEST_ID: AR-1\n"
+                                              "REPO: o/r\nPR: 7\n"}):
+                r = relay_client.final_result_auto_review(
+                    "o/r", "7", "h", self.STATUS_WAITING, td,
+                    os.path.join(td, "out"))
+        self.assertTrue(r["status_delivered"])
+        self.assertTrue(r["review_sent"])
+        self.assertEqual(r["review"]["verdict"], "PASS")
+
+    def test_ack_failure_no_review(self):
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch("agentops_runtime.relay_client.send_status_report",
+                            return_value={"delivered": False,
+                                          "detail": "no ack"}), \
+                 mock.patch("agentops_runtime.relay_client"
+                            ".send_independent_review") as m:
+                r = relay_client.final_result_auto_review(
+                    "o/r", "7", "h", self.STATUS_WAITING, td,
+                    os.path.join(td, "out"))
+        self.assertFalse(r["status_delivered"])
+        self.assertFalse(r["review_sent"])
+        m.assert_not_called()
+
+    def test_waiting_po_ack_success_no_review(self):
+        # WAITING_PO_AUTH even delivered=true must NOT trigger a review.
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch("agentops_runtime.relay_client.send_status_report",
+                            return_value={"delivered": True,
+                                          "detail": "ack"}), \
+                 mock.patch("agentops_runtime.relay_client"
+                            ".send_independent_review") as m:
+                r = relay_client.final_result_auto_review(
+                    "o/r", "7", "h", self.STATUS_WAITING_PO, td,
+                    os.path.join(td, "out"))
+        self.assertTrue(r["status_delivered"])
+        self.assertFalse(r["review_sent"])
+        m.assert_not_called()
+
+    def test_duplicate_invocation_no_duplicate_review(self):
+        with tempfile.TemporaryDirectory() as td:
+            calls = []
+            def _fake_send(*a, **k):
+                calls.append(a)
+                return {"sent": True, "review_request_id": "AR-1",
+                        "raw_response": "AGENTOPS_REVIEW: PASS\nHEAD: h\n"
+                                        "REVIEW_REQUEST_ID: AR-1\n"
+                                        "REPO: o/r\nPR: 7\n"}
+            with mock.patch("agentops_runtime.relay_client.send_status_report",
+                            return_value={"delivered": True,
+                                          "detail": "ack"}), \
+                 mock.patch("agentops_runtime.relay_client"
+                            ".send_independent_review", side_effect=_fake_send):
+                first = relay_client.final_result_auto_review(
+                    "o/r", "7", "h", self.STATUS_WAITING, td,
+                    os.path.join(td, "out"))
+                second = relay_client.final_result_auto_review(
+                    "o/r", "7", "h", self.STATUS_WAITING, td,
+                    os.path.join(td, "out"))
+        self.assertTrue(first["review_sent"])
+        self.assertTrue(second["deduped"])
+        self.assertFalse(second["review_sent"])
+        self.assertEqual(len(calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

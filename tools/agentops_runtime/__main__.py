@@ -11,6 +11,11 @@ Commands:
              closure or accepted completion.
   report     --task-id T --repo R --pr N --status-report S
              Send a status_report via the existing Neutral Relay (thin glue).
+  final-result-review --repo R --pr N --head H --status-report S [--timeout T]
+             Final Result Auto-Review: send status_report; ONLY if
+             delivered=true AND STATE=WAITING_REVIEW, auto-send
+             REQUEST: independent_review via the existing Neutral Relay and
+             parse the verdict. WAITING_PO_AUTH never triggers review.
   po-decision --repo R --pr N --head H --decision APPROVE|REJECT|CHANGES
              Write a PO decision to the bridge so a WAITING_PO_AUTH loop
              resumes at the named MANUAL checkpoint (P0-2).
@@ -77,6 +82,23 @@ def cmd_watch(args):
     return 0 if ok else 1
 
 
+def cmd_final_result_review(args):
+    """Final Result Auto-Review: send status_report; ONLY if delivered=true
+    AND STATE=WAITING_REVIEW, auto-send REQUEST: independent_review via the
+    existing Neutral Relay and parse the captured verdict. WAITING_PO_AUTH
+    never triggers a review; deduped per PR+HEAD."""
+    import os
+    from .runtime_loop import _bridge_dir
+    with open(args.status_report) as f:
+        payload = f.read()
+    out = relay_client.final_result_auto_review(
+        args.repo, args.pr, args.head, payload,
+        _bridge_dir(), "/tmp/agentops_runtime_report",
+        timeout=args.timeout)
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    return 0
+
+
 def cmd_report(args):
     # Thin glue to the existing Neutral Relay (transport only).
     with open(args.status_report) as f:
@@ -112,6 +134,13 @@ def main(argv=None):
     p.add_argument("--pr", required=True)
     p.add_argument("--status-report", required=True)
 
+    p = sub.add_parser("final-result-review")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--pr", required=True)
+    p.add_argument("--head", required=True)
+    p.add_argument("--status-report", required=True)
+    p.add_argument("--timeout", type=int, default=400)
+
     p = sub.add_parser("po-decision")
     p.add_argument("--repo", required=True)
     p.add_argument("--pr", required=True)
@@ -132,6 +161,8 @@ def main(argv=None):
         return cmd_watch(args)
     if args.command == "report":
         return cmd_report(args)
+    if args.command == "final-result-review":
+        return cmd_final_result_review(args)
     if args.command == "po-decision":
         return cmd_po_decision(args)
     if args.command == "complete":
