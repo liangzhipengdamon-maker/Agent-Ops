@@ -52,6 +52,17 @@ class TestGovernLoopSetup(unittest.TestCase):
         self.assertIn(".governloop", setup_wizard.DEFAULT_CONFIG_PATH)
         self.assertIn(".governloop", setup_wizard.DEFAULT_BROWSER_PROFILE)
         self.assertNotIn(".agentops", setup_wizard.DEFAULT_CONFIG_PATH)
+        self.assertNotIn(".agentops", setup_wizard.DEFAULT_BROWSER_PROFILE)
+
+    def test_prepare_config_uses_governloop_runtime_identity(self):
+        config = setup_wizard.prepare_config(
+            {}, "owner/repo", "https://chatgpt.com/c/87654321-abcd",
+            9233, setup_wizard.DEFAULT_BROWSER_PROFILE)
+        self.assertEqual(config["runtime"]["name"], "GovernLoop")
+        self.assertEqual(config["runtime"]["runtime_marker"],
+                         "governloop-runtime-v1")
+        self.assertIn(".governloop", config["runtime"]["browser_profile"])
+        self.assertFalse(setup_wizard.generated_config_contains_secret_fields(config))
 
     def test_public_render_uses_governloop_brand(self):
         values = {
