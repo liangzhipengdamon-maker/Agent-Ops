@@ -1,6 +1,6 @@
 """Pre-v0.1 compatibility bridge for the GovernLoop rename.
 
-Public configuration is GOV​ERNLOOP_* / ~/.governloop.  The already-tested
+Public configuration is GOVERNLOOP_* / ~/.governloop. The already-tested
 pre-release implementation still reads a few AGENTOPS_* symbols internally;
 this module maps the canonical names into that implementation at process
 startup without allowing review/runtime state to create new authority.
@@ -21,19 +21,32 @@ ENV_ALIASES = {
 }
 
 GOVERNLOOP_HOME = os.path.expanduser("~/.governloop")
-RELAY_BIN = os.path.join(GOVERNLOOP_HOME, "relay", "neutral_relay.py")
 CONFIG_FILE = os.path.join(GOVERNLOOP_HOME, "relay", "config.json")
 BROWSER_PROFILE = os.path.join(GOVERNLOOP_HOME, "chrome-profile")
 RUNTIME_NAME = "GovernLoop"
 RUNTIME_MARKER = "governloop-runtime-v1"
 
+_TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SOURCE_RELAY_BIN = os.path.join(_TOOLS_DIR, "neutral-relay", "neutral_relay.py")
+_FALLBACK_RELAY_BIN = os.path.join(GOVERNLOOP_HOME, "relay", "neutral_relay.py")
+
+
+def relay_bin() -> str:
+    """Resolve the relay binary for the current repository-first release."""
+    explicit = os.environ.get("GOVERNLOOP_RELAY_BIN", "").strip()
+    if explicit:
+        return os.path.abspath(os.path.expanduser(explicit))
+    if os.path.isfile(_SOURCE_RELAY_BIN):
+        return _SOURCE_RELAY_BIN
+    return _FALLBACK_RELAY_BIN
+
 
 def apply_env_aliases() -> None:
     """Map canonical GovernLoop authority env into the tested legacy reader.
 
-    Canonical values win.  Legacy values are accepted only as a migration
+    Canonical values win. Legacy values are accepted only as a migration
     convenience and are mirrored back to the canonical name so child code has
-    one visible effective value.  No defaults grant authority.
+    one visible effective value. No defaults grant authority.
     """
     for canonical, legacy in ENV_ALIASES.items():
         canonical_value = os.environ.get(canonical, "").strip()
@@ -48,7 +61,7 @@ def configure_legacy_relay() -> None:
     """Point the proven pre-release relay client at GovernLoop local state."""
     from agentops_runtime import relay_client
 
-    relay_client.RELAY_BIN = RELAY_BIN
+    relay_client.RELAY_BIN = relay_bin()
     relay_client.CONFIG_FILE = CONFIG_FILE
 
 
