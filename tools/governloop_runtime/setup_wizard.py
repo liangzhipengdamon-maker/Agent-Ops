@@ -1,12 +1,12 @@
 """GovernLoop first-run reviewer binding setup.
 
 The hardened setup implementation was developed before the public GovernLoop
-name was frozen.  This canonical wrapper supplies GovernLoop paths/branding
+name was frozen. This canonical wrapper supplies GovernLoop paths/branding
 while preserving the already-reviewed validation and localhost-only server.
 """
 
+import json
 import os
-import threading
 import webbrowser
 
 from agentops_runtime import setup_wizard as _legacy
@@ -25,9 +25,6 @@ conversation_id_from_url = _legacy.conversation_id_from_url
 normalize_cdp_port = _legacy.normalize_cdp_port
 normalize_profile_path = _legacy.normalize_profile_path
 normalize_config_path = _legacy.normalize_config_path
-load_config = _legacy.load_config
-prepare_config = _legacy.prepare_config
-atomic_write_config = _legacy.atomic_write_config
 evaluate_targets = _legacy.evaluate_targets
 test_connection = _legacy.test_connection
 generated_config_contains_secret_fields = _legacy.generated_config_contains_secret_fields
@@ -42,6 +39,30 @@ def _render_page(values, csrf_token, config_path, status="", error=""):
                 .replace(".agentops", ".governloop"))
 
 
+def _configure_legacy_module():
+    _legacy.DEFAULT_CONFIG_PATH = DEFAULT_CONFIG_PATH
+    _legacy.DEFAULT_BROWSER_PROFILE = DEFAULT_BROWSER_PROFILE
+    _legacy.RUNTIME_NAME = RUNTIME_NAME
+    _legacy.RUNTIME_MARKER = RUNTIME_MARKER
+    _legacy.ensure_runtime_marker = ensure_runtime_marker
+    _legacy._render_page = _render_page
+
+
+def load_config(config_path=DEFAULT_CONFIG_PATH):
+    return _legacy.load_config(config_path)
+
+
+def prepare_config(existing, repository, conversation_url, cdp_port,
+                   browser_profile=DEFAULT_BROWSER_PROFILE):
+    _configure_legacy_module()
+    return _legacy.prepare_config(existing, repository, conversation_url,
+                                  cdp_port, browser_profile)
+
+
+def atomic_write_config(config, config_path=DEFAULT_CONFIG_PATH):
+    return _legacy.atomic_write_config(config, config_path)
+
+
 def ensure_runtime_marker(browser_profile, marker=RUNTIME_MARKER):
     """Write the canonical marker plus one pre-release compatibility marker."""
     profile = normalize_profile_path(browser_profile)
@@ -51,20 +72,11 @@ def ensure_runtime_marker(browser_profile, marker=RUNTIME_MARKER):
     os.makedirs(profile, mode=0o700, exist_ok=True)
     canonical = _legacy._atomic_write_text(
         os.path.join(profile, "GOVERNLOOP_MARKER"), marker_value + "\n")
-    # Neutral Relay v0.1 still understands the pre-release marker filename.
-    # Keep this migration file local-only; public configuration is GovernLoop.
+    # Neutral Relay v0.1 retains the old marker filename as a wire/runtime
+    # compatibility detail. Both files carry the same GovernLoop marker value.
     _legacy._atomic_write_text(
         os.path.join(profile, "AGENTOPS_MARKER"), marker_value + "\n")
     return canonical
-
-
-def _configure_legacy_module():
-    _legacy.DEFAULT_CONFIG_PATH = DEFAULT_CONFIG_PATH
-    _legacy.DEFAULT_BROWSER_PROFILE = DEFAULT_BROWSER_PROFILE
-    _legacy.RUNTIME_NAME = RUNTIME_NAME
-    _legacy.RUNTIME_MARKER = RUNTIME_MARKER
-    _legacy.ensure_runtime_marker = ensure_runtime_marker
-    _legacy._render_page = _render_page
 
 
 def save_binding(config_path, repository, conversation_url, cdp_port,
