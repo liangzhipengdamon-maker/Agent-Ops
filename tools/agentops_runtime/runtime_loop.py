@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
-"""Thin AUTO/MANUAL runtime adapter (AGE-30).
+"""Thin AUTO/MANUAL runtime adapter.
 
-Deletion-first: this is ONLY the decision glue. Durable state belongs to
-LoopX (refresh-state); GPT Web transport belongs to the existing Neutral
-Relay; GitHub/Linear reads are thin adapters; Builder handoff uses the
-existing `.agent-bridge` wake files.
-
-AUTO: review fail -> findings handed to the Builder execution chain
-(`.agent-bridge` wake) -> new code HEAD -> review again. PASS -> continue
-until acceptance. MANUAL: pause only at the named checkpoint (an evaluated
-condition), and resume from the PO decision. No parallel JSON/PID state
-kernel, no risk classifier.
+AGE-44 invariant: there is exactly one executable positive authority channel.
+Direct imports of this legacy compatibility module verify the same external
+operator-signed bundle as the canonical GovernLoop CLI. Raw AGENTOPS_* /
+GOVERNLOOP_* values may be parsed by compatibility helpers, but can never
+become executable authority without independent external verification.
 """
 
 import dataclasses
@@ -18,54 +13,57 @@ import json
 import os
 import re
 import subprocess
-import time
 from typing import Optional
 
-from . import linear_adapter
-from . import review_intake
+from . import linear_adapter, review_intake, relay_client
 from .task_intake import spec_from_linear, evaluate_checkpoint
 from .review_intake import read_github_pr, read_pr_head
-from . import relay_client
 
 
 def _bridge_dir() -> str:
     return os.environ.get("AGENT_BRIDGE_DIR", ".agent-bridge")
 
 
+def _verified_scope_policy(task_id: str, repo: str, head_sha: str) -> "ScopePolicy":
+    from .scope_firewall import ScopePolicy
+    try:
+        from governloop_runtime.authority import verify_authority
+        verified = verify_authority(task_id, expected_repo=repo)
+    except Exception as exc:
+        verified = {"ok": False, "detail": f"authority verifier unavailable: {exc}"}
+    payload = verified.get("payload") or {} if verified.get("ok") else {}
+    protected = tuple(r.strip() for r in
+        os.environ.get("AGENTOPS_PROTECTED_REPOSITORIES", "").split(",") if r.strip())
+    if not protected:
+        protected = ("liangzhipengdamon-maker/LearnMind-English",
+                     "liangzhipengdamon-maker/AI-Investment-Lab")
+    return ScopePolicy(
+        task_id=task_id,
+        repository=repo,
+        branch=str(payload.get("branch") or ""),
+        base_sha=str(payload.get("baseline_sha") or ""),
+        head_sha=head_sha,
+        allowed_paths=tuple(payload.get("allowed_paths") or ()),
+        allowed_operations=tuple(payload.get("allowed_operations") or ()),
+        protected_repositories=protected,
+        allowed_ready_merge_deploy=False,
+        binding_ok=bool(
+            verified.get("ok")
+            and payload.get("repository") == repo
+            and payload.get("branch")
+            and payload.get("baseline_sha")
+            and payload.get("allowed_paths")
+            and payload.get("allowed_operations")),
+        authoritative_changed_files=(),
+    )
+
+
 def _load_scope_policy(task_id: str, repo: str, observed_branch: str,
                        observed_base: str, head_sha: str, pr: str,
                        profile_path: Optional[str] = None) -> "ScopePolicy":
-    """Build the immutable scope policy for one episode from an INDEPENDENT,
-    authoritative project profile + the explicit invocation context. The
-    policy is NEVER derived from runtime state, review verdicts, Builder
-    findings, or prompt text.
-
-    P0-1: expected branch and baseline come from the profile's
-    `canonical_branch` and `baseline_sha` (authoritative project/task scope),
-    NOT from the PR's own headRefName/baseRefOid. The PR-observed branch and
-    base are only compared against these expected values for drift detection,
-    so a PR cannot self-certify its own branch/base.
-
-    The invocation `repo` must exactly equal the profile's canonical
-    repository (project identity); otherwise binding_ok=False and the
-    firewall fails closed.
-
-    Allowed paths default to the explicit controlled directories (NO implicit
-    '.'); operations default to fix/continue/complete. Ready/Merge/Deploy are
-    excluded unless a profile explicitly authorizes them.
-    """
+    """Parse the pre-v0.1 structural scope shape without granting authority."""
     from .scope_firewall import ScopePolicy
-
-    if profile_path is None:
-        # Resolve the authoritative project profile from the repo root.
-        import pathlib
-        here = pathlib.Path(__file__).resolve().parent
-        for base in (pathlib.Path.cwd(), here, here.parent, here.parent.parent,
-                     here.parent.parent.parent):
-            cand = base / "profiles" / "agentops.json"
-            if cand.exists():
-                profile_path = str(cand)
-                break
+    del observed_branch, observed_base, pr
 
     prof = {}
     if profile_path and os.path.exists(profile_path):
@@ -75,43 +73,28 @@ def _load_scope_policy(task_id: str, repo: str, observed_branch: str,
         except (OSError, json.JSONDecodeError):
             prof = {}
 
-    # R5/R7-P0-1: ALL authorization-bearing fields come from ONE immutable,
-    # out-of-episode env source. NO mutable-worktree fallback for any
-    # authorization field, including repository identity. The profile is used
-    # only for non-authorization identity (project name) and is never an
-    # authority source.
     canonical_repo = os.environ.get("AGENTOPS_SCOPE_REPOSITORY", "").strip()
     expected_branch = os.environ.get("AGENTOPS_AUTHORIZED_BRANCH", "").strip()
     expected_base = os.environ.get("AGENTOPS_BASELINE_SHA", "").strip()
-    env_ops = [o.strip() for o in
-               os.environ.get("AGENTOPS_AUTHORIZED_OPERATIONS", "").split(",")
-               if o.strip()]
-    allowed_ops = tuple(env_ops)
-    env_paths = [p.strip() for p in
-                 os.environ.get("AGENTOPS_ALLOWED_PATHS", "").split(",")
-                 if p.strip()]
-    allowed_paths = tuple(env_paths)
-    # Deny-side defaults only (cannot broaden scope): protected repositories
-    # default to the protected repos; ready/merge/deploy default denied.
-    env_protected = [r.strip() for r in
-                     os.environ.get("AGENTOPS_PROTECTED_REPOSITORIES",
-                                    "").split(",") if r.strip()]
-    protected = tuple(env_protected
-                      or ["liangzhipengdamon-maker/LearnMind-English",
-                          "liangzhipengdamon-maker/AI-Investment-Lab"])
-    allow_rmd = os.environ.get("AGENTOPS_ALLOW_READY_MERGE_DEPLOY",
-                               "").strip().lower() in ("1", "true", "yes")
+    allowed_ops = tuple(
+        o.strip() for o in os.environ.get(
+            "AGENTOPS_AUTHORIZED_OPERATIONS", "").split(",") if o.strip())
+    allowed_paths = tuple(
+        p.strip() for p in os.environ.get(
+            "AGENTOPS_ALLOWED_PATHS", "").split(",") if p.strip())
+    protected = tuple(
+        r.strip() for r in os.environ.get(
+            "AGENTOPS_PROTECTED_REPOSITORIES", "").split(",") if r.strip())
+    if not protected:
+        protected = ("liangzhipengdamon-maker/LearnMind-English",
+                     "liangzhipengdamon-maker/AI-Investment-Lab")
 
-    # R6/R7: repository, branch, baseline, allowed-paths, and allowed-
-    # operations are authorization-bearing and MUST be explicitly scoped via
-    # env (no mutable-worktree fallback). Missing/empty -> binding_ok=False ->
-    # firewall BLOCKs with no Builder wake. Only deny-side defaults (protected
-    # repos) are allowed.
-    binding_ok = bool(canonical_repo) and canonical_repo == repo
-    if not (expected_branch and expected_base and allowed_paths and allowed_ops
-            and canonical_repo):
-        binding_ok = False  # authorization not fully explicitly scoped
-    auth_changed = tuple(prof.get("authoritative_changed_files") or ())
+    lifecycle = {"ready", "merge", "close", "tag", "release", "deploy"}
+    contains_lifecycle = any(op.lower() in lifecycle for op in allowed_ops)
+    binding_ok = bool(
+        canonical_repo and canonical_repo == repo
+        and expected_branch and expected_base and allowed_paths and allowed_ops
+        and not contains_lifecycle)
 
     return ScopePolicy(
         task_id=task_id,
@@ -122,9 +105,10 @@ def _load_scope_policy(task_id: str, repo: str, observed_branch: str,
         allowed_paths=allowed_paths,
         allowed_operations=allowed_ops,
         protected_repositories=protected,
-        allowed_ready_merge_deploy=allow_rmd,
+        allowed_ready_merge_deploy=False,
         binding_ok=binding_ok,
-        authoritative_changed_files=auth_changed,
+        authoritative_changed_files=tuple(
+            prof.get("authoritative_changed_files") or ()),
     )
 
 
@@ -133,80 +117,51 @@ def builder_handoff(task_id: str, repo: str, pr: str, head: str,
                     policy: Optional["ScopePolicy"] = None,
                     observed_branch: str = "",
                     observed_base: str = "") -> dict:
-    """Wake the existing Builder execution chain via the `.agent-bridge`
-    protocol (status.json + findings.md). This is the established Builder
-    handoff (AGENT_RUNNER_PROMPT.md); the runtime does not re-implement a
-    Builder, it hands findings to the existing one.
-
-    AGE-6: this is the MANDATORY scope/action firewall gate. A Builder wake
-    is executable ONLY when the bound ScopePolicy passes for this exact
-    repo/branch/base/head/operation. On failure NO status.json/findings.md
-    is written (no executable wake) and the outcome is {ok: False,
-    blocked: True, reason}. Fail-closed: any I/O error also returns
-    ok=False."""
     from .scope_firewall import evaluate_builder_wake, WorktreeState
-
     bd = _bridge_dir()
     if policy is None:
-        # No policy bound -> fail closed (never an implicit green light).
+        return {"ok": False, "blocked": True, "state": phase,
+                "bridge": bd, "reason": "no scope policy bound for Builder wake"}
+
+    verified_policy = _verified_scope_policy(task_id, repo, head)
+    if not verified_policy.binding_ok:
         return {"ok": False, "blocked": True, "state": phase,
                 "bridge": bd,
-                "reason": "no scope policy bound for Builder wake"}
+                "reason": "external signed operator authority unavailable or invalid"}
+    verified_policy = dataclasses.replace(
+        verified_policy,
+        changed_files_unreadable=getattr(policy, "changed_files_unreadable", False),
+        authoritative_changed_files=getattr(policy, "authoritative_changed_files", ()),
+    )
+    policy = verified_policy
 
-    # P0-1 (local origin): bind the policy to the actual local git origin.
     origin_repo = _git_origin()
     if origin_repo:
         policy = dataclasses.replace(policy, origin_repo=origin_repo)
     else:
-        # Origin unverifiable -> fail closed (never skip origin binding).
         return {"ok": False, "blocked": True, "state": phase,
-                "bridge": bd,
-                "reason": "local git origin unverifiable; fail closed"}
-
-    # P0-2: if the authoritative changed-file retrieval failed, mark the
-    # policy so the firewall blocks (never treat as zero changes).
+                "bridge": bd, "reason": "local git origin unverifiable; fail closed"}
     if getattr(policy, "changed_files_unreadable", False):
         return {"ok": False, "blocked": True, "state": phase,
                 "bridge": bd, "checks": {"changed_files_readable": False},
-                "reason": ("authoritative PR changed-file set could not be "
-                           "read; fail closed, no Builder wake")}
+                "reason": "authoritative PR changed-file set could not be read"}
 
-    # Clean-worktree contamination: observe current branch + uncommitted
-    # changes (all changed paths must be inside the policy's allowed paths).
-    # P0-3: an unverifiable local worktree (exception) must BLOCK, never skip.
-    wt = None
     try:
         cb = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
                             capture_output=True, text=True, timeout=15)
-        if cb.returncode != 0:
-            return {"ok": False, "blocked": True, "state": phase,
-                    "bridge": bd,
-                    "reason": "git rev-parse HEAD unverifiable; fail closed"}
-        cur_branch = cb.stdout.strip()
         st = subprocess.run(["git", "status", "--porcelain"],
                             capture_output=True, text=True, timeout=15)
-        if st.returncode != 0:
-            return {"ok": False, "blocked": True, "state": phase,
-                    "bridge": bd,
-                    "reason": "git status unverifiable; fail closed"}
-        changed = []
-        for line in (st.stdout or "").splitlines():
-            if len(line) > 3:
-                changed.append(line[3:].strip())
-        wt = WorktreeState(current_branch=cur_branch,
-                           has_uncommitted_changes=bool(st.stdout.strip()),
-                           changed_paths=tuple(changed))
+        if cb.returncode != 0 or st.returncode != 0:
+            raise OSError("git state unreadable")
+        changed = [line[3:].strip() for line in (st.stdout or "").splitlines()
+                   if len(line) > 3]
+        wt = WorktreeState(cb.stdout.strip(), bool(st.stdout.strip()), tuple(changed))
     except Exception:
         return {"ok": False, "blocked": True, "state": phase,
-                "bridge": bd,
-                "reason": "local git/worktree state unverifiable; fail closed"}
+                "bridge": bd, "reason": "local git/worktree state unverifiable; fail closed"}
 
-    operation = "fix"
-    if phase == "CONTINUE":
-        operation = "continue"
-    elif phase == "COMPLETE":
-        operation = "complete"
-
+    operation = "continue" if phase == "CONTINUE" else (
+        "complete" if phase == "COMPLETE" else "fix")
     verdict = evaluate_builder_wake(
         policy, task_id, repo, observed_branch, observed_base, head,
         operation=operation, target_paths=None, worktree=wt)
@@ -214,32 +169,20 @@ def builder_handoff(task_id: str, repo: str, pr: str, head: str,
         return {"ok": False, "blocked": True, "state": phase,
                 "bridge": bd, "checks": verdict.get("checks"),
                 "reason": verdict.get("reason")}
-
     try:
         os.makedirs(bd, exist_ok=True)
-        status = {
-            "protocol_version": "1",
-            "state": phase,
-            "repo": repo,
-            "pr": str(pr),
-            "head": head,
-            "request": "review",
-        }
         with open(os.path.join(bd, "status.json"), "w") as f:
-            json.dump(status, f, indent=2)
+            json.dump({"protocol_version": "1", "state": phase, "repo": repo,
+                       "pr": str(pr), "head": head, "request": "review"}, f, indent=2)
         with open(os.path.join(bd, "findings.md"), "w") as f:
             f.write("\n\n---\n\n".join(findings) if findings else "")
         return {"ok": True, "state": phase, "bridge": bd,
                 "checks": verdict.get("checks")}
-    except OSError as e:
-        return {"ok": False, "state": phase, "bridge": bd,
-                "detail": str(e)}
+    except OSError as exc:
+        return {"ok": False, "state": phase, "bridge": bd, "detail": str(exc)}
 
 
 def _loopx_refresh(task_id: str, phase: str, pr: str) -> dict:
-    """Durable operational state via LoopX (refresh-state). Returns
-    {ok, detail} so failures are observable (P1-1): a failed LoopX refresh is
-    surfaced as degraded, never silently swallowed."""
     try:
         res = subprocess.run(
             ["loopx-canary", "refresh-state", "--goal-id", task_id,
@@ -250,45 +193,28 @@ def _loopx_refresh(task_id: str, phase: str, pr: str) -> dict:
             return {"ok": True, "detail": "refresh-state ok"}
         return {"ok": False,
                 "detail": (res.stderr or res.stdout or "").strip()[-200:]}
-    except Exception as e:
-        return {"ok": False, "detail": f"loopx unavailable: {e}"}
+    except Exception as exc:
+        return {"ok": False, "detail": f"loopx unavailable: {exc}"}
 
 
 def _gate_status_report(task_id: str, repo: str, pr: str, head: str) -> dict:
-    """Auto-send ONE Gate status_report via the existing Neutral Relay when
-    the loop enters WAITING_PO_AUTH (MANUAL checkpoint reached). Fail-closed:
-    `delivered` is true only when the exact 5-line ACK envelope binds the
-    same REVIEW_REQUEST_ID/REPO/PR/HEAD. Uses the existing relay_client;
-    never a manual copy/paste bypass.
-
-    R8-1 retry semantics:
-    - dedupe ONLY after a confirmed delivery (delivered=true) for this exact
-      PR+HEAD (bridge `gate_report.json` marker);
-    - delivered=false does NOT dedupe: the next watcher cycle must retry, and
-      the marker is overwritten with the latest attempt so retry never
-      suppresses resend.
-    """
     marker = os.path.join(_bridge_dir(), "gate_report.json")
     try:
         with open(marker) as f:
-            d = json.load(f)
-        if (d.get("repo") == repo and str(d.get("pr")) == str(pr)
-                and d.get("head") == head and d.get("sent")
-                and d.get("delivered")):
+            data = json.load(f)
+        if (data.get("repo") == repo and str(data.get("pr")) == str(pr)
+                and data.get("head") == head and data.get("sent")
+                and data.get("delivered")):
             return {"sent": True, "delivered": True, "duplicate": True,
-                    "correlation_id": d.get("correlation_id")}
+                    "correlation_id": data.get("correlation_id")}
     except (OSError, json.JSONDecodeError):
         pass
     import uuid
     req_id = f"GATE_{uuid.uuid4().hex[:12]}"
-    payload = (f"REVIEW_REQUEST_ID: {req_id}\n"
-               f"REPO: {repo}\n"
-               f"PR: {pr}\n"
-               f"HEAD: {head}\n"
-               f"REQUEST: status_report\n"
-               f"STATE: WAITING_PO_AUTH\n"
-               f"SUMMARY: MANUAL checkpoint reached; waiting for PO decision\n"
-               f"UNAUTHORIZED_ACTIONS: NONE\n")
+    payload = (f"REVIEW_REQUEST_ID: {req_id}\nREPO: {repo}\nPR: {pr}\nHEAD: {head}\n"
+               "REQUEST: status_report\nSTATE: WAITING_PO_AUTH\n"
+               "SUMMARY: MANUAL checkpoint reached; waiting for PO decision\n"
+               "UNAUTHORIZED_ACTIONS: NONE\n")
     out = relay_client.send_status_report(payload, "/tmp/agentops_runtime_report")
     delivered = out.get("delivered", False)
     try:
@@ -299,96 +225,54 @@ def _gate_status_report(task_id: str, repo: str, pr: str, head: str) -> dict:
                        "correlation_id": out.get("correlation_id")}, f)
     except OSError:
         pass
-    return {"sent": True, "delivered": delivered,
-            "duplicate": False,
+    return {"sent": True, "delivered": delivered, "duplicate": False,
             "correlation_id": out.get("correlation_id")}
 
 
 def _po_decision(task_id: str, repo: str, pr: str, head: str,
                  reviews: list) -> Optional[str]:
-    """PO decision intake at a MANUAL checkpoint. The decision is a formal
-    review at the exact current HEAD from a TRUSTED author carrying
-    `PO_DECISION: <APPROVE|REJECT|CHANGES>` or a `po_decision.json` bridge
-    file. Returns None when no decision for this exact PR+HEAD exists (loop
-    stays in WAITING_PO_AUTH). R6-P0-1: untrusted author -> ignored."""
-    for r in reviews or []:
-        body = r.get("body") or ""
+    del task_id, repo, pr
+    trusted = review_intake.trusted_reviewers()
+    for review in reviews or []:
+        body = review.get("body") or ""
         if "PO_DECISION:" not in body:
             continue
-        login = ((r.get("author") or {}).get("login") or "").strip()
-        trusted = login and login in review_intake.trusted_reviewers()
-        if not trusted:
-            continue  # untrusted identity cannot inject a PO decision
-        m = re.search(r"HEAD:\s*(\S+)", body)
-        binds = (m and m.group(1).strip().lower() == head.lower())
-        commit = (r.get("commit_id") or "").lower()
+        login = ((review.get("author") or {}).get("login") or "").strip()
+        if login not in trusted:
+            continue
+        match = re.search(r"HEAD:\s*(\S+)", body)
+        binds = bool(match and match.group(1).strip().lower() == head.lower())
+        commit = (review.get("commit_id") or "").lower()
         if not commit:
-            commit = ((r.get("commit") or {}).get("oid") or "").lower()
-        binds = binds or (commit and commit == head.lower())
+            commit = ((review.get("commit") or {}).get("oid") or "").lower()
+        binds = binds or bool(commit and commit == head.lower())
         if not binds:
             continue
-        m = re.search(r"PO_DECISION:\s*(\w+)", body)
-        if m:
-            return m.group(1).upper()
-    pj = os.path.join(_bridge_dir(), "po_decision.json")
-    try:
-        with open(pj) as f:
-            d = json.load(f)
-        if (d.get("repo") == repo and str(d.get("pr")) == str(pr)
-                and d.get("head") == head):
-            return str(d.get("decision", "")).upper() or None
-    except (OSError, json.JSONDecodeError):
-        pass
+        decision = re.search(r"PO_DECISION:\s*(\w+)", body)
+        if decision:
+            return decision.group(1).upper()
     return None
 
 
 def _checkpoint_reached(spec, review) -> bool:
-    """P0-2: MANUAL pauses only at the task's NAMED checkpoint, evaluated as
-    a real condition against an explicit runtime stage. The checkpoint text
-    must map to a supported stage (e.g. REVIEW_PASS) AND the current-HEAD
-    review must be PASS. Unevaluable checkpoint text fails closed as BLOCKED
-    (caller), never silently treated as reached."""
-    if not spec.checkpoint:
-        return False
-    if evaluate_checkpoint(spec.checkpoint) != "REVIEW_PASS":
-        return False
-    return review.decision == "PASS"
+    return bool(spec.checkpoint and evaluate_checkpoint(spec.checkpoint) == "REVIEW_PASS"
+                and review.decision == "PASS")
 
 
 def _checkpoint_evaluable(spec) -> bool:
-    """True when the named checkpoint maps to a supported runtime stage."""
     return evaluate_checkpoint(spec.checkpoint) is not None
 
 
 def _accepted_completion(repo: str, pr: str, head: str) -> bool:
-    """Accepted-completion evidence from the bridge: a completion.json bound
-    to the exact PR+HEAD (written by the Builder when acceptance is
-    satisfied) or a status.json in state DONE/COMPLETE for this exact
-    PR+HEAD. P0-1: PASS/APPROVE produces COMPLETE only from evidence, not
-    from a bare verdict."""
-    bd = _bridge_dir()
-    for fname, key in (("completion.json", "completion"),
-                       ("status.json", "state")):
-        p = os.path.join(bd, fname)
-        try:
-            with open(p) as f:
-                d = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if (d.get("repo") == repo and str(d.get("pr")) == str(pr)
-                and d.get("head") == head
-                and str(d.get(key, "")).upper() in ("DONE", "COMPLETE")):
-            return True
-    return False
+    """Completion is external signed evidence, never a Builder bridge file."""
+    try:
+        from governloop_runtime.completion import verify_completion
+        return bool(verify_completion(repo, str(pr), head).get("ok"))
+    except Exception:
+        return False
 
 
 def decide(task_id: str, repo: str, pr: str) -> dict:
-    """One bounded decision step.
-
-    Returns {phase, review_decision, findings, checkpoint_reached,
-    builder, loopx}. Phases: INTAKE | REVIEW | FIX | PASSED | COMPLETE |
-    WAITING_PO_AUTH | BLOCKED | TERMINAL.
-    """
     spec = spec_from_linear(task_id)
     if spec is None:
         return {"phase": "BLOCKED", "review_decision": "LINEAR_UNREADABLE",
@@ -399,21 +283,29 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
                 "findings": [], "checkpoint_reached": False,
                 "decision_request": "specify Execution Mode AUTO|MANUAL"}
 
+    try:
+        from governloop_runtime.authority import apply_verified_authority
+        authority_status = apply_verified_authority(task_id, expected_repo=repo)
+    except Exception as exc:
+        try:
+            from governloop_runtime.authority import clear_positive_process_authority
+            clear_positive_process_authority()
+        except Exception:
+            pass
+        authority_status = {"ok": False, "status": "BLOCKED",
+                            "detail": f"authority verifier unavailable: {exc}"}
+
     head = read_pr_head(repo, int(pr)) or ""
     review = read_github_pr(repo, int(pr), head)
-    outcome = {
-        "mode": spec.mode,
-        "phase": "REVIEW",
-        "review_decision": review.decision,
-        "findings": review.findings,
-        "checkpoint_reached": False,
-        "head": head,
-    }
-
-    # Terminal: PR closed/merged.
+    outcome = {"mode": spec.mode, "phase": "REVIEW",
+               "review_decision": review.decision, "findings": review.findings,
+               "checkpoint_reached": False, "head": head,
+               "authority": {"status": authority_status.get("status"),
+                             "authority_id": authority_status.get("authority_id"),
+                             "ok": bool(authority_status.get("ok"))}}
     gh_state = _pr_state(repo, int(pr))
     if gh_state is None:
-        outcome["phase"] = "BLOCKED"      # unreadable remote -> retryable
+        outcome["phase"] = "BLOCKED"
         outcome["review_decision"] = "UNREADABLE_REMOTE"
         outcome["loopx"] = _loopx_refresh(task_id, "BLOCKED", pr)
         return outcome
@@ -421,8 +313,6 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
         outcome["phase"] = "TERMINAL"
         outcome["loopx"] = _loopx_refresh(task_id, "TERMINAL", pr)
         return outcome
-
-    # Linear task closed/canceled -> terminal.
     lin = linear_adapter.read_linear_issue(task_id)
     if lin and (lin.get("state_type") in ("canceled", "completed")
                 or lin.get("state_name") in ("Canceled", "Done")):
@@ -432,101 +322,70 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
 
     pr_json = _pr_json_full(repo, int(pr))
     reviews = (pr_json or {}).get("reviews") or []
-
-    # AGE-6: bind the deterministic scope policy for this episode. Branch and
-    # base come from the authoritative project profile (canonical_branch +
-    # baseline_sha), NEVER from runtime state / review text / Builder
-    # findings / the PR's own headRefName/baseRefOid (P0-1: no self-binding).
     observed_base = (pr_json or {}).get("baseRefOid") or ""
     observed_branch = (pr_json or {}).get("headRefName") or ""
-    policy = _load_scope_policy(task_id, repo, observed_branch,
-                                observed_base, head, pr)
-    # P0-2: authoritative changed-file set from the real PR diff vs base.
-    auth_changed = _pr_changed_files(repo, int(pr))
-    if auth_changed is None:
-        policy = dataclasses.replace(policy, changed_files_unreadable=True)
-    else:
-        policy = dataclasses.replace(
-            policy, authoritative_changed_files=tuple(auth_changed))
+    policy = _load_scope_policy(task_id, repo, observed_branch, observed_base, head, pr)
+    changed = _pr_changed_files(repo, int(pr))
+    policy = dataclasses.replace(
+        policy, changed_files_unreadable=changed is None,
+        authoritative_changed_files=tuple(changed or ()))
 
     if review.decision in ("CHANGES_REQUESTED", "NOT_PASS"):
-        outcome["phase"] = "FIX"          # findings -> Builder execution chain
+        outcome["phase"] = "FIX"
         outcome["builder"] = builder_handoff(
             task_id, repo, pr, head, "BUILDER_FIXING", review.findings,
-            policy=policy,
-                            observed_branch=observed_branch,
-                            observed_base=observed_base)
+            policy=policy, observed_branch=observed_branch, observed_base=observed_base)
         _apply_builder_result(outcome)
     elif review.decision == "PASS":
         if spec.mode == "MANUAL":
             if not _checkpoint_evaluable(spec):
-                # P0-2: unevaluable checkpoint -> fail closed, do not pause.
                 outcome["phase"] = "BLOCKED"
                 outcome["review_decision"] = "CHECKPOINT_UNEVALUABLE"
-                outcome["decision_request"] = (
-                    f"MANUAL checkpoint '{spec.checkpoint}' cannot be "
-                    "evaluated; name a supported stage (e.g. review "
-                    "approval)")
             elif _checkpoint_reached(spec, review):
                 outcome["checkpoint_reached"] = True
                 po = _po_decision(task_id, repo, pr, head, reviews)
                 if po == "APPROVE":
-                    # P0-1: resume and wake the Builder to continue.
                     if _accepted_completion(repo, pr, head):
                         outcome["phase"] = "COMPLETE"
                     else:
                         outcome["phase"] = "PASSED"
                         outcome["po_decision"] = "APPROVE"
                         outcome["builder"] = builder_handoff(
-                            task_id, repo, pr, head, "CONTINUE", [],
-                            policy=policy,
-                            observed_branch=observed_branch,
-                            observed_base=observed_base)
+                            task_id, repo, pr, head, "CONTINUE", [], policy=policy,
+                            observed_branch=observed_branch, observed_base=observed_base)
                         _apply_builder_result(outcome)
                 elif po in ("REJECT", "CHANGES", "CHANGES_REQUESTED"):
                     outcome["phase"] = "FIX"
                     outcome["po_decision"] = po
                     outcome["builder"] = builder_handoff(
                         task_id, repo, pr, head, "BUILDER_FIXING",
-                        [f"PO decision {po} at checkpoint "
-                         f"{spec.checkpoint}"], policy=policy,
-                            observed_branch=observed_branch,
-                            observed_base=observed_base)
+                        [f"PO decision {po} at checkpoint {spec.checkpoint}"],
+                        policy=policy, observed_branch=observed_branch,
+                        observed_base=observed_base)
                     _apply_builder_result(outcome)
                 else:
                     outcome["phase"] = "WAITING_PO_AUTH"
-                    outcome["gate_report"] = _gate_status_report(
-                        task_id, repo, pr, head)
+                    outcome["gate_report"] = _gate_status_report(task_id, repo, pr, head)
             else:
-                outcome["phase"] = "PASSED"  # checkpoint not reached; continue
+                outcome["phase"] = "PASSED"
                 outcome["builder"] = builder_handoff(
-                    task_id, repo, pr, head, "CONTINUE", [],
-                    policy=policy,
-                            observed_branch=observed_branch,
-                            observed_base=observed_base)
+                    task_id, repo, pr, head, "CONTINUE", [], policy=policy,
+                    observed_branch=observed_branch, observed_base=observed_base)
                 _apply_builder_result(outcome)
         else:
-            # P0-1: AUTO PASS wakes the Builder to continue in scope; accepted
-            # completion is derived from evidence, not a bare PASS.
             if _accepted_completion(repo, pr, head):
                 outcome["phase"] = "COMPLETE"
             else:
                 outcome["phase"] = "PASSED"
                 outcome["builder"] = builder_handoff(
-                    task_id, repo, pr, head, "CONTINUE", [],
-                    policy=policy,
-                            observed_branch=observed_branch,
-                            observed_base=observed_base)
+                    task_id, repo, pr, head, "CONTINUE", [], policy=policy,
+                    observed_branch=observed_branch, observed_base=observed_base)
                 _apply_builder_result(outcome)
-
     outcome["loopx"] = _loopx_refresh(task_id, outcome["phase"], pr)
     return outcome
 
 
 def _apply_builder_result(outcome: dict) -> None:
-    """P0-3: when the firewall blocks a Builder wake, the runtime phase must
-    become BLOCKED (AGE-6 requires a fail-closed outcome), never FIX/PASSED
-    with an executable-looking continue."""
     builder = outcome.get("builder") or {}
     if builder.get("ok") is False and builder.get("blocked"):
         outcome["phase"] = "BLOCKED"
@@ -536,52 +395,43 @@ def _apply_builder_result(outcome: dict) -> None:
 
 
 def _pr_json_full(repo: str, pr: int) -> Optional[dict]:
-    import json as _json
     try:
         res = subprocess.run(
-            ["gh", "pr", "view", str(pr), "--repo", repo,
-             "--json",
-             "reviewDecision,headRefOid,mergeable,state,reviews,updatedAt,"
-             "baseRefOid,headRefName"],
+            ["gh", "pr", "view", str(pr), "--repo", repo, "--json",
+             "reviewDecision,headRefOid,mergeable,state,reviews,updatedAt,baseRefOid,headRefName"],
             capture_output=True, text=True, check=True, timeout=30)
-        return _json.loads(res.stdout)
+        return json.loads(res.stdout)
     except Exception:
         return None
 
 
 def _git_origin() -> Optional[str]:
-    """Local git origin URL -> canonical owner/repo, or None if unreadable."""
     try:
-        res = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            capture_output=True, text=True, timeout=15)
+        res = subprocess.run(["git", "remote", "get-url", "origin"],
+                             capture_output=True, text=True, timeout=15)
         if res.returncode != 0:
             return None
         url = res.stdout.strip()
-        # Accept ssh/git@/https forms -> owner/repo (strip .git).
-        m = re.search(r"(?:github\.com[:/]|git@github\.com:)([^/\s]+/[^/\s]+?)(?:\.git)?$", url)
-        return m.group(1) if m else url.rstrip("/")
+        match = re.search(r"(?:github\.com[:/]|git@github\.com:)([^/\s]+/[^/\s]+?)(?:\.git)?$", url)
+        return match.group(1) if match else url.rstrip("/")
     except Exception:
         return None
 
 
 def _pr_changed_files(repo: str, pr: int) -> Optional[list]:
-    """Authoritative changed-file set for a PR (vs its base), via gh."""
     try:
         res = subprocess.run(
             ["gh", "pr", "diff", str(pr), "--repo", repo, "--name-only"],
             capture_output=True, text=True, check=True, timeout=30)
-        return [ln.strip() for ln in res.stdout.splitlines() if ln.strip()]
+        return [line.strip() for line in res.stdout.splitlines() if line.strip()]
     except Exception:
         return None
 
 
 def _pr_state(repo: str, pr: int) -> Optional[dict]:
-    import json
     try:
         res = subprocess.run(
-            ["gh", "pr", "view", str(pr), "--repo", repo,
-             "--json", "state"],
+            ["gh", "pr", "view", str(pr), "--repo", repo, "--json", "state"],
             capture_output=True, text=True, check=True, timeout=30)
         return json.loads(res.stdout)
     except Exception:
