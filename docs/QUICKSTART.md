@@ -5,11 +5,12 @@ GovernLoop v0.1 keeps a Local Agent in a bounded Builder → Review → Remediat
 The intended first-task flow is:
 
 ```text
-Clone / expose runtime
+clone/install GovernLoop
+→ governloop doctor
+→ follow exactly one next_required_action
+→ external operator provisions signed positive authority when requested
 → bind one ChatGPT reviewer conversation
 → authenticate GitHub + Linear
-→ external operator provisions signed positive authority
-→ governloop doctor
 → Builder works only on the exact authorized branch/scope
 → Draft PR
 → governloop doctor --pr <number>
@@ -19,36 +20,77 @@ Clone / expose runtime
 
 Missing authority or evidence is reported. It is never reconstructed from task text, PR text, Builder output, mutable repository files, or raw process environment variables.
 
-## 1. Prerequisites
+## 1. Install and launch GovernLoop
+
+Required locally:
 
 - Python 3.10+
 - Git
-- GitHub CLI (`gh`) authenticated for the target repository
-- `LINEAR_ACCESS_TOKEN` in the controller/operator environment
-- a Linear task containing exactly one `Execution Mode: AUTO` or `Execution Mode: MANUAL`
-- one dedicated ChatGPT reviewer conversation configured through GovernLoop setup
-- externally signed positive authority provisioned before the Builder episode
+- GitHub CLI (`gh`)
 
-Expose the runtime:
+For the current repository-first v0.1 pre-release, use this canonical installation path:
 
 ```bash
 git clone https://github.com/liangzhipengdamon-maker/GovernLoop.git
 cd GovernLoop
-export PYTHONPATH="$PWD/tools"
-python -m governloop_runtime --help
+python -m pip install -e .
+governloop --help
 ```
 
-## 2. Bind the ChatGPT reviewer
+After installation, use the `governloop` command. You should not copy individual Python modules, reconstruct compatibility dependencies, or set `PYTHONPATH` manually.
 
-Run:
+When GovernLoop is used to control another repository, install GovernLoop once and run `governloop doctor ...` from the target repository/worktree.
+
+## 2. Start with `doctor`
+
+Run the readiness command before trying to infer the workflow from source code:
 
 ```bash
-python -m governloop_runtime setup --repo owner/repository
+governloop doctor \
+  --task-id AGE-123 \
+  --repo owner/repository
+```
+
+`doctor` is read-only and reports `mutations_performed: false`. It returns the complete check matrix plus **exactly one** top-level next step when more work is required:
+
+- `next_required_action` — the next local/user action; or
+- `next_required_external_action` — the next Product Owner / external operator action.
+
+Follow only that top-level action, then rerun `doctor`. Do not solve later blockers out of order and do not manufacture authority from the reported values.
+
+Example when run outside the target worktree:
+
+```text
+status: BLOCKED
+next_required_action:
+  check: git_repository
+  action: clone/open the target repository and rerun doctor from that worktree
+```
+
+Example after the target worktree is open but external authority is missing:
+
+```text
+status: BLOCKED
+next_required_external_action:
+  check: positive_authority
+  action: external operator must provision a valid signed authority document ...
+```
+
+Git/GitHub command failures are summarized into concise structured details; raw command usage dumps are not part of the user-facing verdict.
+
+## 3. Bind the ChatGPT reviewer
+
+When `doctor` identifies reviewer setup as the next action, run:
+
+```bash
+governloop setup --repo owner/repository
 ```
 
 Use one dedicated ChatGPT conversation in the configured Chrome/CDP runtime. GovernLoop should never receive your ChatGPT password, cookie, or session token.
 
-## 3. Authenticate external sources
+## 4. Authenticate external sources
+
+When requested by `doctor`:
 
 ```bash
 gh auth status
@@ -57,7 +99,9 @@ export LINEAR_ACCESS_TOKEN="<your-linear-token>"
 
 The Linear adapter is read-only. If the task cannot be read, GovernLoop fails closed instead of inventing a task specification.
 
-## 4. Positive authority is external and verify-only
+Every controlled Linear task must contain exactly one `Execution Mode: AUTO` or `Execution Mode: MANUAL`. If mode is missing or ambiguous, the Product Owner must decide it; the Agent must not select a default.
+
+## 5. Positive authority is external and verify-only
 
 GovernLoop **cannot mint its own positive authority**. There is no canonical `bind-authority` command.
 
@@ -71,10 +115,10 @@ Before the Builder episode, an external operator/control identity must provision
 - allowed non-lifecycle operations (`fix`, `continue`, `complete`)
 - trusted reviewer GitHub identities
 
-The runtime verifies this evidence with:
+The runtime can only verify this evidence:
 
 ```bash
-python -m governloop_runtime authority-check \
+governloop authority-check \
   --task-id AGE-123 \
   --repo owner/repository
 ```
@@ -83,18 +127,14 @@ Raw `GOVERNLOOP_*` / `AGENTOPS_*` scope or trusted-reviewer variables are **not 
 
 Ready, Merge, Close/Reopen, Tag, Release, and Deploy are never scope operations. They require separate lifecycle authorization.
 
-## 5. Run `doctor` before Builder work
+## 6. What `doctor` verifies
 
-```bash
-python -m governloop_runtime doctor \
-  --task-id AGE-123 \
-  --repo owner/repository
-```
+The check matrix includes:
 
-`doctor` is read-only and reports `mutations_performed: false`. It checks:
-
+- current target Git worktree and repository origin
 - external signed positive authority and trusted reviewers
-- git origin, exact branch, and bound baseline
+- exact authorized branch and baseline
+- exact baseline ancestry of current HEAD
 - dirty worktree paths against allowed scope
 - GitHub CLI authentication
 - Linear task readability and execution mode
@@ -110,13 +150,13 @@ Overall states:
 For config-only checks without probing the local reviewer tab:
 
 ```bash
-python -m governloop_runtime doctor \
+governloop doctor \
   --task-id AGE-123 \
   --repo owner/repository \
   --no-reviewer-probe
 ```
 
-## 6. First-PR bootstrap
+## 7. First-PR bootstrap
 
 A new user does not need to arrive with a PR already created. If `doctor` reports the pull request as `EXPECTED_GATE`, use the **already authorized** branch and baseline; do not invent new values or broaden authority.
 
@@ -125,7 +165,7 @@ The Builder may implement, test, and push only inside the signed scope. Then cre
 After the Draft PR exists:
 
 ```bash
-python -m governloop_runtime doctor \
+governloop doctor \
   --task-id AGE-123 \
   --repo owner/repository \
   --pr 42
@@ -133,7 +173,7 @@ python -m governloop_runtime doctor \
 
 GovernLoop checks that the PR is open, its head branch and base SHA match the signed authority, and all changed files remain in scope.
 
-## 7. Task modes
+## 8. Task modes
 
 AUTO example:
 
@@ -161,24 +201,24 @@ Acceptance Criteria
 
 If mode is missing or ambiguous, GovernLoop blocks rather than choosing one.
 
-## 8. Run the loop
+## 9. Run the loop
 
 One bounded step:
 
 ```bash
-python -m governloop_runtime run-auto --task-id AGE-123 --repo owner/repository --pr 42
+governloop run-auto --task-id AGE-123 --repo owner/repository --pr 42
 ```
 
 or:
 
 ```bash
-python -m governloop_runtime run-manual --task-id AGE-123 --repo owner/repository --pr 42
+governloop run-manual --task-id AGE-123 --repo owner/repository --pr 42
 ```
 
 Keep the Controller alive:
 
 ```bash
-python -m governloop_runtime watch \
+governloop watch \
   --task-id AGE-123 \
   --repo owner/repository \
   --pr 42 \
@@ -187,7 +227,7 @@ python -m governloop_runtime watch \
 
 `WAITING_PO_AUTH` is not terminal. The Watcher remains alive and lifecycle mutations remain frozen unless the exact action is separately authorized by valid external signed PO evidence.
 
-## 9. Independent review envelope
+## 10. Independent review envelope
 
 Machine-executable independent review is exact-bound:
 
@@ -201,7 +241,7 @@ HEAD: <exact full current HEAD SHA>
 
 `GOVERNLOOP_REVIEW` is canonical. `AGENTOPS_REVIEW` is pre-v0.1 compatibility only. Duplicate or mixed markers fail closed. Review PASS is technical evidence only; it never grants Ready, Merge, Release, or Deploy.
 
-## 10. Completion and Product Owner decisions
+## 11. Completion and Product Owner decisions
 
 A bare review PASS does not create completion evidence. Accepted COMPLETE requires exact-bound external signed completion evidence.
 
@@ -211,9 +251,13 @@ Legacy bridge files such as `.agent-bridge/completion.json` or `.agent-bridge/po
 
 ## Troubleshooting
 
-### `AUTHORITY_UNBOUND`
+### `git_repository: BLOCKED`
 
-Do not export guessed scope variables and do not modify repository profiles to create authority. Ask the external operator/Product Owner to provision the signed authority document through the protected control channel.
+Open or clone the target repository and rerun `doctor` from that worktree. Do not copy GovernLoop Python modules into a temporary directory as a substitute for installation or a target worktree.
+
+### `AUTHORITY_UNBOUND` / `positive_authority: BLOCKED`
+
+Do not export guessed scope variables and do not modify repository profiles to create authority. Wait for the external operator/Product Owner to provision the signed authority document through the protected control channel.
 
 ### `pull_request: EXPECTED_GATE`
 
@@ -221,7 +265,7 @@ Complete bounded work on the exact authorized branch, push it, create a Draft PR
 
 ### `SCOPE_BLOCKED`
 
-Run `doctor`. Typical causes are wrong repository/branch/baseline, out-of-scope PR files, dirty unrelated worktree files, or unreadable Git/GitHub evidence.
+Run `doctor` and follow its single top-level next action. Typical causes are wrong repository/branch/baseline, out-of-scope PR files, dirty unrelated worktree files, or unreadable Git/GitHub evidence.
 
 ### Reviewer binding failure
 
