@@ -65,7 +65,7 @@ def _concise_command_error(err, fallback):
             return line
     for line in lines:
         lower = line.lower()
-        if not lower.startswith(("usage:", "or:", "    -", "git diff", "git rev-parse")):
+        if not lower.startswith(("usage:", "or:", "options:", "--", "git diff", "git rev-parse")):
             return line[:240]
     return fallback
 
