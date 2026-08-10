@@ -58,6 +58,7 @@ class TestConversationValidation(unittest.TestCase):
             f"https://example.com/c/{GOOD_ID}",
             f"https://chatgpt.com/c/{GOOD_ID}?x=1",
             f"https://chatgpt.com/c/{GOOD_ID}#fragment",
+            f"https://chatgpt.com:bad/c/{GOOD_ID}",
             "https://chatgpt.com/c/not-a-valid-id",
         ]
         for url in invalid:
@@ -71,6 +72,14 @@ class TestConversationValidation(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(setup.SetupError):
                     setup.normalize_repository(value)
+
+    def test_empty_profile_and_config_paths_fail_closed(self):
+        with self.assertRaises(setup.SetupError):
+            setup.normalize_profile_path("")
+        with self.assertRaises(setup.SetupError):
+            setup.normalize_profile_path("   ")
+        with self.assertRaises(setup.SetupError):
+            setup.normalize_config_path("")
 
 
 class TestConfigWriting(unittest.TestCase):
