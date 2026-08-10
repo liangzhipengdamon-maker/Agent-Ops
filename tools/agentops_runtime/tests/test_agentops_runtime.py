@@ -1002,6 +1002,105 @@ class TestFinalResultAutoReview(unittest.TestCase):
         self.assertFalse(second["deduped"])
         self.assertEqual(len(calls), 2)
 
+    def _status_payload(self, repo="o/r", pr="7", head="h", req="status_report",
+                        state="WAITING_REVIEW"):
+        return (f"REVIEW_REQUEST_ID: s1\nREPO: {repo}\nPR: {pr}\nHEAD: {head}\n"
+                f"REQUEST: {req}\nSTATE: {state}\n")
+
+    def test_repo_mismatch_no_review(self):
+        # R12-P0: status payload REPO != invocation repo -> fail closed, no
+        # independent_review even though ACK succeeded.
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch("agentops_runtime.relay_client.send_status_report",
+                            return_value={"delivered": True,
+                                          "detail": "ack"}), \
+                 mock.patch("agentops_runtime.relay_client"
+                            ".send_independent_review") as m:
+                r = relay_client.final_result_auto_review(
+                    "o/r", "7", "h",
+                    self._status_payload(repo="OTHER"), td,
+                    os.path.join(td, "out"))
+        self.assertTrue(r["status_delivered"])
+        self.assertFalse(r["review_sent"])
+        self.assertFalse(r["binding_ok"])
+        m.assert_not_called()
+
+    def test_pr_mismatch_no_review(self):
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch("agentops_runtime.relay_client.send_status_report",
+                            return_value={"delivered": True,
+                                          "detail": "ack"}), \
+                 mock.patch("agentops_runtime.relay_client"
+                            ".send_independent_review") as m:
+                r = relay_client.final_result_auto_review(
+                    "o/r", "7", "h",
+                    self._status_payload(pr="99"), td,
+                    os.path.join(td, "out"))
+        self.assertFalse(r["review_sent"])
+        self.assertFalse(r["binding_ok"])
+        m.assert_not_called()
+
+    def test_head_mismatch_no_review(self):
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch("agentops_runtime.relay_client.send_status_report",
+                            return_value={"delivered": True,
+                                          "detail": "ack"}), \
+                 mock.patch("agentops_runtime.relay_client"
+                            ".send_independent_review") as m:
+                r = relay_client.final_result_auto_review(
+                    "o/r", "7", "h",
+                    self._status_payload(head="WRONG"), td,
+                    os.path.join(td, "out"))
+        self.assertFalse(r["review_sent"])
+        self.assertFalse(r["binding_ok"])
+        m.assert_not_called()
+
+    def test_missing_field_no_review(self):
+        payload = ("REVIEW_REQUEST_ID: s1\nREPO: o/r\nPR: 7\n"
+                   "REQUEST: status_report\nSTATE: WAITING_REVIEW\n")  # HEAD missing
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch("agentops_runtime.relay_client.send_status_report",
+                            return_value={"delivered": True,
+                                          "detail": "ack"}), \
+                 mock.patch("agentops_runtime.relay_client"
+                            ".send_independent_review") as m:
+                r = relay_client.final_result_auto_review(
+                    "o/r", "7", "h", payload, td,
+                    os.path.join(td, "out"))
+        self.assertFalse(r["review_sent"])
+        self.assertFalse(r["binding_ok"])
+        m.assert_not_called()
+
+    def test_duplicate_field_no_review(self):
+        payload = ("REVIEW_REQUEST_ID: s1\nREPO: o/r\nPR: 7\nHEAD: h\n"
+                   "HEAD: h2\nREQUEST: status_report\nSTATE: WAITING_REVIEW\n")
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch("agentops_runtime.relay_client.send_status_report",
+                            return_value={"delivered": True,
+                                          "detail": "ack"}), \
+                 mock.patch("agentops_runtime.relay_client"
+                            ".send_independent_review") as m:
+                r = relay_client.final_result_auto_review(
+                    "o/r", "7", "h", payload, td,
+                    os.path.join(td, "out"))
+        self.assertFalse(r["review_sent"])
+        self.assertFalse(r["binding_ok"])
+        m.assert_not_called()
+
+    def test_wrong_request_no_review(self):
+        payload = self._status_payload(req="independent_review")
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch("agentops_runtime.relay_client.send_status_report",
+                            return_value={"delivered": True,
+                                          "detail": "ack"}), \
+                 mock.patch("agentops_runtime.relay_client"
+                            ".send_independent_review") as m:
+                r = relay_client.final_result_auto_review(
+                    "o/r", "7", "h", payload, td,
+                    os.path.join(td, "out"))
+        self.assertFalse(r["review_sent"])
+        m.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

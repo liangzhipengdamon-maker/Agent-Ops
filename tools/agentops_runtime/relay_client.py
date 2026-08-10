@@ -219,6 +219,42 @@ def parse_review_response(text: str, repo: str, pr: str, head: str,
             "findings": findings, "ok": True}
 
 
+def _parse_status_payload(payload: str, repo: str, pr: str, head: str) -> dict:
+    """Strictly parse + validate a final status_report payload.
+
+    R12-P0 exact-binding chain: the status_report that gets ACKed and the
+    independent_review that follows must reference the SAME repo/pr/head.
+    Returns {ok, state, detail}. ok is True only when:
+      - REQUEST is EXACTLY 'status_report'
+      - STATE is EXACTLY 'WAITING_REVIEW'
+      - REPO / PR / HEAD each appear EXACTLY once and exactly equal the
+        function arguments
+    Missing, duplicate, or mismatched fields -> ok=False (fail closed); the
+    caller must NOT trigger an independent_review in that case."""
+    fields = {}
+    for line in (payload or "").splitlines():
+        line = line.strip()
+        for key in ("REQUEST", "STATE", "REPO", "PR", "HEAD"):
+            if line.startswith(key + ":"):
+                fields.setdefault(key, []).append(
+                    line.split(":", 1)[1].strip())
+
+    def _exact(key, expected):
+        vals = fields.get(key)
+        return bool(vals) and len(vals) == 1 and vals[0] == expected
+
+    if not (_exact("REQUEST", "status_report")
+            and _exact("STATE", "WAITING_REVIEW")):
+        return {"ok": False, "state": (fields.get("STATE") or [None])[0],
+                "detail": "REQUEST/STATE not exactly status_report/WAITING_REVIEW"}
+    if not (_exact("REPO", repo) and _exact("PR", str(pr))
+            and _exact("HEAD", head)):
+        return {"ok": False, "state": "WAITING_REVIEW",
+                "detail": "status payload REPO/PR/HEAD mismatch, duplicate, "
+                          "or missing vs invocation arguments"}
+    return {"ok": True, "state": "WAITING_REVIEW", "detail": "ok"}
+
+
 def final_result_auto_review(repo: str, pr: str, head: str,
                              status_payload: str, bridge_dir: str,
                              output_dir: str, timeout: int = 400) -> dict:
@@ -226,28 +262,39 @@ def final_result_auto_review(repo: str, pr: str, head: str,
 
     Sends the final status_report; then, ONLY IF:
       - status_report delivered=true, AND
-      - the status_report STATE is WAITING_REVIEW, AND
+      - the status_report payload strictly validates (REQUEST exactly
+        status_report, STATE exactly WAITING_REVIEW, REPO/PR/HEAD exactly
+        equal to repo/pr/head args — forming an inseparable exact-binding
+        chain with the ACKed report), AND
       - this repo/pr/head/final-report has NOT already triggered a review
     does it send REQUEST: independent_review and parse the captured verdict.
 
     WAITING_PO_AUTH never triggers a review even if delivered=true. A failed
-    status_report (delivered=false) never triggers a review. Deduped via a
+    status_report (delivered=false) never triggers a review. A payload that
+    fails strict binding validation never triggers a review. Deduped via a
     bridge marker `auto_review_<pr>_<head>.json`.
 
-    Returns {status_delivered, state, review_sent, review, deduped}."""
+    Returns {status_delivered, state, review_sent, review, deduped,
+    succeeded, binding_ok}."""
     status = send_status_report(status_payload, output_dir, timeout)
-    state = ""
-    for line in (status_payload or "").splitlines():
-        if line.startswith("STATE:"):
-            state = line.split(":", 1)[1].strip()
+    binding = _parse_status_payload(status_payload, repo, pr, head)
     if not status.get("delivered"):
-        return {"status_delivered": False, "state": state,
+        return {"status_delivered": False, "state": binding.get("state"),
                 "review_sent": False, "review": None, "deduped": False,
+                "binding_ok": binding.get("ok", False),
                 "detail": status.get("detail")}
-    if state != "WAITING_REVIEW":
-        return {"status_delivered": True, "state": state,
+    if not binding.get("ok"):
+        # R12-P0: the ACKed report did not bind exactly to the invocation
+        # repo/pr/head -> never trigger a review for a different object.
+        return {"status_delivered": True, "state": binding.get("state"),
                 "review_sent": False, "review": None, "deduped": False,
-                "detail": f"state {state} does not trigger auto-review"}
+                "binding_ok": False, "detail": binding.get("detail")}
+    if binding.get("state") != "WAITING_REVIEW":
+        return {"status_delivered": True, "state": binding.get("state"),
+                "review_sent": False, "review": None, "deduped": False,
+                "binding_ok": True,
+                "detail": f"state {binding.get('state')} does not trigger "
+                          f"auto-review"}
 
     marker = os.path.join(bridge_dir, f"auto_review_{pr}_{head}.json")
     try:
@@ -255,8 +302,9 @@ def final_result_auto_review(repo: str, pr: str, head: str,
             d = json.load(f)
         if d.get("repo") == repo and str(d.get("pr")) == str(pr) \
                 and d.get("head") == head and d.get("sent"):
-            return {"status_delivered": True, "state": state,
+            return {"status_delivered": True, "state": "WAITING_REVIEW",
                     "review_sent": False, "review": None, "deduped": True,
+                    "binding_ok": True,
                     "detail": "auto-review already sent for this PR+HEAD"}
     except (OSError, json.JSONDecodeError):
         pass
@@ -280,6 +328,6 @@ def final_result_auto_review(repo: str, pr: str, head: str,
                            "verdict": parsed.get("verdict")}, f)
         except OSError:
             pass
-    return {"status_delivered": True, "state": state,
+    return {"status_delivered": True, "state": "WAITING_REVIEW",
             "review_sent": True, "review": parsed, "deduped": False,
-            "succeeded": succeeded}
+            "succeeded": succeeded, "binding_ok": True}
