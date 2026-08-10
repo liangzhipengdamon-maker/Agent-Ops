@@ -1,10 +1,10 @@
 # Security Policy
 
-AgentOps is a control plane for coding-agent workflows. Security reports involving authorization, scope isolation, review identity, relay correlation, or lifecycle actions can affect the integrity of repositories governed by the runtime.
+GovernLoop is a control plane for coding-agent workflows. Security reports involving authorization, scope isolation, review identity, relay correlation, or lifecycle actions can affect the integrity of repositories governed by the runtime.
 
 ## Supported versions
 
-AgentOps is currently pre-release. Security fixes target the current `main` branch and the latest published pre-release. Older historical branches and validation fixtures are not supported runtime versions.
+GovernLoop is currently pre-release. Security fixes target the current `main` branch and the latest published pre-release. Older historical branches and validation fixtures are not supported runtime versions.
 
 ## Reporting a vulnerability
 
@@ -13,7 +13,7 @@ Please **do not** publish a working authorization bypass, secret, access token, 
 Preferred reporting path:
 
 1. Use GitHub's private vulnerability reporting / Security Advisory feature for this repository when available.
-2. If private GitHub reporting is unavailable, contact the repository maintainer through the email associated with the maintainer's public GitHub profile and clearly mark the message `AgentOps security report`.
+2. If private GitHub reporting is unavailable, contact the repository maintainer through the email associated with the maintainer's public GitHub profile and clearly mark the message `GovernLoop security report`.
 
 Include:
 
@@ -29,19 +29,11 @@ Do not include real third-party secrets. Redact tokens and credentials.
 
 ## Security model
 
-AgentOps separates evidence, transport, state, implementation, and authority.
+GovernLoop separates evidence, transport, state, implementation, and authority.
 
 ### Authority-bearing scope
 
-A controlled Builder wake requires explicit episode-external scope authority for:
-
-- repository
-- authorized branch
-- baseline SHA
-- allowed paths
-- allowed operations
-
-Missing or mismatched authority fails closed.
+A controlled Builder wake requires explicit episode-external scope authority for repository, authorized branch, baseline SHA, allowed paths, and allowed operations. Missing or mismatched authority fails closed.
 
 ### Evidence sources
 
@@ -67,19 +59,7 @@ The relay is a mechanical transport boundary. Delivery is fail closed: an unconf
 
 ### Scope & Action Firewall
 
-The current runtime checks:
-
-- exact repository binding
-- exact branch binding
-- exact baseline binding
-- local git origin
-- current worktree branch
-- uncommitted unrelated paths
-- authoritative PR changed files
-- allowed path prefixes
-- allowed operations
-- task/scope continuity
-- Ready / Merge / Deploy non-implication
+The current runtime checks exact repository/branch/baseline binding, local git origin, current worktree branch, uncommitted unrelated paths, authoritative PR changed files, allowed path prefixes and operations, task/scope continuity, and Ready/Merge/Deploy non-implication.
 
 Path traversal, absolute paths, wildcard broadening, protected paths, disallowed operations, unreadable changed-file evidence, and unverifiable local git state are designed to block rather than continue.
 
@@ -103,18 +83,7 @@ Use environment variables or an external secret manager appropriate to your depl
 
 ## Threats of particular interest
 
-Please report suspected paths that allow any of the following:
-
-- cross-repository mutation without separate scope
-- repository/branch/baseline self-binding from the PR under review
-- committed out-of-scope files escaping detection
-- dirty worktree contamination bypass
-- review/ACK/CI/runtime text creating Ready/Merge/Deploy authority
-- stale review verdict applying to a new HEAD
-- untrusted reviewer or PO identity injection
-- relay correlation mismatch accepted as success
-- missing/unreadable authority being treated as permissive
-- Builder-controlled state modifying the controller's authority
+Please report suspected paths that allow cross-repository mutation without separate scope; repository/branch/baseline self-binding; committed out-of-scope files escaping detection; dirty-worktree contamination bypass; review/ACK/CI/runtime text creating Ready/Merge/Deploy authority; stale review verdicts applying to a new HEAD; untrusted reviewer/PO identity injection; relay correlation mismatch accepted as success; missing authority treated as permissive; or Builder-controlled state modifying controller authority.
 
 ## Disclosure
 
