@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """GovernLoop CLI — governed autonomy for coding agents.
 
-Authority is verify-only in the runtime. Legacy `po-decision` / `complete`
-commands only write non-authoritative bridge compatibility files; live PO and
-completion transitions require external signed control evidence.
+Authority is verify-only in the runtime. Product Owner lifecycle decisions are
+accepted only from external signed control evidence. Legacy `complete` writes
+non-authoritative bridge compatibility evidence only.
 """
 
 import argparse
@@ -99,18 +99,6 @@ def cmd_final_result_review(args):
     return 0
 
 
-def cmd_po_decision(args):
-    _, _, _, bridge_dir, _ = _legacy_runtime()
-    bd = bridge_dir(); os.makedirs(bd, exist_ok=True)
-    decision = {"repo": args.repo, "pr": str(args.pr), "head": args.head,
-                "decision": args.decision.upper()}
-    with open(os.path.join(bd, "po_decision.json"), "w", encoding="utf-8") as handle:
-        json.dump(decision, handle, indent=2)
-    print(json.dumps({"written": True, "authoritative": False,
-                      "decision": decision}, indent=2))
-    return 0
-
-
 def cmd_complete(args):
     _, _, _, bridge_dir, _ = _legacy_runtime()
     bd = bridge_dir(); os.makedirs(bd, exist_ok=True)
@@ -133,7 +121,6 @@ def build_parser():
     p = sub.add_parser("watch"); p.add_argument("--task-id", required=True); p.add_argument("--repo", required=True); p.add_argument("--pr", required=True); p.add_argument("--interval", type=int, default=600)
     p = sub.add_parser("report"); p.add_argument("--task-id", required=True); p.add_argument("--repo", required=True); p.add_argument("--pr", required=True); p.add_argument("--status-report", required=True)
     p = sub.add_parser("final-result-review"); p.add_argument("--repo", required=True); p.add_argument("--pr", required=True); p.add_argument("--head", required=True); p.add_argument("--status-report", required=True); p.add_argument("--timeout", type=int, default=400)
-    p = sub.add_parser("po-decision"); p.add_argument("--repo", required=True); p.add_argument("--pr", required=True); p.add_argument("--head", required=True); p.add_argument("--decision", required=True, choices=["APPROVE", "REJECT", "CHANGES"])
     p = sub.add_parser("complete"); p.add_argument("--repo", required=True); p.add_argument("--pr", required=True); p.add_argument("--head", required=True)
     return parser
 
@@ -146,7 +133,6 @@ def main(argv=None):
     if args.command == "watch": return cmd_watch(args)
     if args.command == "report": return cmd_report(args)
     if args.command == "final-result-review": return cmd_final_result_review(args)
-    if args.command == "po-decision": return cmd_po_decision(args)
     if args.command == "complete": return cmd_complete(args)
     return 1
 
