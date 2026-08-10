@@ -1,0 +1,3 @@
+AGE-41 First-Time User end-to-end pilot gate evidence.
+Task: MANUAL; checkpoint: pilot completion review.
+Disposable validation-only artifact. Never merged.
