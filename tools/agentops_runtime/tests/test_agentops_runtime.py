@@ -796,6 +796,27 @@ class TestCLIEntrypoint(unittest.TestCase):
                                "--status-report", p, "--timeout", "10"])
         self.assertEqual(rc, 2)
 
+    def test_final_result_review_nonzero_on_binding_failure(self):
+        # R14-P1-1: ACKed but payload binding failed (no auto-review ran) ->
+        # non-zero exit, so callers never see success when no review happened.
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch("agentops_runtime.runtime_loop._bridge_dir",
+                        return_value=td):
+            p = os.path.join(td, "status.txt")
+            with open(p, "w") as f:
+                f.write("REVIEW_REQUEST_ID: x\nREPO: o/r\nPR: 7\nHEAD: h\n"
+                        "REQUEST: status_report\nSTATE: WAITING_REVIEW\n")
+            with mock.patch("agentops_runtime.__main__.relay_client"
+                            ".final_result_auto_review",
+                            return_value={"status_delivered": True,
+                                          "binding_ok": False,
+                                          "review_sent": False,
+                                          "review": None}):
+                rc = cli.main(["final-result-review", "--repo", "o/r",
+                               "--pr", "7", "--head", "h",
+                               "--status-report", p, "--timeout", "10"])
+        self.assertEqual(rc, 3)
+
 
 class TestParseReviewResponse(unittest.TestCase):
     def _text(self, verdict="PASS", req="AR-1", repo="o/r", pr="7",

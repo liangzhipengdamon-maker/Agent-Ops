@@ -100,6 +100,8 @@ def cmd_final_result_review(args):
     print(json.dumps(out, indent=2, ensure_ascii=False))
     if not out.get("status_delivered"):
         return 1  # status_report not delivered
+    if out.get("status_delivered") and out.get("binding_ok") is False:
+        return 3  # ACKed but payload binding failed -> no auto-review ran
     if out.get("review_sent") and not out.get("succeeded"):
         return 2  # independent_review sent but failed to parse
     if out.get("review_sent") and not (out.get("review") or {}).get("ok"):
