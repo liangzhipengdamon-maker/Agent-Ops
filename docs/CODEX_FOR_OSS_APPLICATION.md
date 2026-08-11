@@ -38,7 +38,7 @@ Do not substitute a GitHub email unless it is actually the email associated with
 
 `https://github.com/liangzhipengdamon-maker/GovernLoop`
 
-Verify this URL after the repository slug rename. Repository visibility must remain public.
+Repository rename is complete and the repository is public at this canonical URL.
 
 ### Maintainer role
 
@@ -89,27 +89,23 @@ Recommended answer:
 
 > GovernLoop was developed using the workflow it governs: repeated exact-HEAD reviews produced CHANGES_REQUESTED→automatic fixes→new HEAD→PASS while merge remained human-authorized. We are preparing v0.1.0 under Apache-2.0 and document limitations openly. Adoption is early; this application is based on ecosystem relevance, not inflated usage claims.
 
-## Evidence to have visible before submission
+## Evidence currently visible
 
-Prefer to submit only after the GovernLoop v0.1.0 readiness/rebrand work is merged and the public repository visibly contains:
+The public repository now visibly contains:
 
+- final GovernLoop repository identity and public URL
 - strong README and Quick Start
 - Apache-2.0 license
 - contribution/security/community files
 - changelog and v0.1.0 release checklist
 - first-run reviewer binding
-- green CI on exact release HEAD
-- exact-HEAD independent review evidence
-- final GovernLoop repository name/URL
-- clean open-PR state or clearly intentional active PRs
+- installable repository-checkout `governloop` console entry point
+- guided `governloop doctor` onboarding
+- CI evidence for installed CLI smoke and runtime regression suites
+- repeated exact-HEAD independent review evidence
+- clean-room first-time-user cold-start acceptance evidence
 
-Helpful additional evidence if the cross-project pilot finishes before submission:
-
-- real pilot against LearnMind-English
-- explicit repository/branch/baseline/path/operation authority
-- automatic review/fix/re-review loop
-- PASS reaching MANUAL `WAITING_PO_AUTH`
-- no lifecycle authority bypass
+A full real external-project pilot remains useful additional evidence if completed, but this worksheet does not claim it is already complete.
 
 Do not delay indefinitely for adoption metrics that do not yet exist; the application should remain truthful about the project's early stage.
 
@@ -119,7 +115,7 @@ The maintainer must verify or enter:
 
 1. ChatGPT-account email
 2. OpenAI Organization ID
-3. any required program terms/consent checkbox
+3. current program terms/consent checkbox
 4. final Submit action
 
-Do not submit with guessed account identifiers.
+Do not submit with guessed account identifiers. Submission of this application is separate from GovernLoop's v0.1.0 release lifecycle and requires an explicit human action.
