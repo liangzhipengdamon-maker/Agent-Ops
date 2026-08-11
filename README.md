@@ -4,9 +4,32 @@
 
 GovernLoop is an agent-neutral control plane that keeps coding-agent work moving through implementation, pull requests, independent review, remediation, and explicit lifecycle gates without allowing runtime state, review text, or Builder output to silently expand authority.
 
-> Project status: **v0.1.0 pre-release**. The core AUTO/MANUAL loop, exact-HEAD review path, deterministic Scope & Action Firewall, and first-run ChatGPT reviewer binding are implemented and tested. Packaging and external onboarding are still early-stage.
+> Project status: **v0.1.0 pre-release**. The core AUTO/MANUAL loop, exact-HEAD review path, deterministic Scope & Action Firewall, external signed authority model, MANUAL lifecycle firewall, and guided readiness doctor are implemented and tested. External onboarding is still being hardened through cold-start pilots.
 
 GovernLoop is **not** an agent observability SDK and it is not another coding agent. It governs the tools you already use.
+
+## First run
+
+A new user or Local Agent should start here instead of reading runtime source code.
+
+```bash
+git clone https://github.com/liangzhipengdamon-maker/GovernLoop.git
+cd GovernLoop
+python -m pip install -e .
+
+governloop doctor \
+  --task-id AGE-123 \
+  --repo owner/repository
+```
+
+`doctor` is read-only. It reports the full readiness matrix and, when blocked, exactly one top-level next step:
+
+- `next_required_action` — the next local/user action; or
+- `next_required_external_action` — the next Product Owner / external operator action.
+
+Follow that one action and rerun `doctor`. Do not reconstruct authority from task text, repository files, raw environment variables, or the diagnostic output itself.
+
+For the detailed onboarding flow, see [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
 
 ## Why GovernLoop
 
@@ -53,17 +76,20 @@ A review `PASS` is technical evidence. It is **not** implicit permission to broa
 
 ## Safety model
 
-The v0.1 runtime includes a deterministic Scope & Action Firewall at the Builder wake boundary. Positive authority is explicit and episode-external:
+Positive authority is explicit, signed, and episode-external. GovernLoop runtime can verify authority but cannot mint it. The signed operator payload binds:
 
 - exact repository
 - exact authorized branch
 - exact baseline SHA
 - allowed path prefixes
-- allowed operations
+- allowed non-lifecycle operations
+- trusted reviewer identities
 
-The firewall also checks local git origin, current worktree branch, uncommitted contamination, and the authoritative PR changed-file set. Missing or unverifiable authority fails closed and produces no executable Builder wake.
+The runtime also checks local git origin, current worktree branch, exact baseline ancestry, uncommitted contamination, and the authoritative PR changed-file set. Missing or unverifiable authority fails closed and produces no executable Builder wake.
 
-Rejected conditions include wrong repository/branch/baseline, path traversal or wildcard broadening, committed or uncommitted changes outside allowed paths, disallowed operations, unreadable remote/local evidence, task switching, and implied lifecycle authority from review, CI, ACK, runtime state, or Builder instructions.
+Raw `GOVERNLOOP_*` / legacy `AGENTOPS_*` scope values, mutable repository profiles, task text, PR text, review text, CI, ACK, and runtime state cannot create missing positive authority.
+
+Ready, Merge, Close/Reopen, Tag, Release, and Deploy remain separate lifecycle decisions. MANUAL lifecycle exceptions require exact-bound external signed Product Owner evidence.
 
 See [`SECURITY.md`](SECURITY.md) for the trust and threat model.
 
@@ -73,96 +99,56 @@ GovernLoop intentionally has only two runtime modes.
 
 ### AUTO
 
-The controlled Builder → GitHub → independent-review loop continues through in-scope remediation and continuation until accepted completion or a real blocker.
+The controlled Builder → GitHub → independent-review loop continues through in-scope remediation and continuation until accepted external signed completion or a real blocker.
 
 ### MANUAL
 
-The same loop runs until a **named checkpoint** is reached. The Controller then enters `WAITING_PO_AUTH` and stays alive while awaiting a Product Owner decision.
+The same loop runs until a **named checkpoint** is reached. The Controller then enters `WAITING_PO_AUTH` and stays alive while awaiting a Product Owner decision. The Watcher remains alive and does not treat unauthorized remote close/merge as a normal terminal state.
 
 There is no LOW / MEDIUM / HIGH risk classifier in the current control flow.
 
-## First-run reviewer setup
+## Reviewer setup
 
-GovernLoop includes a localhost-only wizard for binding your own dedicated ChatGPT conversation as the reviewer.
-
-```bash
-export PYTHONPATH="$PWD/tools"
-python -m governloop_runtime setup --repo owner/repository
-```
-
-The command opens a local page on `127.0.0.1`. You provide the target repository, one exact `https://chatgpt.com/c/<conversation-id>` URL, the GovernLoop Chrome CDP port (default `9233`), and the browser profile path.
-
-**Test Connection** succeeds only when exactly one open tab matches the configured conversation ID. Zero or duplicate matches fail closed. GovernLoop never asks for or stores a ChatGPT password, cookie, session token, or OpenAI API key; login happens directly on ChatGPT.
-
-The route is stored at:
-
-```text
-~/.governloop/relay/config.json
-```
-
-For headless use:
+When `doctor` identifies reviewer binding as the next action:
 
 ```bash
-python -m governloop_runtime setup --repo owner/repository --no-open
+governloop setup --repo owner/repository
 ```
 
-## Quick start
+The localhost-only setup page binds one dedicated ChatGPT conversation through the configured Chrome/CDP runtime. GovernLoop never asks for or stores a ChatGPT password, cookie, session token, or OpenAI API key; login happens directly on ChatGPT.
 
-GovernLoop is currently a repository-first developer tool rather than an installed package.
+The route is stored at `~/.governloop/relay/config.json`.
+
+## Positive authority
+
+There is intentionally **no canonical `bind-authority` command**. A Builder must not create or sign its own authority bundle.
+
+The external operator provisions OpenSSH-signed authority through the OS-protected control channel. GovernLoop can verify it with:
 
 ```bash
-git clone https://github.com/liangzhipengdamon-maker/GovernLoop.git
-cd GovernLoop
-
-export PYTHONPATH="$PWD/tools"
-export LINEAR_ACCESS_TOKEN="<linear-token>"
-
-# Bind a dedicated reviewer conversation
-python -m governloop_runtime setup --repo owner/repository
-
-# Explicit scope authority
-export GOVERNLOOP_SCOPE_REPOSITORY="owner/repository"
-export GOVERNLOOP_AUTHORIZED_BRANCH="governloop/example-task"
-export GOVERNLOOP_BASELINE_SHA="<exact-base-sha>"
-export GOVERNLOOP_ALLOWED_PATHS="src/,tests/"
-export GOVERNLOOP_AUTHORIZED_OPERATIONS="fix,continue,complete"
-export GOVERNLOOP_ALLOW_READY_MERGE_DEPLOY="false"
-
-# One bounded MANUAL decision step
-python -m governloop_runtime run-manual \
-  --task-id AGE-123 \
-  --repo owner/repository \
-  --pr 42
-
-# Or keep the controller alive
-python -m governloop_runtime watch \
-  --task-id AGE-123 \
-  --repo owner/repository \
-  --pr 42 \
-  --interval 60
+governloop authority-check --task-id AGE-123 --repo owner/repository
 ```
 
-The runtime expects an authenticated `gh` CLI. Durable LoopX refresh and Neutral Relay delivery are integration-specific dependencies; failures are surfaced rather than silently treated as success.
-
-For the detailed walkthrough, see [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
+If authority is missing, `doctor` returns `next_required_external_action` and the Builder waits.
 
 ## Current CLI
 
 ```text
-setup                localhost reviewer-binding wizard
+setup                bind a dedicated ChatGPT reviewer conversation
+authority-check      verify pre-existing external signed positive authority
+doctor               read-only readiness and guided next-action diagnostics
 run-auto             one AUTO decision step
 run-manual           one MANUAL decision step
 watch                persistent Controller/Watcher
 report               send a status report through the Neutral Relay
 final-result-review  status delivery -> independent review handoff
-po-decision           bind a Product Owner decision to exact PR + HEAD
-complete              record exact-HEAD accepted-completion evidence
+complete              write legacy non-authoritative bridge compatibility evidence
 ```
 
 Run:
 
 ```bash
-PYTHONPATH=tools python -m governloop_runtime --help
+governloop --help
 ```
 
 ## Naming and pre-release compatibility
@@ -174,32 +160,33 @@ See [`docs/REBRAND_MIGRATION.md`](docs/REBRAND_MIGRATION.md).
 ## Design principles
 
 1. **Evidence is not authority.** CI, review, ACK, runtime state, and Builder output do not create permission.
-2. **Exact binding over inference.** Repository, branch, baseline, PR, and HEAD are checked explicitly.
+2. **Exact binding over inference.** Repository, branch, baseline, PR, HEAD, and lifecycle action are checked explicitly.
 3. **Fail closed.** Unreadable or ambiguous control evidence blocks continuation instead of guessing.
-4. **One control loop.** Avoid parallel runtimes, duplicate schedulers, and hidden authorization kernels.
-5. **Agent-neutral Builder boundary.** The controller does not depend on one coding-agent vendor.
-6. **Human lifecycle authority stays visible.** MANUAL checkpoints are durable waiting states.
+4. **One clear next step.** Readiness diagnostics may report many checks but guide the user to one dependency-ordered action.
+5. **One control loop.** Avoid parallel runtimes, duplicate schedulers, and hidden authorization kernels.
+6. **Agent-neutral Builder boundary.** The controller does not depend on one coding-agent vendor.
+7. **Human lifecycle authority stays visible.** MANUAL checkpoints are durable waiting states.
 
 ## Repository map
 
-- `tools/governloop_runtime/` — canonical v0.1 CLI/runtime facade and first-run setup
+- `tools/governloop_runtime/` — canonical v0.1 CLI/runtime facade, setup, and doctor
 - `tools/agentops_runtime/` — pre-v0.1 tested core retained temporarily as a compatibility implementation
 - `tools/neutral-relay/` — transport-only ChatGPT reviewer relay
 - `scripts/` — supporting authorization/relay tools
 - `docs/governance/CURRENT_RUNTIME_RULES.md` — canonical governance contract
 - `profiles/governloop.json` — canonical project profile
-- `tests/` and runtime-local tests — regression/protocol coverage
+- runtime-local tests — regression/protocol coverage
 
 ## Project maturity and limitations
 
 GovernLoop is being released early so maintainers can inspect and improve the governance model. Current limitations include:
 
-- no PyPI/package installer yet
-- reviewer-conversation binding has a first-run wizard, but full external-project onboarding still requires Builder, Linear, and browser-runtime integration
+- packaging is pre-release and not yet published on PyPI; install from a repository checkout with `python -m pip install -e .`
+- external signed authority provisioning remains an operator/control-plane responsibility rather than a Builder command
 - Linear is the currently implemented task adapter
 - GitHub CLI is required for live PR evidence
 - Neutral Relay and LoopX integrations are environment-specific
-- the first real cross-project pilot remains release-validation evidence in progress
+- cold-start onboarding is still being validated with fresh Local Agents
 
 These limitations are documented rather than hidden behind a production-ready claim.
 

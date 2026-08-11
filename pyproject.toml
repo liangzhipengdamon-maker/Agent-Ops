@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "governloop"
+version = "0.1.0.dev0"
+description = "Governed autonomy for coding agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "GovernLoop contributors" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+]
+
+[project.scripts]
+governloop = "governloop_runtime.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "tools"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["tools"]
+include = ["governloop_runtime*", "agentops_runtime*"]
