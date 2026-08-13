@@ -84,8 +84,8 @@ def _is_path_allowed(path: str, allowed: Iterable[str]) -> bool:
 
     Relative paths keep the existing repository-scoped semantics. An absolute
     path is allowed only when the already-signed ``allowed_paths`` explicitly
-    contains an absolute root that canonically contains the target. This keeps
-    repo-external access task-bound without introducing a second authority
+    contains a canonical physical absolute root that contains the target. This
+    keeps repo-external access task-bound without introducing a second authority
     schema or operator path.
     """
     raw = path or "."
@@ -103,7 +103,13 @@ def _is_path_allowed(path: str, allowed: Iterable[str]) -> bool:
                 continue
             if ".." in a.split(os.sep):
                 continue
+            signed_root = os.path.normpath(a)
             root = os.path.realpath(a)
+            # The signed entry itself must already name the physical canonical
+            # root. A symlink alias could otherwise be retargeted after signing
+            # and silently move positive authority to another directory.
+            if signed_root != root:
+                continue
             # Never turn an explicit external-path allowance into whole-disk
             # authority. Wider roots can be added deliberately in a future
             # policy if a real use case requires them.
