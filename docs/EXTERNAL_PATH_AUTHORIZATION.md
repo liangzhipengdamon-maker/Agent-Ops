@@ -23,12 +23,6 @@ With a signed authority such as:
 
 GovernLoop may allow that exact external directory and its canonical descendants for the already-authorized task and operations.
 
-It still blocks:
+It still blocks sibling directories, `..` traversal, symlink escape outside the authorized root, filesystem-root (`/`) authorization, and lifecycle actions not separately authorized.
 
-- sibling directories;
-- `..` traversal;
-- symlink escape outside the authorized root;
-- filesystem-root (`/`) authorization;
-- lifecycle actions not separately authorized.
-
-This is an explicit path exception, not generic filesystem IAM. AWG is only the first real acceptance case; the mechanism is project-agnostic.
+This is an explicit path exception, not generic filesystem IAM. The mechanism is project-agnostic.
