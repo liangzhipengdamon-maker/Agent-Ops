@@ -34,7 +34,16 @@ Repository authority can be provisioned the same way with `--kind repository`. E
 
 The operator OS identity must differ from the Builder/runtime uid and must own the protected control root. Same-uid convention is not an authority boundary. If the required OS separation is absent, provisioning blocks rather than weakening the runtime verifier.
 
-`governloop-operator inspect` is read-only. `governloop-operator revoke --authority-id ...` records protected local revocation state; the external-path verifier consumes that state fail-closed.
+`governloop-operator inspect` is read-only. In this narrow revision, protected local revocation is implemented only for external-path authority:
+
+```bash
+governloop-operator revoke \
+  --runtime-user <builder-user> \
+  --kind external_path \
+  --authority-id <authority-id>
+```
+
+The external-path verifier consumes that state fail-closed. Legacy repository-authority revocation is not claimed by this change.
 
 ## Non-goals
 
