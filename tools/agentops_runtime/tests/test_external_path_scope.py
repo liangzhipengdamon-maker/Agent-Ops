@@ -30,6 +30,19 @@ class ExternalPathScopeTests(unittest.TestCase):
         self.assertTrue(_is_path_allowed(str(self.root), allowed))
         self.assertTrue(_is_path_allowed(str(self.root / "file.txt"), allowed))
 
+    def test_allowed_absolute_root_itself_cannot_be_symlink(self):
+        link = self.base / "authorized-link"
+        link.symlink_to(self.root, target_is_directory=True)
+        self.assertFalse(_is_path_allowed(str(self.root / "file.txt"), (str(link),)))
+
+    def test_retargeted_allowed_root_symlink_stays_blocked(self):
+        link = self.base / "authorized-link"
+        link.symlink_to(self.root, target_is_directory=True)
+        self.assertFalse(_is_path_allowed(str(self.root / "file.txt"), (str(link),)))
+        link.unlink()
+        link.symlink_to(self.sibling, target_is_directory=True)
+        self.assertFalse(_is_path_allowed(str(self.sibling / "file.txt"), (str(link),)))
+
     def test_sibling_escape_is_blocked(self):
         self.assertFalse(_is_path_allowed(str(self.sibling / "file.txt"), (str(self.root),)))
 
