@@ -2,7 +2,7 @@
 
 The CLI intentionally never reads signing keys. It installs already-signed
 GovernLoop control documents under a runtime user's fixed protected control
-root, manages local revocation state, and provides read-only inspection.
+root, manages external-path revocation state, and provides read-only inspection.
 """
 from __future__ import annotations
 
@@ -143,13 +143,15 @@ def _revocations(root):
 
 
 def cmd_revoke(args):
+    if args.kind != "external_path":
+        raise RuntimeError("v1 local revocation is implemented only for external_path authority")
     root = _root(args.runtime_user)
     _owned(root)
     ids = _revocations(root)
     ids.add(args.authority_id)
     target = root / "revocations.json"
     _write(target, json.dumps({"schema": "governloop-revocations-v1", "revoked_authority_ids": sorted(ids)}, indent=2, sort_keys=True) + "\n")
-    return {"ok": True, "action": "revoke", "authority_id": args.authority_id, "path": str(target)}
+    return {"ok": True, "action": "revoke", "kind": args.kind, "authority_id": args.authority_id, "path": str(target)}
 
 
 def cmd_inspect(args):
@@ -165,7 +167,7 @@ def cmd_inspect(args):
                 except (OSError, json.JSONDecodeError):
                     payload = {"unreadable": True}
                 items.append({"kind": sub, "path": str(path), "payload": payload})
-    return {"ok": True, "action": "inspect", "control_root": str(root), "revoked_authority_ids": sorted(_revocations(root)) if root.exists() else [], "items": items}
+    return {"ok": True, "action": "inspect", "control_root": str(root), "revoked_external_authority_ids": sorted(_revocations(root)) if root.exists() else [], "items": items}
 
 
 def build_parser():
@@ -179,6 +181,7 @@ def build_parser():
             command.add_argument("--kind", choices=("repository", "external_path"), required=True)
     command = sub.add_parser("revoke")
     command.add_argument("--runtime-user", required=True)
+    command.add_argument("--kind", choices=("external_path",), required=True)
     command.add_argument("--authority-id", required=True)
     command = sub.add_parser("inspect")
     command.add_argument("--runtime-user", required=True)
