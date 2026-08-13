@@ -19,6 +19,7 @@ classifiers = [
 
 [project.scripts]
 governloop = "governloop_runtime.__main__:main"
+governloop-operator = "governloop_runtime.operator_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "tools"}
