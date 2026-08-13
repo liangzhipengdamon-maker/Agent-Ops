@@ -14,7 +14,6 @@ import sys
 from ._compat import configure_process
 from . import authority
 from . import doctor
-from . import external_path
 from . import setup_wizard
 
 
@@ -43,12 +42,6 @@ def cmd_setup(args):
 
 def cmd_authority_check(args):
     out = authority.verify_authority(args.task_id, expected_repo=args.repo)
-    print(json.dumps(out, indent=2, ensure_ascii=False))
-    return 0 if out.get("ok") else 2
-
-
-def cmd_external_path_check(args):
-    out = external_path.verify_external_authority(args.task_id, args.operation, args.target)
     print(json.dumps(out, indent=2, ensure_ascii=False))
     return 0 if out.get("ok") else 2
 
@@ -126,7 +119,6 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("setup"); p.add_argument("--repo"); p.add_argument("--config-file", default=setup_wizard.DEFAULT_CONFIG_PATH); p.add_argument("--cdp-port", type=int); p.add_argument("--browser-profile"); p.add_argument("--setup-port", type=int, default=0); p.add_argument("--no-open", action="store_true")
     p = sub.add_parser("authority-check"); p.add_argument("--task-id", required=True); p.add_argument("--repo", required=True)
-    p = sub.add_parser("external-path-check", help="verify one explicit repo-external path exception"); p.add_argument("--task-id", required=True); p.add_argument("--target", required=True); p.add_argument("--operation", required=True)
     p = sub.add_parser("doctor", help="read-only first-task readiness diagnostics"); p.add_argument("--task-id", required=True); p.add_argument("--repo", required=True); p.add_argument("--pr"); p.add_argument("--no-reviewer-probe", action="store_true")
     for name in ("run-auto", "run-manual"):
         p = sub.add_parser(name); p.add_argument("--task-id", required=True); p.add_argument("--repo", required=True); p.add_argument("--pr", required=True)
@@ -141,7 +133,6 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.command == "setup": return cmd_setup(args)
     if args.command == "authority-check": return cmd_authority_check(args)
-    if args.command == "external-path-check": return cmd_external_path_check(args)
     if args.command == "doctor": return cmd_doctor(args)
     if args.command in ("run-auto", "run-manual"): return cmd_step(args)
     if args.command == "watch": return cmd_watch(args)
