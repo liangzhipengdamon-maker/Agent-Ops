@@ -1,4 +1,9 @@
-"""Verify-only manual approval evidence for Doctor checks."""
+"""Verify-only manual approval evidence for one narrow Doctor exception.
+
+Manual approval is not a second authority channel. It may only release an exact
+worktree-scope contamination check after the primary signed authority already
+verified. All other BLOCKED checks remain hard blocks.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -10,6 +15,17 @@ from . import authority, operator_channel
 SCHEMA = "governloop-manual-approval-v1"
 SIGNATURE_NAMESPACE = "governloop-manual-approval"
 _REQUEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_APPROVABLE_DETAIL = "uncommitted paths outside operator-bound scope"
+
+
+def is_approvable(check):
+    data = check.get("data") or {}
+    return (
+        check.get("status") == "BLOCKED"
+        and check.get("name") == "worktree_scope"
+        and check.get("detail") == _APPROVABLE_DETAIL
+        and bool(data.get("outside_paths"))
+    )
 
 
 def request_id(task_id, check):
@@ -57,7 +73,7 @@ def verify_approval(task_id, rid):
 def apply_to_checks(task_id, checks):
     requests = []
     for check in checks:
-        if check.get("status") != "BLOCKED":
+        if not is_approvable(check):
             continue
         rid = request_id(task_id, check)
         check["request_id"] = rid

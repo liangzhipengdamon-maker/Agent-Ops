@@ -11,7 +11,7 @@ import re
 import subprocess
 from typing import Optional
 
-from . import authority, setup_wizard
+from . import authority, manual_approval, setup_wizard
 
 _GITHUB_RE = re.compile(r"(?:github\.com[:/]|git@github\.com:)([^/\s]+/[^/\s]+?)(?:\.git)?$")
 _NEXT_ACTION_ORDER = (
@@ -370,10 +370,13 @@ def run_doctor(task_id, repo, pr=None, *, probe_reviewer=True):
     checks.append(linear)
     checks.append(_reviewer_check(repo, probe=probe_reviewer))
     checks.append(_pr_check(repo, pr, verified))
+
+    checks, approval_requests = manual_approval.apply_to_checks(task_id, checks)
     status = "BLOCKED" if any(c["status"] == "BLOCKED" for c in checks) else (
         "BOOTSTRAP_REQUIRED" if any(c["status"] == "EXPECTED_GATE" for c in checks) else "READY")
     result = {"tool": "GovernLoop Doctor", "task_id": task_id, "repo": repo,
               "pr": str(pr) if pr else None, "status": status, "checks": checks,
+              "approval_requests": approval_requests,
               "mutations_performed": False}
     key, next_action = _select_next_action(checks)
     if key:
