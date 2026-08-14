@@ -317,9 +317,14 @@ def decide(task_id: str, repo: str, pr: str) -> dict:
                 "findings": [], "checkpoint_reached": False,
                 "decision_request": "specify Execution Mode AUTO|MANUAL"}
 
+    # Propagate the resolved mode into apply_verified_authority — otherwise
+    # the second authority projection silently defaults to ``signed`` and
+    # resets the interactive_local fallback that ``_compat.configure_process``
+    # opted into via AGENTOPS_MODE.
+    mode = _resolve_mode()
     try:
         from governloop_runtime.authority import apply_verified_authority
-        authority_status = apply_verified_authority(task_id, expected_repo=repo)
+        authority_status = apply_verified_authority(task_id, expected_repo=repo, mode=mode)
     except Exception as exc:
         try:
             from governloop_runtime.authority import clear_positive_process_authority

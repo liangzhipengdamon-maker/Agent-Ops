@@ -741,5 +741,132 @@ class SurfaceTests(unittest.TestCase):
         self.assertEqual(c.command, "task-scope-check")
 
 
+# ------------------------------------------------------------------ #
+# F. P1 regression: decide() must propagate AGENTOPS_MODE into      #
+#    apply_verified_authority so the second authority projection in  #
+#    the runtime loop does not silently fall back to ``signed``.     #
+# ------------------------------------------------------------------ #
+
+
+class DecideModePropagationTests(unittest.TestCase):
+    """Real ``decide() → review → builder_handoff`` path under mocks.
+
+    The only assertion of interest for the P1 fix is which ``mode``
+    apply_verified_authority gets called with. The rest of the runtime
+    downstream (Linear / GitHub / git worktree) is mocked away so we can
+    exercise ``decide()`` end to end and observe the propagation without
+    hitting the network.
+    """
+
+    def _policy(self):
+        from agentops_runtime.scope_firewall import ScopePolicy
+        return ScopePolicy(
+            task_id="AGE-IL", repository=ALT_REPO, branch=ALT_BRANCH,
+            base_sha=BASE, head_sha="",
+            allowed_paths=("tools/",),
+            allowed_operations=("fix", "continue", "complete"),
+            protected_repositories=(
+                "liangzhipengdamon-maker/LearnMind-English",
+                "liangzhipengdamon-maker/AI-Investment-Lab"),
+            allowed_ready_merge_deploy=False,
+            binding_ok=True, authoritative_changed_files=(),
+            changed_files_unreadable=False,
+        )
+
+    def _review(self):
+        from agentops_runtime.review_intake import ReviewOutcome
+        return ReviewOutcome(
+            state="COMMENTED", decision="PASS",
+            repo=ALT_REPO, pr=42, head=HEAD_PIN, findings=[])
+
+    def _spec(self):
+        from agentops_runtime.task_intake import TaskSpec
+        return TaskSpec(
+            identifier="AGE-IL", mode="AUTO", checkpoint=None,
+            acceptance_criteria=[])
+
+    def _run_decide(self, ag_mode_env):
+        if ag_mode_env is None:
+            os.environ.pop("AGENTOPS_MODE", None)
+        else:
+            os.environ["AGENTOPS_MODE"] = ag_mode_env
+        try:
+            with mock.patch("agentops_runtime.task_intake.spec_from_linear",
+                             return_value=self._spec()), \
+                 mock.patch("agentops_runtime.linear_adapter.read_linear_issue",
+                             return_value=None), \
+                 mock.patch("governloop_runtime.authority.apply_verified_authority",
+                             return_value={"ok": True,
+                                           "status": "INTERACTIVE_LOCAL",
+                                           "authority_id": "interactive-local-AGE-IL",
+                                           "missing": [], "detail": "task-scope"}) as ava, \
+                 mock.patch("agentops_runtime.runtime_loop.read_pr_head",
+                             return_value=HEAD_PIN), \
+                 mock.patch("agentops_runtime.runtime_loop._pr_state",
+                             return_value={"state": "OPEN"}), \
+                 mock.patch("agentops_runtime.runtime_loop._pr_json_full",
+                             return_value={"headRefOid": HEAD_PIN,
+                                           "headRefName": ALT_BRANCH,
+                                           "baseRefOid": BASE}), \
+                 mock.patch("agentops_runtime.runtime_loop._pr_changed_files",
+                             return_value=[]), \
+                 mock.patch("agentops_runtime.runtime_loop.read_github_pr",
+                             return_value=self._review()), \
+                 mock.patch("agentops_runtime.runtime_loop._load_scope_policy",
+                             return_value=self._policy()), \
+                 mock.patch("agentops_runtime.runtime_loop.builder_handoff",
+                             return_value={"ok": True, "state": "CONTINUE"}), \
+                 mock.patch("governloop_runtime.completion.verify_completion",
+                             return_value={"ok": False}), \
+                 mock.patch("agentops_runtime.runtime_loop._loopx_refresh",
+                             return_value={"ok": True}):
+                from agentops_runtime import runtime_loop as rl
+                outcome = rl.decide("AGE-IL", ALT_REPO, "42")
+            return ava, outcome
+        finally:
+            if ag_mode_env is None:
+                os.environ.pop("AGENTOPS_MODE", None)
+
+    def _ava_repo_call(self, ava):
+        for c in ava.call_args_list:
+            if c.kwargs.get("expected_repo") == ALT_REPO:
+                return c
+        self.fail("apply_verified_authority was never called with expected_repo="
+                  + ALT_REPO)
+
+    def test_interactive_local_mode_is_propagated_through_decide(self):
+        ava, outcome = self._run_decide("interactive_local")
+        call = self._ava_repo_call(ava)
+        self.assertEqual(call.kwargs.get("mode"), "interactive_local")
+        # outcome carries the INTERACTIVE_LOCAL status fed in by the mock.
+        self.assertEqual(outcome["authority"]["status"], "INTERACTIVE_LOCAL")
+
+    def test_signed_default_mode_is_propagated_through_decide(self):
+        # No AGENTOPS_MODE in the process env: legacy callers default to signed.
+        ava, outcome = self._run_decide(None)
+        call = self._ava_repo_call(ava)
+        self.assertEqual(call.kwargs.get("mode"), "signed")
+        self.assertEqual(outcome["authority"]["status"], "INTERACTIVE_LOCAL")
+
+    def test_explicit_signed_mode_is_propagated_through_decide(self):
+        ava, outcome = self._run_decide("signed")
+        call = self._ava_repo_call(ava)
+        self.assertEqual(call.kwargs.get("mode"), "signed")
+
+    def test_unknown_mode_env_falls_back_to_signed(self):
+        ava, _ = self._run_decide("garbage")
+        call = self._ava_repo_call(ava)
+        self.assertEqual(call.kwargs.get("mode"), "signed")
+
+    def test_decide_keeps_loopx_refresh_after_builder_handoff(self):
+        # Sanity: full decide() runs through the AUTO/PASS branch and the
+        # outcome is well-formed; we are not just observing the early exit.
+        _, outcome = self._run_decide("interactive_local")
+        self.assertEqual(outcome["phase"], "PASSED")
+        self.assertEqual(outcome["review_decision"], "PASS")
+        self.assertEqual(outcome["authority"]["status"], "INTERACTIVE_LOCAL")
+        self.assertTrue(outcome.get("loopx", {}).get("ok"))
+
+
 if __name__ == "__main__":
     unittest.main()
