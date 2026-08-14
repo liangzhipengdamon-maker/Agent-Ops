@@ -22,23 +22,49 @@ def _bridge_dir() -> str:
     return os.environ.get("AGENT_BRIDGE_DIR", ".agent-bridge")
 
 
-def _verified_scope_policy(task_id: str, repo: str, head_sha: str) -> "ScopePolicy":
+def _resolve_mode() -> str:
+    """Resolve the positive authority mode from process env.
+
+    Projected by ``governloop_runtime._compat.configure_process``. Defaults
+    to ``"signed"`` so legacy / direct ``agentops_runtime`` callers keep
+    their existing semantics; the interactive_local fallback is opt-in.
+    """
+    m = os.environ.get("AGENTOPS_MODE", "").strip().lower()
+    return m if m in ("signed", "interactive_local") else "signed"
+
+
+def _verified_scope_policy(task_id: str, repo: str, head_sha: str,
+                            mode: str = "signed") -> "ScopePolicy":
     from .scope_firewall import ScopePolicy
     try:
-        from governloop_runtime.authority import verify_authority
+        from governloop_runtime.authority import (
+            verify_authority, verify_task_scope,
+        )
         verified = verify_authority(task_id, expected_repo=repo)
     except Exception as exc:
         verified = {"ok": False, "detail": f"authority verifier unavailable: {exc}"}
+    if mode == "interactive_local" and not verified.get("ok"):
+        try:
+            ts = verify_task_scope(task_id, expected_repo=repo)
+        except Exception as exc:
+            ts = {"ok": False, "detail": f"task-scope verifier unavailable: {exc}"}
+        if ts.get("ok"):
+            verified = ts
     payload = verified.get("payload") or {} if verified.get("ok") else {}
     protected = tuple(r.strip() for r in
         os.environ.get("AGENTOPS_PROTECTED_REPOSITORIES", "").split(",") if r.strip())
     if not protected:
         protected = ("liangzhipengdamon-maker/LearnMind-English",
                      "liangzhipengdamon-maker/AI-Investment-Lab")
+    # Head pin only comes from task-scope payload; caller head is the live
+    # observed PR head and is not a pin. baseline_sha != head_sha is legal;
+    # only an explicit payload.head_sha pin triggers drift detection in
+    # ``evaluate_scope.head_exact``.
+    head_pin = str(payload.get("head_sha") or "")
     return ScopePolicy(
         task_id=task_id, repository=repo,
         branch=str(payload.get("branch") or ""),
-        base_sha=str(payload.get("baseline_sha") or ""), head_sha=head_sha,
+        base_sha=str(payload.get("baseline_sha") or ""), head_sha=head_pin,
         allowed_paths=tuple(payload.get("allowed_paths") or ()),
         allowed_operations=tuple(payload.get("allowed_operations") or ()),
         protected_repositories=protected, allowed_ready_merge_deploy=False,
@@ -94,13 +120,18 @@ def builder_handoff(task_id: str, repo: str, pr: str, head: str,
                     phase: str, findings: list,
                     policy: Optional["ScopePolicy"] = None,
                     observed_branch: str = "",
-                    observed_base: str = "") -> dict:
+                    observed_base: str = "",
+                    mode: Optional[str] = None) -> dict:
     from .scope_firewall import evaluate_builder_wake, WorktreeState
+    if mode is None:
+        mode = _resolve_mode()
+    if mode not in ("signed", "interactive_local"):
+        mode = "signed"
     bd = _bridge_dir()
     if policy is None:
         return {"ok": False, "blocked": True, "state": phase,
                 "bridge": bd, "reason": "no scope policy bound for Builder wake"}
-    verified_policy = _verified_scope_policy(task_id, repo, head)
+    verified_policy = _verified_scope_policy(task_id, repo, head, mode=mode)
     if not verified_policy.binding_ok:
         return {"ok": False, "blocked": True, "state": phase,
                 "bridge": bd,
