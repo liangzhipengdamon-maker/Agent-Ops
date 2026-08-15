@@ -132,9 +132,11 @@ def save_binding(config_path, repository, conversation_url, cdp_port,
 def initial_values(config_path=DEFAULT_CONFIG_PATH, repository=None,
                    cdp_port=None, browser_profile=None):
     _configure_legacy_module()
+    # Pass None through so the reviewed legacy helper can prefer an existing
+    # runtime.browser_profile before falling back to the canonical default.
     return _legacy.initial_values(
         config_path, repository=repository, cdp_port=cdp_port,
-        browser_profile=browser_profile or DEFAULT_BROWSER_PROFILE)
+        browser_profile=browser_profile)
 
 
 def create_setup_server(config_path=DEFAULT_CONFIG_PATH, repository=None,
@@ -145,7 +147,7 @@ def create_setup_server(config_path=DEFAULT_CONFIG_PATH, repository=None,
         config_path=config_path,
         repository=repository,
         cdp_port=cdp_port,
-        browser_profile=browser_profile or DEFAULT_BROWSER_PROFILE,
+        browser_profile=browser_profile,
         setup_port=setup_port,
         connection_tester=connection_tester,
     )
@@ -292,7 +294,7 @@ def run_setup(config_path=DEFAULT_CONFIG_PATH, repository=None, cdp_port=None,
     """Start/reuse the dedicated browser, then run the existing binding wizard."""
     values = initial_values(
         config_path, repository=repository, cdp_port=cdp_port,
-        browser_profile=browser_profile or DEFAULT_BROWSER_PROFILE)
+        browser_profile=browser_profile)
     runtime = ensure_browser_runtime(values["cdp_port"], values["browser_profile"])
     print(f"BROWSER_RUNTIME: {runtime.get('status')}")
     if not runtime.get("ok"):
