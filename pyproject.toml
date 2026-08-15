@@ -27,3 +27,6 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["tools"]
 include = ["governloop_runtime*", "agentops_runtime*"]
+
+[tool.setuptools.package-data]
+governloop_runtime = ["skills/governloop/SKILL.md"]
