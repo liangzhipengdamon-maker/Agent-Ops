@@ -31,7 +31,10 @@ class TestIssue53CliDiscovery(unittest.TestCase):
             rc = cli.main(["--help"])
         self.assertEqual(rc, 0)
         runtime_main.assert_called_once_with(["--help"])
-        self.assertIn("run `governloop start` in the target repository", out.getvalue())
+        text = out.getvalue()
+        self.assertIn("GovernLoop coding-agent entrypoints", text)
+        self.assertIn("governloop start", text)
+        self.assertIn("governloop setup", text)
 
     def test_existing_commands_delegate_unchanged(self):
         argv = ["doctor", "--task-id", "AGE-X", "--repo", "owner/repo"]
