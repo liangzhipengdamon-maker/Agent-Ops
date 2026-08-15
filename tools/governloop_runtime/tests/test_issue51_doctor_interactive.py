@@ -80,7 +80,7 @@ class TestIssue51DoctorInteractiveOnboarding(unittest.TestCase):
         self.assertEqual(out["next_required_action"]["action"], "run `governloop setup --repo owner/repo`")
         self.assertFalse(out["mutations_performed"])
 
-    def test_no_signed_or_task_scope_keeps_existing_fail_closed_behavior(self):
+    def test_no_signed_or_task_scope_routes_to_interactive_bootstrap(self):
         with mock.patch("governloop_runtime.doctor.authority.verify_authority", return_value=MISSING), \
              mock.patch("governloop_runtime.doctor.authority.verify_task_scope", return_value=MISSING), \
              mock.patch("governloop_runtime.doctor._git_checks", return_value=[]), \
@@ -91,8 +91,10 @@ class TestIssue51DoctorInteractiveOnboarding(unittest.TestCase):
             out = doctor.run_doctor("AGE-X", "owner/repo")
         self.assertEqual(out["status"], "BLOCKED")
         self.assertIsNone(out["authority_source"])
-        self.assertEqual(out["next_required_external_action"]["check"], "positive_authority")
-        self.assertIn("external operator", out["next_required_external_action"]["action"])
+        self.assertNotIn("next_required_external_action", out)
+        self.assertEqual(out["next_required_action"]["check"], "positive_authority")
+        self.assertIn("governloop setup-task-scope", out["next_required_action"]["action"])
+        self.assertIn("--host-confirm", out["next_required_action"]["action"])
 
 
 if __name__ == "__main__":

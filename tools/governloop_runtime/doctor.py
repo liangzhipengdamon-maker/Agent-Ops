@@ -3,8 +3,10 @@
 Doctor observes the current environment and existing positive authority. Signed
 operator authority remains the preferred source. If it is absent, doctor may
 reuse an already-recorded, independently verified interactive-local task scope
-for diagnostics; doctor never creates or broadens either authority source.
-It never creates authority, credentials, branches, PRs, or lifecycle decisions.
+for diagnostics; when neither source exists, doctor routes the fresh task to
+the existing Interactive Local task-scope bootstrap without creating or
+broadening authority itself. It never creates authority, credentials, branches,
+PRs, or lifecycle decisions.
 """
 from __future__ import annotations
 
@@ -319,7 +321,7 @@ def _pr_check(repo, pr: Optional[str], verified):
 
 def _is_external_action(check):
     if check.get("name") == "positive_authority":
-        return True
+        return "setup-task-scope" not in check.get("next_action", "")
     if check.get("name") == "linear_task" and "Execution Mode" in check.get("detail", ""):
         return True
     return False
@@ -385,8 +387,16 @@ def run_doctor(task_id, repo, pr=None, *, probe_reviewer=True):
         ignored = signed_attempt.get("ignored_process_authority_fields") or []
         if ignored:
             detail += "; ignored raw process fields: " + ", ".join(ignored)
-        checks.append(_check("positive_authority", "BLOCKED", detail,
-                             next_action="external operator must provision a valid signed authority document through the OS-protected control channel; runtime/Builder cannot mint it"))
+        checks.append(_check(
+            "positive_authority",
+            "BLOCKED",
+            detail + "; no verified Interactive Local task scope exists yet",
+            next_action=(
+                "bootstrap Interactive Local with `governloop setup-task-scope` for this exact task/repository; "
+                "present the exact branch, baseline SHA, allowed paths/operations, and trusted reviewers in the coding-agent host, "
+                "then after explicit user approval rerun that exact command with `--host-confirm`; do not mint signed authority"
+            ),
+        ))
     checks.extend(_git_checks(repo, verified))
     checks.append(_github_auth_check())
     linear, _ = _linear_check(task_id)
