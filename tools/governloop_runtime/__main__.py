@@ -21,6 +21,7 @@ import os
 import sys
 import tempfile
 import time
+import uuid
 
 from ._compat import configure_process
 from . import authority
@@ -356,9 +357,26 @@ def cmd_step(args):
     return 0
 
 
+_REVIEW_GATE_PHASES = frozenset({"REVIEW", "PASSED", "FIX"})
+
+
 def cmd_interactive_local(args):
-    """Interactive-local runtime entry. Same caller shape as run-auto."""
-    _, _, decide, _, authority_status = _legacy_runtime(
+    """Interactive-local runtime entry. Same caller shape as run-auto.
+
+    Issue #49: reuse the existing GovernLoop-owned Neutral Relay and the
+    exact-bound review protocol already owned by the runtime. After ``decide()``
+    runs, a review-waiting gate (REVIEW / PASSED / FIX) is handed off to the
+    external GPT reviewer via ``relay_client.final_result_auto_review`` — the
+    same contract ``cmd_final_result_review`` uses, including its internal
+    (pr, head) dedupe. We do NOT reimplement dedupe/report logic.
+
+    Lifecycle/status reporting for WAITING_PO_AUTH is already performed
+    automatically inside ``decide()`` via ``_gate_status_report``; we do not
+    duplicate it. BLOCKED/TERMINAL stay print-only, matching existing run-auto
+    behavior. Relay failure is fail-closed (non-zero exit, never silent
+    success); this never grants Ready/Merge/Deploy or alters task scope.
+    """
+    relay_client, _, decide, _bridge_dir_fn, authority_status = _legacy_runtime(
         task_id=args.task_id, expected_repo=args.repo, mode="interactive_local")
     if not authority_status.get("ok"):
         _print_authority_block(args.task_id, args.repo, authority_status,
@@ -367,7 +385,44 @@ def cmd_interactive_local(args):
     outcome = decide(args.task_id, args.repo, args.pr)
     outcome.setdefault("authority", {"status": authority_status.get("status"),
                                       "authority_id": authority_status.get("authority_id")})
+
+    handoff = None
+    phase = outcome.get("phase") or "UNKNOWN"
+    if phase in _REVIEW_GATE_PHASES:
+        head = outcome.get("head") or ""
+        req_id = f"IL_HANDOFF_{uuid.uuid4().hex[:12]}"
+        payload = (
+            f"REVIEW_REQUEST_ID: {req_id}\n"
+            f"REPO: {args.repo}\n"
+            f"PR: {args.pr}\n"
+            f"HEAD: {head}\n"
+            f"REQUEST: status_report\n"
+            f"STATE: WAITING_REVIEW\n"
+            f"GATE: {phase}\n"
+        )
+        result = relay_client.final_result_auto_review(
+            args.repo, args.pr, head, payload, _bridge_dir_fn(),
+            "/tmp/governloop_runtime_report")
+        delivered = bool(result.get("status_delivered")) or bool(result.get("deduped"))
+        handoff = {
+            "handoff": "auto_review", "state": phase, "review_gate": True,
+            "deduped": bool(result.get("deduped")),
+            "status_delivered": result.get("status_delivered"),
+            "review_sent": result.get("review_sent"),
+            "succeeded": result.get("succeeded"),
+            "binding_ok": result.get("binding_ok"),
+            "delivered": delivered, "ok": delivered,
+            "detail": result.get("detail"),
+        }
+
+    if handoff is not None:
+        outcome["handoff"] = handoff
+
     print(json.dumps(outcome, indent=2, ensure_ascii=False))
+    # Fail-closed: a review handoff that was attempted but not delivered is a
+    # hard failure. We never silently claim the reviewer received the result.
+    if handoff is not None and not handoff.get("delivered"):
+        return 1
     return 0
 
 
