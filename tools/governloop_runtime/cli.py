@@ -222,15 +222,15 @@ def _arg_value(args: list[str], name: str) -> str | None:
     return args[index + 1]
 
 
-def _record_host_confirm_provenance(task_id: str) -> None:
+def _record_host_confirm_provenance(task_id: str) -> bool:
     """Add truthful host-confirm provenance without changing scope semantics."""
     path = runtime_cli.authority.task_scope_path(task_id)
     if path is None or not path.exists():
-        return
+        return False
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(doc, dict):
-            return
+            return False
         doc["confirmation_transport"] = _HOST_CONFIRM_TRANSPORT
         doc["integrity_sha256"] = runtime_cli.authority._task_scope_integrity(doc)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -246,8 +246,9 @@ def _record_host_confirm_provenance(task_id: str) -> None:
         finally:
             if os.path.exists(tmp):
                 os.unlink(tmp)
+        return True
     except (OSError, json.JSONDecodeError):
-        return
+        return False
 
 
 def _setup_task_scope_with_host_confirm(args: list[str]) -> int:
@@ -284,7 +285,13 @@ def _setup_task_scope_with_host_confirm(args: list[str]) -> int:
 
     wrote_scope = rc == 0 and task_id and (not existed_before or "--replace" in delegated)
     if wrote_scope:
-        _record_host_confirm_provenance(task_id)
+        if not _record_host_confirm_provenance(task_id):
+            print(json.dumps({
+                "status": "HOST_CONFIRM_PROVENANCE_WRITE_FAILED",
+                "task_id": task_id,
+                "detail": "task scope was written but host-confirm provenance could not be recorded",
+            }, indent=2, ensure_ascii=False))
+            return 7
         verified = runtime_cli.authority.verify_task_scope(
             task_id, expected_repo=_arg_value(delegated, "--repo"))
         if not verified.get("ok"):
