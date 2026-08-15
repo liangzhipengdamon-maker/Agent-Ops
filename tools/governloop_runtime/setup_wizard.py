@@ -134,6 +134,29 @@ def _runtime_marker_matches(browser_profile, marker=RUNTIME_MARKER):
     return True
 
 
+def _profile_active_cdp_port(browser_profile):
+    """Read Chrome's own active DevTools port for this exact profile.
+
+    Chrome writes ``DevToolsActivePort`` inside the user-data directory when a
+    remote-debugging endpoint is active. This is profile-local runtime metadata,
+    not an authority source. Missing, malformed, or out-of-range data is ignored.
+    """
+    profile = normalize_profile_path(browser_profile)
+    path = os.path.join(profile, "DevToolsActivePort")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            first_line = handle.readline().strip()
+    except OSError:
+        return None
+    try:
+        port = int(first_line, 10)
+    except (TypeError, ValueError):
+        return None
+    if port < 1 or port > 65535:
+        return None
+    return port
+
+
 def save_binding(config_path, repository, conversation_url, cdp_port,
                  browser_profile):
     """Persist only a currently reachable exact reviewer conversation."""
@@ -221,14 +244,30 @@ def ensure_browser_runtime(cdp_port, browser_profile, *, popen=None,
     """Reuse or start the dedicated GovernLoop Chrome runtime.
 
     This is setup UX, not an authority channel. It never grants task scope or
-    lifecycle permission. A live CDP port is reused only when the configured
-    GovernLoop profile already carries the runtime marker Neutral Relay trusts;
-    an unrelated process on the port fails closed.
+    lifecycle permission. A live endpoint is reused only for the configured
+    GovernLoop profile under the existing same-user runtime-marker contract;
+    an unrelated process on the configured port still fails closed.
     """
     port = normalize_cdp_port(cdp_port)
     profile = normalize_profile_path(browser_profile)
+    marker_matches = _runtime_marker_matches(profile)
+
+    # Real E2E case (#59): Chrome may already own this exact GovernLoop profile
+    # on a different port than the currently configured default. Prefer Chrome's
+    # own profile-local runtime metadata before attempting a second launch.
+    if marker_matches:
+        active_port = _profile_active_cdp_port(profile)
+        if active_port is not None and _cdp_reachable(active_port):
+            return {
+                "ok": True,
+                "status": "BROWSER_REUSED",
+                "cdp_port": active_port,
+                "browser_profile": profile,
+                "runtime_source": "DevToolsActivePort",
+            }
+
     if _cdp_reachable(port):
-        if not _runtime_marker_matches(profile):
+        if not marker_matches:
             return {
                 "ok": False,
                 "status": "BROWSER_RUNTIME_BLOCKED",
@@ -319,10 +358,16 @@ def run_setup(config_path=DEFAULT_CONFIG_PATH, repository=None, cdp_port=None,
         print(f"NEXT_REQUIRED_ACTION: {runtime.get('next_required_action')}")
         return 2
 
+    # The existing profile may already be live on a different CDP port. Once
+    # verified by ensure_browser_runtime, carry that actual endpoint through the
+    # existing wizard/binding path instead of reverting to the stale configured port.
+    runtime_port = runtime.get("cdp_port", values["cdp_port"])
+    runtime_profile = runtime.get("browser_profile", values["browser_profile"])
     server, state, url = create_setup_server(
         config_path=config_path, repository=repository,
-        cdp_port=values["cdp_port"], browser_profile=values["browser_profile"],
+        cdp_port=runtime_port, browser_profile=runtime_profile,
         setup_port=setup_port)
+    print(f"BROWSER_CDP_PORT: {runtime_port}")
     print("SETUP_BIND_HOST: 127.0.0.1")
     print(f"SETUP_URL: {url}")
     print(f"CONFIG_PATH: {normalize_config_path(config_path)}")
