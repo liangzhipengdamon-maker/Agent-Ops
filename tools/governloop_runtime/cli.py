@@ -175,8 +175,21 @@ def _setup_with_detected_repo(args: list[str]) -> int:
     return runtime_cli.main([args[0], "--repo", repo, *args[1:]])
 
 
+def _print_agent_help() -> None:
+    print("GovernLoop coding-agent entrypoints:")
+    print("  governloop start          use GovernLoop for the current task/repository")
+    print("  governloop setup          connect the current repository to a ChatGPT reviewer")
+    print("  governloop instructions   print canonical agent operating instructions")
+    print()
+    print("Advanced/runtime commands:")
+
+
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
+    if not args:
+        _print_agent_help()
+        print("Run `governloop --help` for the full command list.")
+        return 0
     if args == ["instructions"]:
         print(AGENT_INSTRUCTIONS, end="")
         return 0
@@ -185,6 +198,5 @@ def main(argv=None):
     if args and args[0] == "setup":
         return _setup_with_detected_repo(args)
     if args in (["-h"], ["--help"]):
-        print("Coding agents: run `governloop start` in the target repository.\n")
-        print("Explicit reviewer connection: run `governloop setup` in the target repository.\n")
+        _print_agent_help()
     return runtime_cli.main(args)
