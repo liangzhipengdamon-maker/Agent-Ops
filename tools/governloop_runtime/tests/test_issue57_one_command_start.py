@@ -31,9 +31,10 @@ class TestIssue57OneCommandStart(unittest.TestCase):
             "owner/repo",
         )
 
-    def test_non_github_origin_fails_closed(self):
+    def test_non_github_or_ambiguous_origin_fails_closed(self):
         self.assertIsNone(cli._repo_from_origin("https://gitlab.com/owner/repo.git"))
         self.assertIsNone(cli._repo_from_origin("file:///tmp/repo"))
+        self.assertIsNone(cli._repo_from_origin("https://github.com/owner/repo.git?token=bad"))
 
     def test_start_without_task_id_reports_exactly_one_missing_item(self):
         out = io.StringIO()
@@ -92,6 +93,27 @@ class TestIssue57OneCommandStart(unittest.TestCase):
         self.assertEqual(rc, 0)
         detect.assert_not_called()
         runtime_main.assert_called_once_with(argv)
+
+    def test_setup_help_does_not_require_repo_detection(self):
+        argv = ["setup", "--help"]
+        with mock.patch.object(cli, "_detect_current_repo") as detect, \
+             mock.patch.object(cli.runtime_cli, "main", return_value=0) as runtime_main:
+            rc = cli.main(argv)
+        self.assertEqual(rc, 0)
+        detect.assert_not_called()
+        runtime_main.assert_called_once_with(argv)
+
+    def test_bare_governloop_shows_agent_entrypoints_without_runtime_parser(self):
+        out = io.StringIO()
+        with mock.patch.object(cli.runtime_cli, "main") as runtime_main, \
+             contextlib.redirect_stdout(out):
+            rc = cli.main([])
+        self.assertEqual(rc, 0)
+        runtime_main.assert_not_called()
+        text = out.getvalue()
+        self.assertIn("governloop start", text)
+        self.assertIn("governloop setup", text)
+        self.assertIn("governloop instructions", text)
 
 
 if __name__ == "__main__":
