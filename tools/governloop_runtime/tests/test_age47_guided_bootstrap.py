@@ -114,6 +114,9 @@ class TestDoctorNextRequiredAction(unittest.TestCase):
             "governloop_runtime.doctor.authority.verify_authority",
             return_value=missing,
         ), mock.patch(
+            "governloop_runtime.doctor.authority.verify_task_scope",
+            return_value=missing,
+        ), mock.patch(
             "governloop_runtime.doctor._git_checks",
             return_value=[doctor._check("git_repository", "PASS", "origin ok")],
         ), mock.patch(
@@ -134,12 +137,13 @@ class TestDoctorNextRequiredAction(unittest.TestCase):
         ):
             out = doctor.run_doctor("AGE-X", "owner/repo")
         self.assertEqual(out["status"], "BLOCKED")
-        self.assertIn("next_required_external_action", out)
-        self.assertNotIn("next_required_action", out)
+        self.assertIn("next_required_action", out)
+        self.assertNotIn("next_required_external_action", out)
         self.assertEqual(
-            out["next_required_external_action"]["check"],
+            out["next_required_action"]["check"],
             "positive_authority",
         )
+        self.assertIn("setup-task-scope", out["next_required_action"]["action"])
 
     def test_execution_mode_decision_is_external(self):
         check = doctor._check(
