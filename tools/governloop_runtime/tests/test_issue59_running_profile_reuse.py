@@ -9,6 +9,7 @@ from unittest import mock
 _TOOLS = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, _TOOLS)
 
+from governloop_runtime import cli
 from governloop_runtime import setup_wizard
 
 
@@ -16,6 +17,11 @@ class TestIssue59RunningProfileReuse(unittest.TestCase):
     def _write_active_port(self, profile, text):
         with open(os.path.join(profile, "DevToolsActivePort"), "w", encoding="utf-8") as handle:
             handle.write(text)
+
+    def test_agent_does_not_collect_conversation_url_before_wizard(self):
+        text = cli.AGENT_INSTRUCTIONS
+        self.assertIn("Do NOT ask the user for the ChatGPT conversation URL in Agent chat", text)
+        self.assertIn("The existing setup wizard owns that input", text)
 
     def test_reuses_marked_profile_actual_active_port_before_launch(self):
         with tempfile.TemporaryDirectory() as profile:
