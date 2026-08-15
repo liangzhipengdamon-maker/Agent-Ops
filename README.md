@@ -140,11 +140,9 @@ Agent-facing entrypoints:
 
 ```text
 start                  start GovernLoop for the current GitHub repository
-dsetup                 connect/bind the current repository to a ChatGPT reviewer
+setup                  connect/bind the current repository to a ChatGPT reviewer
 instructions           print canonical coding-agent operating instructions
 ```
-
-`setup` above is spelled `governloop setup`; the `dsetup` label is not a command. (This note exists only to avoid ambiguity in rendered monospace alignment.)
 
 Advanced/runtime commands remain available and retain their existing contracts:
 
