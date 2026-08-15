@@ -876,12 +876,15 @@ class DecideModePropagationTests(unittest.TestCase):
 class InteractiveLocalHandoffTests(unittest.TestCase):
     """Interactive Local reuses the existing exact-bound review protocol.
 
-    Review-waiting gates (REVIEW / PASSED / FIX) are handed off to the
-    external GPT reviewer via ``relay_client.final_result_auto_review`` — the
-    same contract ``cmd_final_result_review`` uses, including its internal
-    (pr, head) dedupe. No second state machine, no duplicated dedupe/report
-    logic. WAITING_PO_AUTH is already auto-reported by ``decide()`` via
-    ``_gate_status_report``; BLOCKED/TERMINAL stay print-only.
+    A *new* independent review is requested ONLY when the runtime is genuinely
+    waiting for one — phase == "REVIEW" with no concluded verdict yet.
+    PASSED and FIX are post-review outcomes (review already decided) and MUST
+    NOT trigger another independent review. The handoff uses
+    ``relay_client.final_result_auto_review`` — the same contract
+    ``cmd_final_result_review`` uses, including its internal (pr, head) dedupe.
+    No second state machine, no duplicated dedupe/report logic. WAITING_PO_AUTH
+    is already auto-reported by ``decide()`` via ``_gate_status_report``;
+    BLOCKED/TERMINAL stay print-only.
     """
 
     def setUp(self):
@@ -916,17 +919,34 @@ class InteractiveLocalHandoffTests(unittest.TestCase):
         return rc, out, relay
 
     @staticmethod
+    def _pending_review_outcome(head=HEAD_PIN):
+        # Genuine pending state: decide() kept phase REVIEW because the review
+        # verdict is not yet concluded (no PASS / CHANGES_REQUESTED).
+        return {"mode": "AUTO", "phase": "REVIEW", "review_decision": None,
+                "findings": [], "checkpoint_reached": False, "head": head,
+                "authority": {"status": "INTERACTIVE_LOCAL", "authority_id": "x"}}
+
+    @staticmethod
     def _passed_outcome(head=HEAD_PIN):
+        # Post-review outcome: review already decided PASS.
         return {"mode": "AUTO", "phase": "PASSED", "review_decision": "PASS",
                 "findings": [], "checkpoint_reached": False, "head": head,
                 "authority": {"status": "INTERACTIVE_LOCAL", "authority_id": "x"}}
 
-    def test_auto_review_handoff_on_passed(self):
+    @staticmethod
+    def _fix_outcome(head=HEAD_PIN):
+        # Post-review outcome: review already decided CHANGES_REQUESTED.
+        return {"mode": "AUTO", "phase": "FIX", "review_decision": "CHANGES_REQUESTED",
+                "findings": [], "checkpoint_reached": False, "head": head,
+                "authority": {"status": "INTERACTIVE_LOCAL", "authority_id": "x"}}
+
+    def test_auto_review_handoff_on_pending_review(self):
+        # Genuine pending review -> exactly one new independent review request.
         review_return = {"status_delivered": True, "state": "WAITING_REVIEW",
                          "review_sent": True, "review": {"ok": True},
                          "deduped": False, "binding_ok": True, "succeeded": True,
                          "detail": "ok"}
-        rc, out, relay = self._run(self._passed_outcome(),
+        rc, out, relay = self._run(self._pending_review_outcome(),
                                    review_return=review_return)
         handoff = out["handoff"]
         self.assertEqual(handoff["handoff"], "auto_review")
@@ -943,6 +963,20 @@ class InteractiveLocalHandoffTests(unittest.TestCase):
         self.assertIn(f"REPO: {ALT_REPO}", payload)
         self.assertIn("PR: 42", payload)
         self.assertIn(f"HEAD: {HEAD_PIN}", payload)
+        self.assertEqual(rc, 0)
+
+    def test_no_review_on_passed(self):
+        # PASSED is a post-review state — MUST NOT request another review.
+        rc, out, relay = self._run(self._passed_outcome())
+        self.assertNotIn("handoff", out)
+        relay.final_result_auto_review.assert_not_called()
+        self.assertEqual(rc, 0)
+
+    def test_no_review_on_fix(self):
+        # FIX is a post-review state — MUST NOT request another review.
+        rc, out, relay = self._run(self._fix_outcome())
+        self.assertNotIn("handoff", out)
+        relay.final_result_auto_review.assert_not_called()
         self.assertEqual(rc, 0)
 
     def test_no_handoff_for_waiting_po_auth(self):
@@ -965,11 +999,12 @@ class InteractiveLocalHandoffTests(unittest.TestCase):
         self.assertEqual(rc, 0)
 
     def test_relay_failure_is_fail_closed(self):
+        # Uses a genuine pending REVIEW so the handoff path is actually taken.
         review_return = {"status_delivered": False, "state": None,
                          "review_sent": False, "review": None,
                          "deduped": False, "binding_ok": False,
                          "detail": "relay invocation failed: OSError"}
-        rc, out, relay = self._run(self._passed_outcome(),
+        rc, out, relay = self._run(self._pending_review_outcome(),
                                    review_return=review_return)
         handoff = out["handoff"]
         self.assertFalse(handoff["delivered"])
@@ -983,7 +1018,7 @@ class InteractiveLocalHandoffTests(unittest.TestCase):
                          "review_sent": True, "review": {"ok": True},
                          "deduped": False, "binding_ok": True, "succeeded": True,
                          "detail": "ok"}
-        outcome = self._passed_outcome()
+        outcome = self._pending_review_outcome()
         with mock.patch("agentops_runtime.lifecycle_guard") as lg:
             rc, out, relay = self._run(outcome, review_return=review_return)
         lg.assert_not_called()

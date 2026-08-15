@@ -357,18 +357,20 @@ def cmd_step(args):
     return 0
 
 
-_REVIEW_GATE_PHASES = frozenset({"REVIEW", "PASSED", "FIX"})
+_REVIEW_GATE_PHASES = frozenset({"REVIEW"})
 
 
 def cmd_interactive_local(args):
     """Interactive-local runtime entry. Same caller shape as run-auto.
 
     Issue #49: reuse the existing GovernLoop-owned Neutral Relay and the
-    exact-bound review protocol already owned by the runtime. After ``decide()``
-    runs, a review-waiting gate (REVIEW / PASSED / FIX) is handed off to the
-    external GPT reviewer via ``relay_client.final_result_auto_review`` — the
-    same contract ``cmd_final_result_review`` uses, including its internal
-    (pr, head) dedupe. We do NOT reimplement dedupe/report logic.
+    exact-bound review protocol already owned by the runtime. A *new*
+    independent review is requested ONLY when the runtime is genuinely waiting
+    for one — phase == "REVIEW" with no concluded verdict yet. PASSED and FIX
+    are post-review outcomes (review already decided) and MUST NOT trigger
+    another review. The handoff uses ``relay_client.final_result_auto_review``
+    — the same contract ``cmd_final_result_review`` uses, including its
+    internal (pr, head) dedupe. We do NOT reimplement dedupe/report logic.
 
     Lifecycle/status reporting for WAITING_PO_AUTH is already performed
     automatically inside ``decide()`` via ``_gate_status_report``; we do not
