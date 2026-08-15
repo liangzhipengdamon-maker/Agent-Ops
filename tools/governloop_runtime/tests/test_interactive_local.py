@@ -868,5 +868,165 @@ class DecideModePropagationTests(unittest.TestCase):
         self.assertTrue(outcome.get("loopx", {}).get("ok"))
 
 
+# ------------------------------------------------------------------ #
+# G. Issue #49 — Interactive Local auto-handoff to Neutral Relay        #
+# ------------------------------------------------------------------ #
+
+
+class InteractiveLocalHandoffTests(unittest.TestCase):
+    """Interactive Local reuses the existing exact-bound review protocol.
+
+    A *new* independent review is requested ONLY when the runtime is genuinely
+    waiting for one — phase == "REVIEW" with no concluded verdict yet.
+    PASSED and FIX are post-review outcomes (review already decided) and MUST
+    NOT trigger another independent review. The handoff uses
+    ``relay_client.final_result_auto_review`` — the same contract
+    ``cmd_final_result_review`` uses, including its internal (pr, head) dedupe.
+    No second state machine, no duplicated dedupe/report logic. WAITING_PO_AUTH
+    is already auto-reported by ``decide()`` via ``_gate_status_report``;
+    BLOCKED/TERMINAL stay print-only.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="gl-il-handoff-")
+        self._patch_bridge = mock.patch.dict(
+            os.environ, {"AGENT_BRIDGE_DIR": self._tmp})
+        self._patch_bridge.start()
+
+    def tearDown(self):
+        self._patch_bridge.stop()
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _run(self, outcome, review_return=None):
+        from governloop_runtime.__main__ import cmd_interactive_local
+        relay = mock.MagicMock()
+        if review_return is not None:
+            relay.final_result_auto_review.return_value = review_return
+        bridge_dir = self._tmp
+        with mock.patch(
+                "governloop_runtime.__main__._legacy_runtime",
+                return_value=(relay, None,
+                              lambda *a, **k: outcome,
+                              lambda: bridge_dir,
+                              {"ok": True, "status": "INTERACTIVE_LOCAL",
+                               "authority_id": "x"})):
+            args = argparse.Namespace(task_id="AGE-IL", repo=ALT_REPO, pr="42")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cmd_interactive_local(args)
+            out = json.loads(buf.getvalue())
+        return rc, out, relay
+
+    @staticmethod
+    def _pending_review_outcome(head=HEAD_PIN):
+        # Genuine pending state: decide() kept phase REVIEW because the review
+        # verdict is not yet concluded (no PASS / CHANGES_REQUESTED).
+        return {"mode": "AUTO", "phase": "REVIEW", "review_decision": None,
+                "findings": [], "checkpoint_reached": False, "head": head,
+                "authority": {"status": "INTERACTIVE_LOCAL", "authority_id": "x"}}
+
+    @staticmethod
+    def _passed_outcome(head=HEAD_PIN):
+        # Post-review outcome: review already decided PASS.
+        return {"mode": "AUTO", "phase": "PASSED", "review_decision": "PASS",
+                "findings": [], "checkpoint_reached": False, "head": head,
+                "authority": {"status": "INTERACTIVE_LOCAL", "authority_id": "x"}}
+
+    @staticmethod
+    def _fix_outcome(head=HEAD_PIN):
+        # Post-review outcome: review already decided CHANGES_REQUESTED.
+        return {"mode": "AUTO", "phase": "FIX", "review_decision": "CHANGES_REQUESTED",
+                "findings": [], "checkpoint_reached": False, "head": head,
+                "authority": {"status": "INTERACTIVE_LOCAL", "authority_id": "x"}}
+
+    def test_auto_review_handoff_on_pending_review(self):
+        # Genuine pending review -> exactly one new independent review request.
+        review_return = {"status_delivered": True, "state": "WAITING_REVIEW",
+                         "review_sent": True, "review": {"ok": True},
+                         "deduped": False, "binding_ok": True, "succeeded": True,
+                         "detail": "ok"}
+        rc, out, relay = self._run(self._pending_review_outcome(),
+                                   review_return=review_return)
+        handoff = out["handoff"]
+        self.assertEqual(handoff["handoff"], "auto_review")
+        self.assertTrue(handoff["review_gate"])
+        self.assertTrue(handoff["delivered"])
+        self.assertTrue(handoff["ok"])
+        self.assertEqual(relay.final_result_auto_review.call_count, 1)
+        call = relay.final_result_auto_review.call_args
+        self.assertEqual(call.args[0], ALT_REPO)
+        self.assertEqual(call.args[1], "42")
+        self.assertEqual(call.args[2], HEAD_PIN)
+        payload = call.args[3]
+        self.assertIn("STATE: WAITING_REVIEW", payload)
+        self.assertIn(f"REPO: {ALT_REPO}", payload)
+        self.assertIn("PR: 42", payload)
+        self.assertIn(f"HEAD: {HEAD_PIN}", payload)
+        self.assertEqual(rc, 0)
+
+    def test_no_review_on_passed(self):
+        # PASSED is a post-review state — MUST NOT request another review.
+        rc, out, relay = self._run(self._passed_outcome())
+        self.assertNotIn("handoff", out)
+        relay.final_result_auto_review.assert_not_called()
+        self.assertEqual(rc, 0)
+
+    def test_no_review_on_fix(self):
+        # FIX is a post-review state — MUST NOT request another review.
+        rc, out, relay = self._run(self._fix_outcome())
+        self.assertNotIn("handoff", out)
+        relay.final_result_auto_review.assert_not_called()
+        self.assertEqual(rc, 0)
+
+    def test_no_handoff_for_waiting_po_auth(self):
+        outcome = {"mode": "MANUAL", "phase": "WAITING_PO_AUTH",
+                   "review_decision": "INCOMPLETE", "findings": [],
+                   "checkpoint_reached": True, "head": HEAD_PIN}
+        rc, out, relay = self._run(outcome)
+        self.assertNotIn("handoff", out)
+        relay.final_result_auto_review.assert_not_called()
+        self.assertEqual(rc, 0)
+
+    def test_no_handoff_for_blocked(self):
+        outcome = {"mode": "AUTO", "phase": "BLOCKED",
+                   "review_decision": "SCOPE_BLOCKED", "findings": [],
+                   "checkpoint_reached": False, "head": HEAD_PIN,
+                   "decision_request": "scope blocked"}
+        rc, out, relay = self._run(outcome)
+        self.assertNotIn("handoff", out)
+        relay.final_result_auto_review.assert_not_called()
+        self.assertEqual(rc, 0)
+
+    def test_relay_failure_is_fail_closed(self):
+        # Uses a genuine pending REVIEW so the handoff path is actually taken.
+        review_return = {"status_delivered": False, "state": None,
+                         "review_sent": False, "review": None,
+                         "deduped": False, "binding_ok": False,
+                         "detail": "relay invocation failed: OSError"}
+        rc, out, relay = self._run(self._pending_review_outcome(),
+                                   review_return=review_return)
+        handoff = out["handoff"]
+        self.assertFalse(handoff["delivered"])
+        self.assertFalse(handoff["ok"])
+        self.assertIn("fail", (handoff.get("detail") or "").lower())
+        # Fail-closed: command exits non-zero, never silently succeeds.
+        self.assertEqual(rc, 1)
+
+    def test_no_lifecycle_authority_escalation(self):
+        review_return = {"status_delivered": True, "state": "WAITING_REVIEW",
+                         "review_sent": True, "review": {"ok": True},
+                         "deduped": False, "binding_ok": True, "succeeded": True,
+                         "detail": "ok"}
+        outcome = self._pending_review_outcome()
+        with mock.patch("agentops_runtime.lifecycle_guard") as lg:
+            rc, out, relay = self._run(outcome, review_return=review_return)
+        lg.assert_not_called()
+        handoff = out["handoff"]
+        self.assertNotIn("ready", handoff)
+        self.assertNotIn("merge", handoff)
+        self.assertNotIn("deploy", handoff)
+
+
 if __name__ == "__main__":
     unittest.main()
