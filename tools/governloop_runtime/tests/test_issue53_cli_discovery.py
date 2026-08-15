@@ -20,18 +20,18 @@ class TestIssue53CliDiscovery(unittest.TestCase):
         self.assertEqual(rc, 0)
         runtime_main.assert_not_called()
         text = out.getvalue()
-        self.assertIn("governloop setup --repo <owner/repo>", text)
-        self.assertIn("governloop doctor --task-id <task> --repo <owner/repo>", text)
+        self.assertIn("immediately run: governloop start", text)
+        self.assertIn("immediately run: governloop setup", text)
         self.assertIn("Never infer Ready, Merge, Release, or Deploy authority", text)
 
-    def test_top_level_help_points_agents_to_instructions_then_delegates(self):
+    def test_top_level_help_points_agents_to_start_then_delegates(self):
         out = io.StringIO()
         with mock.patch("governloop_runtime.cli.runtime_cli.main", return_value=0) as runtime_main, \
              contextlib.redirect_stdout(out):
             rc = cli.main(["--help"])
         self.assertEqual(rc, 0)
         runtime_main.assert_called_once_with(["--help"])
-        self.assertIn("run `governloop instructions` first", out.getvalue())
+        self.assertIn("run `governloop start` in the target repository", out.getvalue())
 
     def test_existing_commands_delegate_unchanged(self):
         argv = ["doctor", "--task-id", "AGE-X", "--repo", "owner/repo"]
