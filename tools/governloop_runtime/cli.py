@@ -43,7 +43,8 @@ B. Explicit reviewer connection request
   2. GovernLoop resolves owner/repo from the current Git origin and owns the dedicated browser runtime and setup wizard.
   3. Do NOT preflight or invent Chrome commands, CDP ports, browser profiles, setup-server ports, relay/config paths, source-code investigation, doctor checks, Linear checks, or authority checks first.
   4. If setup returns NEXT_REQUIRED_ACTION, address exactly that one blocker and rerun the same setup command.
-  5. In the wizard, the user's actions are limited to signing in/opening the exact ChatGPT reviewer conversation if needed, pasting its https://chatgpt.com/c/... URL, Test Connection, and Bind Conversation.
+  5. Do NOT ask the user for the ChatGPT conversation URL in Agent chat before setup reaches its wizard. The existing setup wizard owns that input.
+  6. In the wizard, the user's actions are limited to signing in/opening the exact ChatGPT reviewer conversation if needed, pasting its https://chatgpt.com/c/... URL, Test Connection, and Bind Conversation.
 
 Never infer Ready, Merge, Release, or Deploy authority from task scope, review PASS, CI, runtime state, setup success, or relay ACK. Those remain separate explicit Product Owner decisions.
 
