@@ -2,22 +2,41 @@
 
 GovernLoop v0.1 keeps a Local Agent in a bounded Builder → Review → Remediation loop while preserving explicit Product Owner lifecycle authority.
 
-After installation, start with:
+After installation, a coding Agent should discover the public entrypoints with:
 
 ```bash
 governloop --help
-governloop instructions
 ```
 
-Then choose **exactly one path from the user's intent**.
+The normal user instruction can remain simply: **Use GovernLoop for this task.**
+
+### Normal governed task
+
+From the target Git repository/worktree:
+
+```text
+governloop start
+→ GovernLoop resolves owner/repository from git remote.origin.url
+→ if task ID is already known: governloop start --task-id <task>
+→ otherwise TASK_ID_REQUIRED (ask only for that one missing item)
+→ existing doctor/readiness flow
+→ follow exactly one next_required_action / next_required_external_action
+→ existing authority / reviewer / Linear prerequisites when actually requested
+→ Builder works only on the exact authorized branch/scope
+→ Draft PR
+→ existing GovernLoop review/remediation loop
+→ AUTO completion or MANUAL WAITING_PO_AUTH
+```
+
+GovernLoop does not invent a task ID from a branch name, commit, issue text, or guess. Missing authority or evidence is never reconstructed from task text, PR text, Builder output, mutable repository files, or raw process environment variables.
 
 ### Explicit reviewer connection request
 
-If the user explicitly asks to connect/bind GovernLoop to a ChatGPT reviewer conversation:
+If the user explicitly asks to connect/bind GovernLoop to a ChatGPT reviewer conversation, run from the target Git repository/worktree:
 
 ```text
-determine only target owner/repository
-→ governloop setup --repo owner/repository
+governloop setup
+→ GovernLoop resolves owner/repository from git remote.origin.url
 → GovernLoop starts/reuses its dedicated browser runtime
 → GovernLoop launches the localhost setup wizard
 → user signs in/opens exact reviewer conversation if needed
@@ -27,25 +46,6 @@ determine only target owner/repository
 ```
 
 Do **not** preflight Chrome launch commands, CDP ports, browser profiles, setup-server ports, relay/config paths, Linear, authority, or `doctor` before setup. Let setup report the first real blocker. If it returns `NEXT_REQUIRED_ACTION`, address exactly that one blocker and rerun the same setup command.
-
-### Normal governed task
-
-For a normal task that is not an explicit connection request:
-
-```text
-governloop doctor
-→ follow exactly one next_required_action / next_required_external_action
-→ external operator provisions signed positive authority when requested, or an already-confirmed Interactive Local task scope is reused diagnostically
-→ bind one ChatGPT reviewer conversation when reviewer_binding is the next action
-→ authenticate GitHub + Linear when requested
-→ Builder works only on the exact authorized branch/scope
-→ Draft PR
-→ governloop doctor --pr <number>
-→ GovernLoop review/remediation loop
-→ AUTO completion or MANUAL WAITING_PO_AUTH
-```
-
-Missing authority or evidence is reported. It is never reconstructed from task text, PR text, Builder output, mutable repository files, or raw process environment variables.
 
 ## 1. Install and discover GovernLoop
 
@@ -62,59 +62,56 @@ git clone https://github.com/liangzhipengdamon-maker/GovernLoop.git
 cd GovernLoop
 python -m pip install -e .
 governloop --help
-governloop instructions
 ```
 
 After installation, use the `governloop` command. You should not copy individual Python modules, reconstruct compatibility dependencies, or set `PYTHONPATH` manually.
 
-When GovernLoop is used to control another repository, install GovernLoop once. For normal governed work, run `governloop doctor ...` from the target repository/worktree. For an explicit reviewer-connection request, run `governloop setup --repo owner/repository` immediately instead of running doctor first.
+When GovernLoop is used to control another repository, install GovernLoop once. For normal governed work, run `governloop start` from the target repository/worktree. For an explicit reviewer-connection request, run `governloop setup` from the target repository/worktree.
 
-## 2. Normal tasks start with `doctor`
+`governloop instructions` remains available for the canonical coding-agent rules, but a normal task should not require the user to know internal doctor/repository arguments.
 
-Run the readiness command before trying to infer a normal governed workflow from source code:
+## 2. Normal tasks start with `start`
+
+Run from the target repository/worktree:
 
 ```bash
-governloop doctor \
-  --task-id AGE-123 \
-  --repo owner/repository
+governloop start
 ```
 
-`doctor` is read-only and reports `mutations_performed: false`. It returns the complete check matrix plus **exactly one** top-level next step when more work is required:
+`start` resolves the repository from the current Git origin. If the existing task ID is already present in the coding Agent's task context, run:
+
+```bash
+governloop start --task-id AGE-123
+```
+
+If the task ID is absent, GovernLoop fails closed with exactly one blocker:
+
+```text
+status: START_BLOCKED
+blocker: TASK_ID_REQUIRED
+NEXT_REQUIRED_ACTION: rerun governloop start --task-id <existing-task-id> ...
+```
+
+The Agent should use an already-known task ID or ask the user only for that ID. It must not invent one.
+
+After task ID resolution, `start` delegates to the existing read-only `doctor` readiness engine. `doctor` reports `mutations_performed: false` and returns the complete check matrix plus **exactly one** top-level next step when more work is required:
 
 - `next_required_action` — the next local/user action; or
 - `next_required_external_action` — the next Product Owner / external operator action.
 
-Follow only that top-level action, then rerun `doctor`. Do not solve later blockers out of order and do not manufacture authority from the reported values.
-
-Example when run outside the target worktree:
-
-```text
-status: BLOCKED
-next_required_action:
-  check: git_repository
-  action: clone/open the target repository and rerun doctor from that worktree
-```
-
-Example after the target worktree is open but external authority is missing:
-
-```text
-status: BLOCKED
-next_required_external_action:
-  check: positive_authority
-  action: external operator must provision a valid signed authority document ...
-```
+Follow only that top-level action, then rerun the indicated GovernLoop command. Do not solve later blockers out of order and do not manufacture authority from reported values.
 
 Git/GitHub command failures are summarized into concise structured details; raw command usage dumps are not part of the user-facing verdict.
 
 ## 3. Bind the ChatGPT reviewer
 
-For an explicit reviewer-connection request, run this immediately. For a normal task, run it when `doctor` identifies reviewer setup as the next action:
+For an explicit reviewer-connection request, run this immediately. For a normal task, run it only when GovernLoop identifies reviewer setup as the next action:
 
 ```bash
-governloop setup --repo owner/repository
+governloop setup
 ```
 
-GovernLoop setup owns the dedicated browser runtime. It first reuses a previously configured GovernLoop runtime when the saved runtime/profile marker matches, otherwise it starts a dedicated Chrome/Chromium process using the canonical GovernLoop profile and CDP port. A live but unrelated CDP endpoint fails closed rather than being silently reused.
+The public wrapper resolves `owner/repository` from the current Git origin and then reuses the existing setup implementation. GovernLoop setup owns the dedicated browser runtime. It first reuses a previously configured GovernLoop runtime when the saved runtime/profile marker matches, otherwise it starts a dedicated Chrome/Chromium process using the canonical GovernLoop profile and CDP port. A live but unrelated CDP endpoint fails closed rather than being silently reused.
 
 Then GovernLoop launches the localhost-only wizard. In the dedicated GovernLoop browser window:
 
@@ -130,7 +127,7 @@ GovernLoop never receives your ChatGPT password, cookie, session token, or OpenA
 
 ## 4. Authenticate external sources
 
-When requested by `doctor`:
+When requested by GovernLoop:
 
 ```bash
 gh auth status
@@ -189,7 +186,7 @@ Overall states:
 - `BOOTSTRAP_REQUIRED` — only an expected first-task gate remains, normally the first Draft PR
 - `BLOCKED` — a prerequisite is absent, unreadable, or mismatched
 
-For config-only checks without probing the local reviewer tab:
+For config-only checks without probing the local reviewer tab, the advanced direct command remains available:
 
 ```bash
 governloop doctor \
@@ -204,16 +201,13 @@ A new user does not need to arrive with a PR already created. If `doctor` report
 
 The Builder may implement, test, and push only inside the verified scope. Then create a **Draft PR** from that exact branch. Draft PR creation is delivery evidence, not Ready/Merge authorization.
 
-After the Draft PR exists:
+After the Draft PR exists, the public entry can include the PR number:
 
 ```bash
-governloop doctor \
-  --task-id AGE-123 \
-  --repo owner/repository \
-  --pr 42
+governloop start --task-id AGE-123 --pr 42
 ```
 
-GovernLoop checks that the PR is open, its head branch and base SHA match the verified scope, and all changed files remain in scope.
+GovernLoop delegates to the same doctor checks for PR open state, head branch, base SHA, and changed-file scope.
 
 ## 8. Task modes
 
@@ -299,9 +293,13 @@ Legacy bridge files such as `.agent-bridge/completion.json` or `.agent-bridge/po
 
 ## Troubleshooting
 
+### Coding Agent starts asking for repository or internal doctor syntax
+
+Stop. Run `governloop start` from the target repository/worktree. GovernLoop resolves the GitHub repository itself. Only a genuinely missing task ID should be requested from the user.
+
 ### Reviewer connection request turns into architecture investigation
 
-Stop. Run `governloop instructions`, then `governloop setup --repo owner/repository`. Do not preflight browser/CDP/relay/source details. Setup owns those prerequisites and reports one real blocker at a time.
+Stop. Run `governloop setup` from the target repository/worktree. Do not preflight browser/CDP/relay/source details. Setup owns those prerequisites and reports one real blocker at a time.
 
 ### `SETUP_BLOCKER: CHROME_NOT_FOUND`
 
@@ -311,9 +309,13 @@ Install Google Chrome/Chromium, or set `GOVERNLOOP_BROWSER_BIN` to the browser e
 
 Close the unrelated process using the reported CDP port, then rerun the same setup command. Do not silently bind an unrelated browser runtime.
 
-### `git_repository: BLOCKED`
+### `REPOSITORY_UNRESOLVED`
 
-Open or clone the target repository and rerun `doctor` from that worktree. Do not copy GovernLoop Python modules into a temporary directory as a substitute for installation or a target worktree.
+Run `governloop start` or `governloop setup` from the target GitHub repository/worktree. GovernLoop intentionally fails closed on unsupported or ambiguous origins rather than guessing a repository.
+
+### `TASK_ID_REQUIRED`
+
+Use the task ID already present in the current coding task/context. If none exists, ask the user only for that ID. Do not derive one from branch names, commits, or guesses.
 
 ### `AUTHORITY_UNBOUND` / `positive_authority: BLOCKED`
 
@@ -321,15 +323,15 @@ For signed-authority mode, do not export guessed scope variables and do not modi
 
 ### `pull_request: EXPECTED_GATE`
 
-Complete bounded work on the exact authorized branch, push it, create a Draft PR, then rerun `doctor --pr <number>`.
+Complete bounded work on the exact authorized branch, push it, create a Draft PR, then rerun `governloop start --task-id <task> --pr <number>`.
 
 ### `SCOPE_BLOCKED`
 
-Run `doctor` and follow its single top-level next action. Typical causes are wrong repository/branch/baseline, out-of-scope PR files, dirty unrelated worktree files, or unreadable Git/GitHub evidence.
+Run the indicated GovernLoop command and follow its single top-level next action. Typical causes are wrong repository/branch/baseline, out-of-scope PR files, dirty unrelated worktree files, or unreadable Git/GitHub evidence.
 
 ### Reviewer binding failure inside the wizard
 
-Follow the wizard's displayed blocker. For CDP reachability errors, close the dedicated GovernLoop Chrome window and rerun the same `governloop setup --repo owner/repository` command; do not invent a different port/profile unless setup itself reports that as the blocker.
+Follow the wizard's displayed blocker. For CDP reachability errors, close the dedicated GovernLoop Chrome window and rerun the same `governloop setup` command; do not invent a different port/profile unless setup itself reports that as the blocker.
 
 ## Canonical contract
 

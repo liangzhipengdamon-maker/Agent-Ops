@@ -17,9 +17,9 @@ from governloop_runtime import setup_wizard
 class TestIssue55FirstRunSetup(unittest.TestCase):
     def test_instructions_forbid_preflight_guesswork(self):
         text = cli.AGENT_INSTRUCTIONS
-        self.assertIn("Immediately run: governloop setup --repo <owner/repo>", text)
+        self.assertIn("immediately run: governloop setup", text)
         self.assertIn("Do NOT preflight or invent Chrome commands", text)
-        self.assertIn("Let setup report the first real blocker", text)
+        self.assertIn("If setup returns NEXT_REQUIRED_ACTION", text)
         self.assertIn("address exactly that one blocker", text)
 
     def test_existing_runtime_profile_is_preserved_when_not_overridden(self):

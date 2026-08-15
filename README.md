@@ -10,7 +10,7 @@ GovernLoop is **not** an agent observability SDK and it is not another coding ag
 
 ## First run
 
-A new user or Local Agent should install once, then let the CLI tell it what to do instead of reading runtime source code.
+Install GovernLoop once. After that, the normal coding-agent interaction should be simply: **Use GovernLoop for this task.**
 
 ```bash
 git clone https://github.com/liangzhipengdamon-maker/GovernLoop.git
@@ -18,20 +18,21 @@ cd GovernLoop
 python -m pip install -e .
 
 governloop --help
-governloop instructions
 ```
 
-After `governloop instructions`, choose exactly one path from the user's intent:
+From the target project repository/worktree:
 
-- **Explicit reviewer connection request** — determine only the target `owner/repository`, then immediately run `governloop setup --repo owner/repository`. Do not preflight Chrome/CDP/ports/profiles, run `doctor`, or invent a manual relay/browser procedure first. Setup owns the dedicated browser runtime and reports one real blocker at a time.
-- **Normal governed task** — run `governloop doctor --task-id AGE-123 --repo owner/repository` from the target repository/worktree and follow exactly its one top-level next action.
+- **Normal governed task** — run `governloop start`. GovernLoop resolves `owner/repository` from the current Git origin. If the existing task ID is not available, it reports only `TASK_ID_REQUIRED`; rerun with `governloop start --task-id <existing-task-id>` after supplying that one missing item.
+- **Explicit reviewer connection request** — run `governloop setup`. GovernLoop resolves `owner/repository` from the current Git origin, starts/reuses its dedicated browser runtime, and launches the existing setup wizard.
 
-`doctor` is read-only. It reports the full readiness matrix and, when blocked, exactly one top-level next step:
+Coding Agents should not manually assemble repository arguments, inspect source code, or preflight Chrome/CDP/Linear/authority before GovernLoop reports a real blocker. `governloop instructions` remains available for the full canonical agent guidance.
+
+`doctor` remains the existing read-only readiness engine behind the public start path. It reports the readiness matrix and, when blocked, exactly one top-level next step:
 
 - `next_required_action` — the next local/user action; or
 - `next_required_external_action` — the next Product Owner / external operator action.
 
-Follow that one action and rerun `doctor`. Do not reconstruct authority from task text, repository files, raw environment variables, or the diagnostic output itself.
+Follow that one action and rerun the indicated GovernLoop command. Do not reconstruct authority from task text, repository files, raw environment variables, or diagnostic output.
 
 For the detailed onboarding flow, see [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
 
@@ -109,13 +110,13 @@ There is no LOW / MEDIUM / HIGH risk classifier in the current control flow.
 
 ## Reviewer setup
 
-For an explicit request to connect/bind a ChatGPT reviewer, run setup immediately. For a normal task, run it when `doctor` identifies reviewer binding as the next action:
+For an explicit request to connect/bind a ChatGPT reviewer, run from the target repository/worktree:
 
 ```bash
-governloop setup --repo owner/repository
+governloop setup
 ```
 
-`setup` starts or reuses GovernLoop's dedicated Chrome/Chromium runtime with the canonical browser profile and CDP port, then launches the localhost-only setup wizard. The Agent should not invent a browser command, alternate port/profile, or relay configuration before setup reports a blocker.
+The public wrapper resolves the repository from the current Git origin, then reuses the existing setup implementation. `setup` starts or reuses GovernLoop's dedicated Chrome/Chromium runtime with the canonical browser profile and CDP port, then launches the localhost-only setup wizard. The Agent should not invent a browser command, alternate port/profile, or relay configuration before setup reports a blocker.
 
 In the wizard, sign in to ChatGPT if needed, open the exact dedicated reviewer conversation in the GovernLoop browser window, paste its `https://chatgpt.com/c/...` URL, press **Test Connection**, then **Bind Conversation**. If setup cannot establish the browser runtime, it fails closed with one `NEXT_REQUIRED_ACTION`.
 
@@ -135,8 +136,17 @@ Interactive Local uses a separately confirmed local task-scope record and does n
 
 ## Current CLI
 
+Agent-facing entrypoints:
+
 ```text
+start                  start GovernLoop for the current GitHub repository
+setup                  connect/bind the current repository to a ChatGPT reviewer
 instructions           print canonical coding-agent operating instructions
+```
+
+Advanced/runtime commands remain available and retain their existing contracts:
+
+```text
 setup                  bind a dedicated ChatGPT reviewer conversation
 setup-authority        render a non-authoritative request for external signed authority
 setup-task-scope       confirm one exact Interactive Local task scope
@@ -194,7 +204,7 @@ GovernLoop is being released early so maintainers can inspect and improve the go
 - Linear is the currently implemented task adapter
 - GitHub CLI is required for live PR evidence
 - Neutral Relay and LoopX integrations are environment-specific
-- fresh-install CLI discovery has been validated; the revised end-to-end reviewer-binding flow still requires real E2E revalidation after this change
+- fresh-install CLI discovery has been validated; the revised end-to-end reviewer-binding flow and new one-command `start` flow still require real E2E revalidation after these changes
 
 These limitations are documented rather than hidden behind a production-ready claim.
 
