@@ -99,7 +99,32 @@ class TestIssue55FirstRunSetup(unittest.TestCase):
         self.assertIn("SETUP_BLOCKER: CHROME_NOT_FOUND", out.getvalue())
         self.assertIn("NEXT_REQUIRED_ACTION: install Chrome and rerun setup", out.getvalue())
 
-    def test_wizard_copy_keeps_user_on_canonical_flow(self):
+    def test_bind_rechecks_exact_live_conversation_before_persisting(self):
+        with mock.patch.object(setup_wizard, "test_connection", return_value={
+                "ok": False,
+                "code": "REVIEWER_CONVERSATION_NOT_FOUND",
+                "detail": "no open ChatGPT tab matches the configured conversation",
+             }), mock.patch.object(setup_wizard, "_ORIGINAL_SAVE_BINDING") as save:
+            with self.assertRaises(setup_wizard.SetupError) as ctx:
+                setup_wizard.save_binding(
+                    "/tmp/config.json", "owner/repo",
+                    "https://chatgpt.com/c/12345678-abcd", 9233, "/tmp/profile")
+        save.assert_not_called()
+        self.assertIn("REVIEWER_BINDING_NOT_VERIFIED", str(ctx.exception))
+
+    def test_verified_bind_delegates_to_existing_persistence_contract(self):
+        expected = {"ok": True, "config_path": "/tmp/config.json"}
+        with mock.patch.object(setup_wizard, "test_connection", return_value={
+                "ok": True, "code": "CONNECTED",
+             }), mock.patch.object(setup_wizard, "_ORIGINAL_SAVE_BINDING",
+                                   return_value=expected) as save:
+            result = setup_wizard.save_binding(
+                "/tmp/config.json", "owner/repo",
+                "https://chatgpt.com/c/12345678-abcd", 9233, "/tmp/profile")
+        self.assertEqual(result, expected)
+        save.assert_called_once()
+
+    def test_wizard_copy_keeps_user_on_canonical_flow_and_runtime_read_only(self):
         values = {"repository": "owner/repo", "conversation_url": "",
                   "cdp_port": "9233", "browser_profile": "/tmp/profile"}
         page = setup_wizard._render_page(
@@ -108,6 +133,8 @@ class TestIssue55FirstRunSetup(unittest.TestCase):
         self.assertIn("GovernLoop started or reused its dedicated Chrome runtime", page)
         self.assertIn("NEXT: close the dedicated GovernLoop Chrome window and rerun", page)
         self.assertIn("do not invent a different CDP port", page.lower())
+        self.assertIn('name="cdp_port" inputmode="numeric" required readonly', page)
+        self.assertIn('name="browser_profile" required readonly', page)
 
 
 if __name__ == "__main__":
