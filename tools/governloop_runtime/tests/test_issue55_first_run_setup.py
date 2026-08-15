@@ -71,7 +71,7 @@ class TestIssue55FirstRunSetup(unittest.TestCase):
                  mock.patch.object(setup_wizard, "_browser_candidates",
                                    return_value=["/fake/chrome"]):
                 result = setup_wizard.ensure_browser_runtime(
-                    9233, profile, popen=popen, sleep=lambda _: None, timeout=0)
+                    9233, profile, popen=popen, sleep=lambda _: None, timeout=1)
             self.assertTrue(result["ok"])
             self.assertEqual(result["status"], "BROWSER_STARTED")
             command = popen.call_args.args[0]
