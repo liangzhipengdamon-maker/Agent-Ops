@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -20,6 +21,29 @@ class TestIssue55FirstRunSetup(unittest.TestCase):
         self.assertIn("Do NOT preflight or invent Chrome commands", text)
         self.assertIn("Let setup report the first real blocker", text)
         self.assertIn("address exactly that one blocker", text)
+
+    def test_existing_runtime_profile_is_preserved_when_not_overridden(self):
+        with tempfile.TemporaryDirectory() as td:
+            config_path = os.path.join(td, "config.json")
+            profile = os.path.join(td, "custom-profile")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "runtime": {
+                        "cdp_port": 9444,
+                        "browser_profile": profile,
+                        "runtime_marker": setup_wizard.RUNTIME_MARKER,
+                    },
+                    "routes": {
+                        "owner/repo": {
+                            "conversation_url": "https://chatgpt.com/c/12345678-abcd",
+                            "cdp_port": 9444,
+                        }
+                    },
+                }, handle)
+            values = setup_wizard.initial_values(
+                config_path=config_path, repository="owner/repo")
+        self.assertEqual(values["cdp_port"], "9444")
+        self.assertEqual(values["browser_profile"], os.path.abspath(profile))
 
     def test_reuses_only_marked_governloop_runtime(self):
         with tempfile.TemporaryDirectory() as profile:
