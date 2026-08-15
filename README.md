@@ -4,7 +4,7 @@
 
 GovernLoop is an agent-neutral control plane that keeps coding-agent work moving through implementation, pull requests, independent review, remediation, and explicit lifecycle gates without allowing runtime state, review text, or Builder output to silently expand authority.
 
-> Project status: **v0.1.0 pre-release**. The core AUTO/MANUAL loop, exact-HEAD review path, deterministic Scope & Action Firewall, external signed authority model, MANUAL lifecycle firewall, guided readiness doctor, and clean-room cold-start onboarding path are implemented and validated. External signed authority provisioning remains operator-managed.
+> Project status: **v0.1.0 pre-release**. The core AUTO/MANUAL loop, exact-HEAD review path, deterministic Scope & Action Firewall, signed-authority path, Interactive Local task-scope path, MANUAL lifecycle firewall, guided readiness doctor, and clean-room cold-start onboarding path are implemented and validated. External signed authority provisioning remains operator-managed.
 
 GovernLoop is **not** an agent observability SDK and it is not another coding agent. It governs the tools you already use.
 
@@ -80,30 +80,26 @@ A review `PASS` is technical evidence. It is **not** implicit permission to broa
 
 ## Safety model
 
-Positive authority is explicit, signed, and episode-external. GovernLoop runtime can verify authority but cannot mint it. The signed operator payload binds:
+GovernLoop has two explicit positive task-scope authority sources, selected by runtime mode:
 
-- exact repository
-- exact authorized branch
-- exact baseline SHA
-- allowed path prefixes
-- allowed non-lifecycle operations
-- trusted reviewer identities
+- **Signed authority (default/hardened path)** — an episode-external operator signs a bundle that binds the exact repository, branch, baseline SHA, allowed paths, allowed non-lifecycle operations, and trusted reviewer identities. GovernLoop verifies this evidence but cannot mint it.
+- **Interactive Local** — a same-user/same-UID exact task-scope record is confirmed through the TTY `YES` flow and may be used as the local scope authority for `interactive-local`. It is not cryptographic proof of a separate human identity and never becomes lifecycle authority.
 
-The runtime also checks local git origin, current worktree branch, exact baseline ancestry, uncommitted contamination, and the authoritative PR changed-file set. Missing or unverifiable authority fails closed and produces no executable Builder wake.
+The runtime checks local git origin, current worktree branch, exact baseline ancestry, uncommitted contamination, and the authoritative PR changed-file set against the verified source for the selected mode. Missing or unverifiable scope authority fails closed and produces no executable Builder wake.
 
-Raw `GOVERNLOOP_*` / legacy `AGENTOPS_*` scope values, mutable repository profiles, task text, PR text, review text, CI, ACK, and runtime state cannot create missing positive authority.
+Raw `GOVERNLOOP_*` / legacy `AGENTOPS_*` scope values, mutable repository profiles, task text, PR text, review text, CI, ACK, setup success, and runtime state cannot create missing positive authority or lifecycle permission.
 
 Ready, Merge, Close/Reopen, Tag, Release, and Deploy remain separate lifecycle decisions. MANUAL lifecycle exceptions require exact-bound external signed Product Owner evidence.
 
 See [`SECURITY.md`](SECURITY.md) for the trust and threat model.
 
-## Execution modes
+## Task execution modes
 
-GovernLoop intentionally has only two runtime modes.
+GovernLoop has two task execution modes: AUTO and MANUAL. This is separate from the authority-source choice above (`signed` versus `interactive_local`).
 
 ### AUTO
 
-The controlled Builder → GitHub → independent-review loop continues through in-scope remediation and continuation until accepted external signed completion or a real blocker.
+The controlled Builder → GitHub → independent-review loop continues through in-scope remediation and continuation until accepted completion evidence or a real blocker.
 
 ### MANUAL
 
@@ -127,7 +123,7 @@ GovernLoop never asks for or stores a ChatGPT password, cookie, session token, o
 
 ## Positive authority
 
-There is intentionally **no canonical `bind-authority` command**. A Builder must not create or sign its own authority bundle.
+There is intentionally **no canonical `bind-authority` command**. A Builder must not create or sign its own signed-authority bundle.
 
 The external operator provisions OpenSSH-signed authority through the OS-protected control channel. GovernLoop can verify it with:
 
@@ -135,7 +131,7 @@ The external operator provisions OpenSSH-signed authority through the OS-protect
 governloop authority-check --task-id AGE-123 --repo owner/repository
 ```
 
-If authority is missing, `doctor` returns `next_required_external_action` and the Builder waits.
+Interactive Local uses a separately confirmed local task-scope record and does not use `authority-check` as its positive-source verifier.
 
 ## Current CLI
 
@@ -194,6 +190,7 @@ GovernLoop is being released early so maintainers can inspect and improve the go
 
 - packaging is pre-release and not yet published on PyPI; install from a repository checkout with `python -m pip install -e .`
 - external signed authority provisioning remains an operator/control-plane responsibility rather than a Builder command
+- Interactive Local is a same-user/same-UID convenience trust boundary, not an OS-separated signer identity
 - Linear is the currently implemented task adapter
 - GitHub CLI is required for live PR evidence
 - Neutral Relay and LoopX integrations are environment-specific
