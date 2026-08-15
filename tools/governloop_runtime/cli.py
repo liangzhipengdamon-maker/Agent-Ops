@@ -18,6 +18,7 @@ import tempfile
 from urllib.parse import urlparse
 
 from . import __main__ as runtime_cli
+from . import opencode_skill
 
 
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -313,9 +314,10 @@ def _setup_task_scope_with_host_confirm(args: list[str]) -> int:
 
 def _print_agent_help() -> None:
     print("GovernLoop coding-agent entrypoints:")
-    print("  governloop start          use GovernLoop for the current task/repository")
-    print("  governloop setup          connect the current repository to a ChatGPT reviewer")
-    print("  governloop instructions   print canonical agent operating instructions")
+    print("  governloop start                  use GovernLoop for the current task/repository")
+    print("  governloop setup                  connect the current repository to a ChatGPT reviewer")
+    print("  governloop instructions           print canonical agent operating instructions")
+    print("  governloop install-opencode-skill install/update the global OpenCode GovernLoop skill")
     print()
     print("Advanced/runtime commands:")
 
@@ -337,6 +339,8 @@ def main(argv=None):
         if args[1:] in (["-h"], ["--help"]):
             print("Host-confirm option: --host-confirm (use only after explicit user approval in the coding-agent host).")
         return _setup_task_scope_with_host_confirm(args)
+    if args and args[0] == "install-opencode-skill":
+        return opencode_skill.main(args[1:])
     if args in (["-h"], ["--help"]):
         _print_agent_help()
     return runtime_cli.main(args)
