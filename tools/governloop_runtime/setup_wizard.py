@@ -105,6 +105,23 @@ def ensure_runtime_marker(browser_profile, marker=RUNTIME_MARKER):
     return canonical
 
 
+def _runtime_marker_matches(browser_profile, marker=RUNTIME_MARKER):
+    """Match the same marker contract Neutral Relay later verifies."""
+    profile = normalize_profile_path(browser_profile)
+    expected = str(marker or "").strip()
+    if not expected:
+        return False
+    for filename in ("GOVERNLOOP_MARKER", "AGENTOPS_MARKER"):
+        path = os.path.join(profile, filename)
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                if handle.read().strip() != expected:
+                    return False
+        except OSError:
+            return False
+    return True
+
+
 def save_binding(config_path, repository, conversation_url, cdp_port,
                  browser_profile):
     _configure_legacy_module()
@@ -147,22 +164,37 @@ def _cdp_reachable(cdp_port, opener=None):
 
 
 def _browser_candidates():
-    """Return local Chrome/Chromium candidates without scanning the filesystem."""
-    candidates = []
+    """Return common local Chrome/Chromium candidates without disk scanning."""
+    raw = []
     explicit = os.environ.get("GOVERNLOOP_BROWSER_BIN", "").strip()
     if explicit:
-        candidates.append(os.path.abspath(os.path.expanduser(explicit)))
-    candidates.extend([
+        raw.append(os.path.abspath(os.path.expanduser(explicit)))
+
+    raw.extend([
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "/Applications/Chromium.app/Contents/MacOS/Chromium",
     ])
-    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+
+    for root_var in ("LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"):
+        root = os.environ.get(root_var, "").strip()
+        if root:
+            raw.extend([
+                os.path.join(root, "Google", "Chrome", "Application", "chrome.exe"),
+                os.path.join(root, "Chromium", "Application", "chrome.exe"),
+            ])
+
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"):
         resolved = shutil.which(name)
         if resolved:
-            candidates.append(resolved)
+            raw.append(resolved)
+
+    result = []
     seen = set()
-    return [item for item in candidates
-            if item and item not in seen and not seen.add(item) and os.path.isfile(item)]
+    for item in raw:
+        if item and item not in seen and os.path.isfile(item):
+            seen.add(item)
+            result.append(item)
+    return result
 
 
 def ensure_browser_runtime(cdp_port, browser_profile, *, popen=None,
@@ -170,12 +202,27 @@ def ensure_browser_runtime(cdp_port, browser_profile, *, popen=None,
     """Reuse or start the dedicated GovernLoop Chrome runtime.
 
     This is setup UX, not an authority channel. It never grants task scope or
-    lifecycle permission. Failure returns one explicit blocker instead of
-    asking an Agent to invent browser/CDP commands.
+    lifecycle permission. A live CDP port is reused only when the configured
+    GovernLoop profile already carries the runtime marker Neutral Relay trusts;
+    an unrelated process on the port fails closed.
     """
     port = normalize_cdp_port(cdp_port)
     profile = normalize_profile_path(browser_profile)
     if _cdp_reachable(port):
+        if not _runtime_marker_matches(profile):
+            return {
+                "ok": False,
+                "status": "BROWSER_RUNTIME_BLOCKED",
+                "code": "CDP_PORT_IN_USE",
+                "detail": (
+                    f"CDP port {port} is reachable but the configured GovernLoop browser "
+                    "profile does not match the GovernLoop runtime marker"
+                ),
+                "next_required_action": (
+                    f"close the unrelated process using CDP port {port}, then rerun the "
+                    "same `governloop setup --repo ...` command"
+                ),
+            }
         return {"ok": True, "status": "BROWSER_REUSED", "cdp_port": port,
                 "browser_profile": profile}
 
