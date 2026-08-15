@@ -78,6 +78,8 @@ def _repo_from_origin(origin: str | None) -> str | None:
         return None
     if parsed.scheme == "ssh" and parsed.username not in (None, "git"):
         return None
+    if parsed.query or parsed.fragment or parsed.params:
+        return None
     path = (parsed.path or "").strip("/")
     return _normalize_repo(path)
 
@@ -163,7 +165,7 @@ def _cmd_start(args: list[str]) -> int:
 
 def _setup_with_detected_repo(args: list[str]) -> int:
     """Allow agent-facing `governloop setup` to resolve repo from current worktree."""
-    if "--repo" in args:
+    if "-h" in args or "--help" in args or "--repo" in args:
         return runtime_cli.main(args)
     repo, error = _detect_current_repo()
     if not repo:
