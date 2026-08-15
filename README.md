@@ -4,7 +4,7 @@
 
 GovernLoop is an agent-neutral control plane that keeps coding-agent work moving through implementation, pull requests, independent review, remediation, and explicit lifecycle gates without allowing runtime state, review text, or Builder output to silently expand authority.
 
-> Project status: **v0.1.0 pre-release**. The core AUTO/MANUAL loop, exact-HEAD review path, deterministic Scope & Action Firewall, signed-authority path, Interactive Local task-scope path, MANUAL lifecycle firewall, guided readiness doctor, and clean-room cold-start onboarding path are implemented and validated. External signed authority provisioning remains operator-managed.
+> Project status: **v0.1.0 pre-release**. The core AUTO/MANUAL loop, exact-HEAD review path, deterministic Scope & Action Firewall, signed-authority path, Interactive Local task-scope path, MANUAL lifecycle firewall, guided readiness doctor, and fresh-install CLI discovery path are implemented and validated. The revised first-run reviewer-binding flow is implemented and still requires a real post-change E2E revalidation. External signed authority provisioning remains operator-managed.
 
 GovernLoop is **not** an agent observability SDK and it is not another coding agent. It governs the tools you already use.
 
@@ -194,7 +194,7 @@ GovernLoop is being released early so maintainers can inspect and improve the go
 - Linear is the currently implemented task adapter
 - GitHub CLI is required for live PR evidence
 - Neutral Relay and LoopX integrations are environment-specific
-- clean-room first-time onboarding has been validated; a full real external-project pilot remains useful follow-up evidence rather than a claimed completed capability
+- fresh-install CLI discovery has been validated; the revised end-to-end reviewer-binding flow still requires real E2E revalidation after this change
 
 These limitations are documented rather than hidden behind a production-ready claim.
 
