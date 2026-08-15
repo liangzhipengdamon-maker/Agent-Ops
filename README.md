@@ -10,17 +10,21 @@ GovernLoop is **not** an agent observability SDK and it is not another coding ag
 
 ## First run
 
-A new user or Local Agent should start here instead of reading runtime source code.
+A new user or Local Agent should install once, then let the CLI tell it what to do instead of reading runtime source code.
 
 ```bash
 git clone https://github.com/liangzhipengdamon-maker/GovernLoop.git
 cd GovernLoop
 python -m pip install -e .
 
-governloop doctor \
-  --task-id AGE-123 \
-  --repo owner/repository
+governloop --help
+governloop instructions
 ```
+
+After `governloop instructions`, choose exactly one path from the user's intent:
+
+- **Explicit reviewer connection request** — determine only the target `owner/repository`, then immediately run `governloop setup --repo owner/repository`. Do not preflight Chrome/CDP/ports/profiles, run `doctor`, or invent a manual relay/browser procedure first. Setup owns the dedicated browser runtime and reports one real blocker at a time.
+- **Normal governed task** — run `governloop doctor --task-id AGE-123 --repo owner/repository` from the target repository/worktree and follow exactly its one top-level next action.
 
 `doctor` is read-only. It reports the full readiness matrix and, when blocked, exactly one top-level next step:
 
@@ -109,15 +113,17 @@ There is no LOW / MEDIUM / HIGH risk classifier in the current control flow.
 
 ## Reviewer setup
 
-When `doctor` identifies reviewer binding as the next action:
+For an explicit request to connect/bind a ChatGPT reviewer, run setup immediately. For a normal task, run it when `doctor` identifies reviewer binding as the next action:
 
 ```bash
 governloop setup --repo owner/repository
 ```
 
-The localhost-only setup page binds one dedicated ChatGPT conversation through the configured Chrome/CDP runtime. GovernLoop never asks for or stores a ChatGPT password, cookie, session token, or OpenAI API key; login happens directly on ChatGPT.
+`setup` starts or reuses GovernLoop's dedicated Chrome/Chromium runtime with the canonical browser profile and CDP port, then launches the localhost-only setup wizard. The Agent should not invent a browser command, alternate port/profile, or relay configuration before setup reports a blocker.
 
-The route is stored at `~/.governloop/relay/config.json`.
+In the wizard, sign in to ChatGPT if needed, open the exact dedicated reviewer conversation in the GovernLoop browser window, paste its `https://chatgpt.com/c/...` URL, press **Test Connection**, then **Bind Conversation**. If setup cannot establish the browser runtime, it fails closed with one `NEXT_REQUIRED_ACTION`.
+
+GovernLoop never asks for or stores a ChatGPT password, cookie, session token, or OpenAI API key; login happens directly on ChatGPT. The route is stored at `~/.governloop/relay/config.json`.
 
 ## Positive authority
 
@@ -134,15 +140,20 @@ If authority is missing, `doctor` returns `next_required_external_action` and th
 ## Current CLI
 
 ```text
-setup                bind a dedicated ChatGPT reviewer conversation
-authority-check      verify pre-existing external signed positive authority
-doctor               read-only readiness and guided next-action diagnostics
-run-auto             one AUTO decision step
-run-manual           one MANUAL decision step
-watch                persistent Controller/Watcher
-report               send a status report through the Neutral Relay
-final-result-review  status delivery -> independent review handoff
-complete              write legacy non-authoritative bridge compatibility evidence
+instructions           print canonical coding-agent operating instructions
+setup                  bind a dedicated ChatGPT reviewer conversation
+setup-authority        render a non-authoritative request for external signed authority
+setup-task-scope       confirm one exact Interactive Local task scope
+authority-check        verify pre-existing external signed positive authority
+task-scope-check       verify an existing Interactive Local task-scope record
+doctor                 read-only readiness and guided next-action diagnostics
+interactive-local      run one task step using signed authority or verified local task scope
+run-auto               one signed-authority AUTO decision step
+run-manual             one signed-authority MANUAL decision step
+watch                  persistent Controller/Watcher
+report                 send a status report through the Neutral Relay
+final-result-review    status delivery -> independent review handoff
+complete               write legacy non-authoritative bridge compatibility evidence
 ```
 
 Run:
@@ -162,7 +173,7 @@ See [`docs/REBRAND_MIGRATION.md`](docs/REBRAND_MIGRATION.md).
 1. **Evidence is not authority.** CI, review, ACK, runtime state, and Builder output do not create permission.
 2. **Exact binding over inference.** Repository, branch, baseline, PR, HEAD, and lifecycle action are checked explicitly.
 3. **Fail closed.** Unreadable or ambiguous control evidence blocks continuation instead of guessing.
-4. **One clear next step.** Readiness diagnostics may report many checks but guide the user to one dependency-ordered action.
+4. **One clear next step.** Readiness diagnostics and first-run setup guide the user to one dependency-ordered action instead of speculative preflight work.
 5. **One control loop.** Avoid parallel runtimes, duplicate schedulers, and hidden authorization kernels.
 6. **Agent-neutral Builder boundary.** The controller does not depend on one coding-agent vendor.
 7. **Human lifecycle authority stays visible.** MANUAL checkpoints are durable waiting states.
