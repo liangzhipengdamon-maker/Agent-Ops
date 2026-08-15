@@ -132,7 +132,7 @@ class TestIssue55FirstRunSetup(unittest.TestCase):
             error="CDP_UNREACHABLE: connection refused")
         self.assertIn("GovernLoop started or reused its dedicated Chrome runtime", page)
         self.assertIn("NEXT: close the dedicated GovernLoop Chrome window and rerun", page)
-        self.assertIn("do not invent a different CDP port", page.lower())
+        self.assertIn("do not invent a different cdp port", page.lower())
         self.assertIn('name="cdp_port" inputmode="numeric" required readonly', page)
         self.assertIn('name="browser_profile" required readonly', page)
 
