@@ -8,6 +8,7 @@ of the dedicated browser runtime so coding agents do not invent CDP setup.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -135,12 +136,7 @@ def _runtime_marker_matches(browser_profile, marker=RUNTIME_MARKER):
 
 
 def _profile_active_cdp_port(browser_profile):
-    """Read Chrome's own active DevTools port for this exact profile.
-
-    Chrome writes ``DevToolsActivePort`` inside the user-data directory when a
-    remote-debugging endpoint is active. This is profile-local runtime metadata,
-    not an authority source. Missing, malformed, or out-of-range data is ignored.
-    """
+    """Read Chrome's profile-local DevToolsActivePort when it exists."""
     profile = normalize_profile_path(browser_profile)
     path = os.path.join(profile, "DevToolsActivePort")
     try:
@@ -155,6 +151,69 @@ def _profile_active_cdp_port(browser_profile):
     if port < 1 or port > 65535:
         return None
     return port
+
+
+def _profile_singleton_cdp_port(browser_profile, runner=None):
+    """Resolve the CDP port from the process locking this exact Chrome profile.
+
+    GovernLoop launches Chrome with an explicit ``--remote-debugging-port``;
+    Chrome does not always create ``DevToolsActivePort`` for explicit ports.
+    On platforms where ``SingletonLock`` is a symlink ending in the owning PID,
+    follow only that profile-local PID, verify its command line contains the exact
+    GovernLoop ``--user-data-dir``, then read its explicit CDP port. No process or
+    port scan is performed.
+    """
+    profile = normalize_profile_path(browser_profile)
+    lock_path = os.path.join(profile, "SingletonLock")
+    try:
+        if not os.path.islink(lock_path):
+            return None
+        target = os.readlink(lock_path)
+    except OSError:
+        return None
+    match = re.search(r"-(\d+)$", target or "")
+    if not match:
+        return None
+    pid = match.group(1)
+    run = runner or subprocess.run
+    try:
+        result = run(
+            ["ps", "-p", pid, "-ww", "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    command = (result.stdout or "").strip()
+    if not command:
+        return None
+    if f"--user-data-dir={profile}" not in command:
+        return None
+    port_match = re.search(r"(?:^|\s)--remote-debugging-port=(\d+)(?:\s|$)", command)
+    if not port_match:
+        return None
+    try:
+        port = int(port_match.group(1), 10)
+    except ValueError:
+        return None
+    if port < 1 or port > 65535:
+        return None
+    return port
+
+
+def _profile_running_cdp_port(browser_profile):
+    """Return one reachable CDP port bound to the exact marked profile."""
+    active_port = _profile_active_cdp_port(browser_profile)
+    if active_port is not None and _cdp_reachable(active_port):
+        return active_port, "DevToolsActivePort"
+    singleton_port = _profile_singleton_cdp_port(browser_profile)
+    if singleton_port is not None and _cdp_reachable(singleton_port):
+        return singleton_port, "SingletonLock"
+    return None, None
 
 
 def save_binding(config_path, repository, conversation_url, cdp_port,
@@ -252,18 +311,18 @@ def ensure_browser_runtime(cdp_port, browser_profile, *, popen=None,
     profile = normalize_profile_path(browser_profile)
     marker_matches = _runtime_marker_matches(profile)
 
-    # Real E2E case (#59): Chrome may already own this exact GovernLoop profile
-    # on a different port than the currently configured default. Prefer Chrome's
-    # own profile-local runtime metadata before attempting a second launch.
+    # Real E2E case (#59): a prior GovernLoop Chrome can still own this exact
+    # profile on a different explicit port (observed 9222 vs configured 9233).
+    # Resolve only profile-local runtime evidence before attempting a second launch.
     if marker_matches:
-        active_port = _profile_active_cdp_port(profile)
-        if active_port is not None and _cdp_reachable(active_port):
+        running_port, runtime_source = _profile_running_cdp_port(profile)
+        if running_port is not None:
             return {
                 "ok": True,
                 "status": "BROWSER_REUSED",
-                "cdp_port": active_port,
+                "cdp_port": running_port,
                 "browser_profile": profile,
-                "runtime_source": "DevToolsActivePort",
+                "runtime_source": runtime_source,
             }
 
     if _cdp_reachable(port):
