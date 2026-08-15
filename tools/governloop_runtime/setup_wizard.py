@@ -36,6 +36,7 @@ test_connection = _legacy.test_connection
 generated_config_contains_secret_fields = _legacy.generated_config_contains_secret_fields
 
 _ORIGINAL_RENDER_PAGE = _legacy._render_page
+_ORIGINAL_SAVE_BINDING = _legacy.save_binding
 
 
 def _render_page(values, csrf_token, config_path, status="", error=""):
@@ -59,10 +60,17 @@ def _render_page(values, csrf_token, config_path, status="", error=""):
         "GovernLoop started or reused its dedicated Chrome runtime. In that GovernLoop "
         "Chrome window, sign in to ChatGPT if needed, open the reviewer conversation, "
         "copy its <code>https://chatgpt.com/c/...</code> URL, then use Test Connection "
-        "and Bind Conversation below. Leave the CDP port and browser profile unchanged "
-        "unless GovernLoop itself reports a blocker."
+        "and Bind Conversation below. The CDP port and browser profile are owned by "
+        "this setup run and are read-only."
     )
-    return page.replace(old, new)
+    page = page.replace(old, new)
+    page = page.replace(
+        'name="cdp_port" inputmode="numeric" required',
+        'name="cdp_port" inputmode="numeric" required readonly')
+    page = page.replace(
+        'name="browser_profile" required',
+        'name="browser_profile" required readonly')
+    return page
 
 
 def _configure_legacy_module():
@@ -72,6 +80,10 @@ def _configure_legacy_module():
     _legacy.RUNTIME_MARKER = RUNTIME_MARKER
     _legacy.ensure_runtime_marker = ensure_runtime_marker
     _legacy._render_page = _render_page
+    # The legacy localhost server resolves save_binding from its own module
+    # namespace. Rebind it to the canonical guard so Bind cannot claim success
+    # without a live exact-conversation check.
+    _legacy.save_binding = save_binding
 
 
 def load_config(config_path=DEFAULT_CONFIG_PATH):
@@ -124,9 +136,14 @@ def _runtime_marker_matches(browser_profile, marker=RUNTIME_MARKER):
 
 def save_binding(config_path, repository, conversation_url, cdp_port,
                  browser_profile):
-    _configure_legacy_module()
-    return _legacy.save_binding(config_path, repository, conversation_url,
-                                cdp_port, browser_profile)
+    """Persist only a currently reachable exact reviewer conversation."""
+    result = test_connection(conversation_url, cdp_port)
+    if not result.get("ok"):
+        raise SetupError(
+            f"REVIEWER_BINDING_NOT_VERIFIED: {result.get('code', 'CONNECTION_FAILED')}: "
+            f"{result.get('detail', 'exact reviewer conversation is not reachable')}")
+    return _ORIGINAL_SAVE_BINDING(
+        config_path, repository, conversation_url, cdp_port, browser_profile)
 
 
 def initial_values(config_path=DEFAULT_CONFIG_PATH, repository=None,
