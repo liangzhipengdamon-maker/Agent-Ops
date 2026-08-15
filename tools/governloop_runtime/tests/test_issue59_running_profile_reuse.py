@@ -18,6 +18,9 @@ class TestIssue59RunningProfileReuse(unittest.TestCase):
         with open(os.path.join(profile, "DevToolsActivePort"), "w", encoding="utf-8") as handle:
             handle.write(text)
 
+    def _write_singleton_lock(self, profile, target="host-3102"):
+        os.symlink(target, os.path.join(profile, "SingletonLock"))
+
     def test_agent_does_not_collect_conversation_url_before_wizard(self):
         text = cli.AGENT_INSTRUCTIONS
         self.assertIn("Do NOT ask the user for the ChatGPT conversation URL in Agent chat", text)
@@ -41,6 +44,61 @@ class TestIssue59RunningProfileReuse(unittest.TestCase):
         reachable.assert_called_once_with(9222)
         candidates.assert_not_called()
         popen.assert_not_called()
+
+    def test_reuses_explicit_port_from_exact_profile_singleton_lock(self):
+        with tempfile.TemporaryDirectory() as profile:
+            setup_wizard.ensure_runtime_marker(profile)
+            self._write_singleton_lock(profile)
+            ps_result = mock.Mock(
+                returncode=0,
+                stdout=(
+                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome "
+                    f"--remote-debugging-port=9222 --user-data-dir={profile} "
+                    "--no-first-run"
+                ),
+            )
+            with mock.patch("subprocess.run", return_value=ps_result) as run, \
+                 mock.patch.object(
+                     setup_wizard, "_cdp_reachable", side_effect=lambda port: int(port) == 9222
+                 ) as reachable, mock.patch.object(
+                     setup_wizard, "_browser_candidates"
+                 ) as candidates, mock.patch("subprocess.Popen") as popen:
+                result = setup_wizard.ensure_browser_runtime(9233, profile)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "BROWSER_REUSED")
+        self.assertEqual(result["cdp_port"], 9222)
+        self.assertEqual(result["runtime_source"], "SingletonLock")
+        run.assert_called_once_with(
+            ["ps", "-p", "3102", "-ww", "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        reachable.assert_called_once_with(9222)
+        candidates.assert_not_called()
+        popen.assert_not_called()
+
+    def test_singleton_lock_process_for_other_profile_is_not_reused(self):
+        with tempfile.TemporaryDirectory() as profile:
+            setup_wizard.ensure_runtime_marker(profile)
+            self._write_singleton_lock(profile)
+            ps_result = mock.Mock(
+                returncode=0,
+                stdout=(
+                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome "
+                    "--remote-debugging-port=9222 --user-data-dir=/tmp/other-profile"
+                ),
+            )
+            with mock.patch("subprocess.run", return_value=ps_result), \
+                 mock.patch.object(setup_wizard, "_cdp_reachable", return_value=False) as reachable, \
+                 mock.patch.object(setup_wizard, "_browser_candidates", return_value=[]):
+                result = setup_wizard.ensure_browser_runtime(9233, profile)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "CHROME_NOT_FOUND")
+        reachable.assert_called_once_with(9233)
 
     def test_malformed_active_port_is_not_reused(self):
         with tempfile.TemporaryDirectory() as profile:
@@ -88,7 +146,7 @@ class TestIssue59RunningProfileReuse(unittest.TestCase):
             "status": "BROWSER_REUSED",
             "cdp_port": 9222,
             "browser_profile": "/tmp/governloop-profile",
-            "runtime_source": "DevToolsActivePort",
+            "runtime_source": "SingletonLock",
         }
         server = mock.Mock()
         server.serve_forever.side_effect = KeyboardInterrupt
