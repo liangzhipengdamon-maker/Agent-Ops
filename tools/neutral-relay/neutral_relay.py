@@ -95,7 +95,7 @@ def normalize_conversation_url(url):
     """Normalize a reviewer conversation URL to a canonical identity.
 
     Returns the exact /c/<uuid> canonical form, or None for URLs that do not
-    identify a specific conversation (homepage, generic, /g/, /share/, etc.).
+    identify a specific ChatGPT conversation (homepage, generic, /g/, /share/, etc.).
     """
     cid = conversation_id_from_url(url)
     if not cid:
@@ -205,7 +205,7 @@ def resolve_reviewer_target(targets, reviewer_url):
     Returns the single matching target dict.
     Raises ConversationIdentityError:
       - REVIEWER_CONVERSATION_NOT_FOUND if zero targets match.
-      - AMBIGUOUS_REVIEWER_CONVERSATION if more than one target matches.
+      - AMBIGUOUS_REVIEWER_CONVERSATION if more than one exact match.
     """
     reviewer_cid = conversation_id_from_url(reviewer_url)
     if not reviewer_cid:
@@ -477,9 +477,12 @@ class DomProbe:
     }"""
 
     PROBE_ASSISTANT_TURNS = """()=>{
+      const stopBtn = !!Array.from(document.querySelectorAll('button'))
+                              .find(b => /停止生成|Stop generating/.test(b.innerText || ''));
       return Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'))
                   .map(m => ({text: m.innerText || '',
-                              id: m.getAttribute('data-message-id') || null}));
+                              id: m.getAttribute('data-message-id') || null,
+                              stopBtn}));
     }"""
 
     PROBE_FOCUS_COMPOSER = """(sels)=>{
@@ -521,12 +524,12 @@ class DomProbe:
         return await self.probe(self.PROBE_CONVERSATION, [])
 
     async def assistant_turns(self):
-        """Return per-turn assistant node descriptors {text, id}.
+        """Return per-turn assistant node descriptors {text, id, stopBtn}.
 
         Each entry is one `[data-message-author-role="assistant"]` node with
-        its current innerText and (when present) data-message-id, so the wait
-        logic can LOCK the response turn produced by this request instead of
-        re-reading whatever happens to be the latest node on each poll.
+        its current innerText, stable data-message-id when present, and the
+        current ChatGPT Stop-generating/busy signal. This lets the wait logic
+        lock the response turn and refuse to settle while generation continues.
         """
         return await self.probe(self.PROBE_ASSISTANT_TURNS, [])
 
@@ -581,14 +584,15 @@ class SendFlow:
                  settle_poll_interval=0.4, settle_stable_reads=3):
         self.probe = probe
         self.reviewer_url = reviewer_url
-        self.timeout = timeout or self.stage_timeouts["WAIT_ASSISTANT_RESPONSE"]
+        self.timeout = timeout or self.STAGE_TIMEOUTS["WAIT_ASSISTANT_RESPONSE"]
         self.max_send_attempts = max_send_attempts
         self.poll_interval = poll_interval
         self.stage_timeouts = dict(self.STAGE_TIMEOUTS)
         if stage_timeouts:
             self.stage_timeouts.update(stage_timeouts)
         # Assistant-response settling: poll the LOCKED response turn at this
-        # interval until the exact envelope is fully present AND stable.
+        # interval until generation has ended, the exact envelope is present,
+        # and the final text is stable.
         self.settle_poll_interval = settle_poll_interval
         self.settle_stable_reads = settle_stable_reads
 
@@ -754,19 +758,22 @@ class SendFlow:
     async def _wait_for_response(self, envelope):
         """Wait for the assistant response produced by THIS request.
 
-        Timing fix (canary-exposed): do NOT treat the currently-latest
-        assistant node, `data-is-last-node`, or "not streaming" as proof the
-        response is complete. Instead:
-          1. LOCK the response turn — the assistant node(s) produced by this
-             request, identified by the exact REVIEW_REQUEST_ID in the text —
-             and keep polling THAT turn, never switching to a different latest
-             node mid-wait.
-          2. Wait until the exact 5-field envelope is fully present.
-          3. Require the locked text to be stable across settle_stable_reads
-             consecutive identical reads (~1s) before calling the strict
-             correlate parser.
-        Timeout or permanently-incomplete DOM -> fail closed, no success
-        artifact, no fabricated ACK.
+        Completion requires all of the following, in order:
+          1. LOCK the response turn produced by this request using the exact
+             REVIEW_REQUEST_ID and stable data-message-id.
+          2. While ChatGPT exposes Stop generating / busy=true, NEVER settle or
+             return success, even if the text and correlation envelope appear
+             complete and temporarily stable.
+          3. Once busy=false, start the bounded final-settle window and wait
+             until the exact response envelope is fully present.
+          4. Require the locked text to be stable across settle_stable_reads
+             consecutive identical post-stream reads before strict correlation.
+
+        If streaming resumes, any previous settle progress is discarded and a
+        fresh final-settle window begins only after busy=false again. The outer
+        WAIT_ASSISTANT_RESPONSE timeout bounds the entire generation period.
+        Timeout or incomplete DOM fails closed: no success artifact and no
+        fabricated ACK.
         """
         deadline = time.time() + self.timeout
         req_id = envelope.get("REVIEW_REQUEST_ID")
@@ -783,12 +790,9 @@ class SendFlow:
             ours = [t for t in turns if req_id and req_id in (t.get("text") or "")]
             if not ours:
                 # Response turn not started yet: bounded by the OUTER deadline
-                # (a formal review may take a while before GPT begins). The
-                # settle window only starts once the turn appears.
+                # (a formal review may take a while before GPT begins).
                 await asyncio.sleep(self.settle_poll_interval)
                 continue
-            if settle_deadline is None:
-                settle_deadline = time.time() + self.stage_timeouts["RESPONSE_SETTLE"]
 
             if locked_id is None:
                 # FIRST identification: the response turn must be UNIQUE.
@@ -809,6 +813,7 @@ class SendFlow:
                         f"cannot lock")
                 locked_text = None
                 stable_reads = 0
+                settle_deadline = None
 
             # Only read the LOCKED node; never switch to another assistant
             # node (even one that also references this request_id) mid-wait.
@@ -823,16 +828,34 @@ class SendFlow:
                     f"locked response node {locked_id} for {req_id} vanished")
             text = current.get("text") or ""
 
+            # AGE-51: DOM stability is not generation completion. If ChatGPT
+            # still exposes Stop generating, discard all settle progress and
+            # keep waiting under the outer response timeout. This prevents a
+            # temporarily-stable streaming prefix from being returned.
+            if bool(current.get("stopBtn")):
+                locked_text = None
+                stable_reads = 0
+                settle_deadline = None
+                await asyncio.sleep(self.settle_poll_interval)
+                continue
+
+            # Busy is now false. Only NOW may the bounded final-settle window
+            # begin. If streaming later resumes, the block above resets it.
+            if settle_deadline is None:
+                settle_deadline = time.time() + self.stage_timeouts["RESPONSE_SETTLE"]
+
             if not self._response_envelope_complete(text, envelope):
                 stable_reads = 0
                 if time.time() > settle_deadline:
                     raise SendFlowError(
                         "RESPONSE_SETTLE",
                         f"response for {req_id} never became complete "
-                        f"(envelope fields missing)")
+                        f"after generation ended (envelope fields missing)")
                 await asyncio.sleep(self.settle_poll_interval)
                 continue
-            # Envelope complete: require stability before strict correlation.
+
+            # Envelope complete and generation ended: require final stability
+            # before strict correlation.
             if text == locked_text:
                 stable_reads += 1
             else:
@@ -846,6 +869,10 @@ class SendFlow:
                         f"settled response for {req_id} failed strict "
                         f"correlation")
                 return matched
+            if time.time() > settle_deadline:
+                raise SendFlowError(
+                    "RESPONSE_SETTLE",
+                    f"response for {req_id} did not stabilize after generation ended")
             await asyncio.sleep(self.settle_poll_interval)
         raise SendFlowError("WAIT_ASSISTANT_RESPONSE",
                             f"timed out waiting for correlated response for {req_id}")
