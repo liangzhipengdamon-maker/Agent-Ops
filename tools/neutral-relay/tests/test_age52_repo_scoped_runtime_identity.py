@@ -1,3 +1,7 @@
+import asyncio
+import contextlib
+import io
+import json
 import os
 import sys
 import tempfile
@@ -5,6 +9,7 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import neutral_relay
 from neutral_relay import RuntimeIdentityError, verify_runtime_identity
 
 
@@ -95,6 +100,39 @@ class TestAge52RepoScopedRuntimeIdentity(unittest.TestCase):
             cfg = self.make_config(td)
             cfg["routes"] = {self.REPO_B: cfg["routes"][self.REPO_B]}
             self.assertEqual(verify_runtime_identity(cfg)[3], self.CID_B)
+
+    def test_run_relay_uses_requested_repo_identity_in_multi_route_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.write_marker(td)
+            config_path = os.path.join(td, "config.json")
+            request_path = os.path.join(td, "request.txt")
+            output_path = os.path.join(td, "out.md")
+            with open(config_path, "w") as f:
+                json.dump(self.make_config(td), f)
+            with open(request_path, "w") as f:
+                f.write(
+                    "REVIEW_REQUEST_ID: AGE52-entrypoint\n"
+                    f"REPO: {self.REPO_B}\n"
+                    "PR: 70\n"
+                    "HEAD: abc123\n"
+                    "REQUEST: independent_review\n"
+                )
+            args = type("Args", (), {
+                "request_file": request_path,
+                "output_file": output_path,
+                "config_file": config_path,
+                "dry_run": True,
+                "timeout": 5,
+                "max_send_attempts": 2,
+            })()
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                ret = asyncio.run(neutral_relay.run_relay(args))
+            self.assertEqual(ret, 0)
+            out = captured.getvalue()
+            self.assertIn(f"EXPECTED_CONVERSATION_ID: {self.CID_B}", out)
+            self.assertNotIn(f"EXPECTED_CONVERSATION_ID: {self.CID_A}", out)
+            self.assertFalse(os.path.exists(output_path))
 
 
 if __name__ == "__main__":
