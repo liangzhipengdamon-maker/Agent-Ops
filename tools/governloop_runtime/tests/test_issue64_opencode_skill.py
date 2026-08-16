@@ -23,6 +23,15 @@ class TestIssue64OpenCodeSkill(unittest.TestCase):
         self.assertIn("Ready, Merge, Release, Deploy", text)
         self.assertIn("correct project", text)
 
+    def test_canonical_skill_requires_canonical_review_transport(self):
+        text = opencode_skill.canonical_skill_text()
+        self.assertIn("canonical-review-only", text)
+        self.assertIn("~/.agentops/relay/neutral_relay.py", text)
+        self.assertIn("project-local `.agent-bridge/relay.py`", text)
+        self.assertIn("`cc-report.md`", text)
+        self.assertIn("`gpt-review.md`", text)
+        self.assertIn("STOP and report the transport mismatch", text)
+
     def test_install_writes_only_requested_skill_file(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
