@@ -666,15 +666,23 @@ class TestRelayClientACK(unittest.TestCase):
             res = self._send(payload, td, output)
         self.assertFalse(res["delivered"])
 
-    def test_ack_extra_lines_not_delivered(self):
-        # R6-P1: an extra/duplicate non-envelope line fails closed.
+    def test_ack_extra_lines_delivered(self):
+        # GOVERNLOOP-REVIEW-TRANSPORT-FIX-001 §2: extra non-envelope lines
+        # in the reviewer's reply are now ALLOWED — the validator only
+        # requires the 5 fields to appear with byte-exact values, anywhere
+        # in the assistant turn. (Replaces the prior strict-5-line test
+        # ``test_ack_extra_lines_not_delivered`` that assumed extras ==
+        # fail-closed.)
         payload = ("REVIEW_REQUEST_ID: req-1\nREPO: o/r\nPR: 7\nHEAD: h1\n"
                    "REQUEST: status_report\n")
         output = ("REVIEW_REQUEST_ID: req-1\nREPO: o/r\nPR: 7\nHEAD: h1\n"
                   "ACK: status_report_received\nEXTRA: noise\n")
         with tempfile.TemporaryDirectory() as td:
             res = self._send(payload, td, output)
-        self.assertFalse(res["delivered"])
+        self.assertTrue(
+            res["delivered"],
+            f"extras must not fail delivery under the new contract; "
+            f"got detail={res.get('detail')!r}")
 
 
 class TestCLIEntrypoint(unittest.TestCase):

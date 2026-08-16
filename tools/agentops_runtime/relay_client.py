@@ -33,6 +33,154 @@ def _field(payload: str, key: str) -> Optional[str]:
     return None
 
 
+# Canonical status_report reply-contract: the 5-line ACK schema the canonical
+# send_status_report validator (below) requires is not a ChatGPT-friendly
+# contract by default — without an explicit directive, the reviewer is
+# happy to also emit STATUS / CHANGED_FILES / ADDITIONS / READY_AUTHORIZED /
+# MERGE_AUTHORIZED etc. and break `len(lines) == 5` strict equality.
+#
+# Appending this block at the end of every status_report payload tells the
+# reviewer to reply with EXACTLY the 5 lines, no explanation, no markdown,
+# no extra fields, no value mutation. Validator unchanged.
+STATUS_REPORT_REPLY_CONTRACT_HEADER = (
+    "\n"
+    "REPLY_CONTRACT: Your reply MUST contain EXACTLY the 5 lines below,\n"
+    "  no explanations, no markdown, no extra fields, no value\n"
+    "  mutations, no leading/trailing whitespace beyond what is shown:\n"
+)
+STATUS_REPORT_REPLY_CONTRACT_FOOTER = (
+    "\n"
+    "Each value MUST match byte-for-byte.\n"
+)
+
+
+def status_report_reply_contract_block(req_id: str, repo: str,
+                                       pr: str, head: str) -> str:
+    """Return the REPLY_CONTRACT directive block to append to a status_report
+    payload so the canonical reviewer echoes back the 5-line ACK schema
+    that ``send_status_report`` validates here. Field values are filled
+    in from the live envelope so the reviewer cannot substitute."""
+    return (
+        STATUS_REPORT_REPLY_CONTRACT_HEADER
+        + f"  REVIEW_REQUEST_ID: {req_id}\n"
+        + f"  REPO: {repo}\n"
+        + f"  PR: {pr}\n"
+        + f"  HEAD: {head}\n"
+        + "  ACK: status_report_received\n"
+        + STATUS_REPORT_REPLY_CONTRACT_FOOTER
+    )
+
+
+# Canonical status_report reply-contract: the 5 fields the canonical
+# send_status_report validator (below) requires. The validator now reads
+# these five keys anywhere in the assistant turn (extra natural-language
+# lines allowed) but enforces byte-exact binding per field and a single
+# literal ACK value. Partial-turn safety: a key value that is a strict
+# prefix of the request value, an empty value after a key prefix, or a
+# last-line key header with no value all fail closed.
+ACK_REQUIRED_KEYS = (
+    "REVIEW_REQUEST_ID",
+    "REPO",
+    "PR",
+    "HEAD",
+    "ACK",
+)
+ACK_LITERAL_VALUE = "status_report_received"
+
+
+def _parse_status_ack(content: str, sent_payload: str):
+    """Parse the canonical reviewer's status_report ACK reply.
+
+    Returns (ack: bool, detail: str). Failures are ALWAYS fail-closed —
+    ``ack`` is True only when all five required keys appear exactly once
+    with consistent values, the binding fields match the request
+    byte-for-byte, and the ACK value equals the literal marker.
+
+    Partial-turn invariant: a key with no value after its ``KEY:``
+    prefix, or a binding value that is a strict prefix of the
+    corresponding request value, MUST NOT return ack=True. A truncated
+    or ambiguous assistant turn always fails closed.
+    """
+    if not content or not content.strip():
+        return False, "empty assistant turn"
+
+    # Pull the request envelope for byte-exact binding checks.
+    sent = {
+        "REVIEW_REQUEST_ID": _field(sent_payload, "REVIEW_REQUEST_ID"),
+        "REPO": _field(sent_payload, "REPO"),
+        "PR": _field(sent_payload, "PR"),
+        "HEAD": _field(sent_payload, "HEAD"),
+    }
+
+    # Pass 1: collect all occurrences of the five keys.
+    occurrences = {key: [] for key in ACK_REQUIRED_KEYS}
+    last_non_blank_line = None
+    last_non_blank_line_was_partial_header = False
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        last_non_blank_line = line
+        for key in ACK_REQUIRED_KEYS:
+            prefix = key + ":"
+            if line.startswith(prefix):
+                value = line[len(prefix):].strip()
+                if value:
+                    occurrences[key].append(value)
+                    last_non_blank_line_was_partial_header = False
+                else:
+                    last_non_blank_line_was_partial_header = True
+                break
+        # Lines that don't start with any required key prefix are natural
+        # language and ignored — they do NOT clear the partial-header flag.
+
+    # Pass 2: last-line partial-guard. A ``KEY:`` prefix with no value
+    # on the very last non-blank line signals a partial reply (ChatGPT
+    # stream truncated mid-field). Run this BEFORE the missing-key check
+    # so the more specific "partial" cause is reported rather than a
+    # generic "missing required key" symptom.
+    if last_non_blank_line_was_partial_header:
+        return False, (
+            f"last line is partial key header "
+            f"(line={last_non_blank_line!r})")
+
+    # Pass 3: every required key must appear exactly once with one value.
+    for key in ACK_REQUIRED_KEYS:
+        values = occurrences[key]
+        if not values:
+            return False, f"missing required key {key}"
+        if len(values) > 1:
+            return False, (
+                f"{key} appears {len(values)} times (must appear exactly once); "
+                f"values={values!r}")
+
+    # Pass 3: binding fields must equal the request byte-for-byte; a
+    # value that is a strict prefix of (or vice versa for) the request
+    # value signals a partial/truncated reply and must fail closed.
+    for key in ("REVIEW_REQUEST_ID", "REPO", "PR", "HEAD"):
+        sent_val = sent[key]
+        if not sent_val:
+            return False, f"sent payload missing {key}"
+        reply_val = occurrences[key][0]
+        if reply_val != sent_val:
+            if (reply_val and sent_val.startswith(reply_val)) or (
+                    reply_val.startswith(sent_val)):
+                return False, (
+                    f"partial {key} value detected "
+                    f"(reply={reply_val!r} sent={sent_val!r})")
+            return False, (
+                f"{key} binding mismatch "
+                f"(reply={reply_val!r} sent={sent_val!r})")
+
+    # Pass 4: ACK literal-match.
+    if occurrences["ACK"][0] != ACK_LITERAL_VALUE:
+        return False, (
+            f"ACK value mismatch "
+            f"(reply={occurrences['ACK'][0]!r} expected={ACK_LITERAL_VALUE!r})")
+
+    return True, "relay ack captured with exact binding"
+
+
 def send_status_report(payload: str, output_dir: str,
                        timeout: int = 180) -> dict:
     os.makedirs(output_dir, exist_ok=True)
@@ -52,30 +200,19 @@ def send_status_report(payload: str, output_dir: str,
         return {"correlation_id": corr, "delivered": False,
                 "exit_code": 2, "detail": f"relay invocation failed: {e}"}
 
-    ack = False
-    detail = "no ack captured"
-    if os.path.exists(out):
+    if not os.path.exists(out):
+        return {"correlation_id": corr, "delivered": False,
+                "exit_code": exit_code,
+                "detail": "no relay output file produced"}
+    try:
         with open(out) as f:
             content = f.read()
-        sent = {
-            "REVIEW_REQUEST_ID": _field(payload, "REVIEW_REQUEST_ID"),
-            "REPO": _field(payload, "REPO"),
-            "PR": _field(payload, "PR"),
-            "HEAD": _field(payload, "HEAD"),
-        }
-        lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
-        if len(lines) == 5:
-            got = {}
-            for line in lines:
-                key, _, value = line.partition(":")
-                got[key.strip()] = value.strip()
-            if (list(got.keys()) == ["REVIEW_REQUEST_ID", "REPO", "PR",
-                                     "HEAD", "ACK"]
-                    and got.get("ACK") == "status_report_received"
-                    and all(sent.get(k) and sent[k] == got.get(k)
-                            for k in sent)):
-                ack = True
-                detail = "relay ack captured with exact binding"
+    except OSError as e:
+        return {"correlation_id": corr, "delivered": False,
+                "exit_code": exit_code,
+                "detail": f"failed to read relay output: {e}"}
+
+    ack, detail = _parse_status_ack(content, payload)
     return {"correlation_id": corr, "delivered": ack,
             "exit_code": exit_code, "detail": detail}
 
