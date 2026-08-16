@@ -54,6 +54,8 @@ Do not create a new daemon, scheduler, approval store, or control plane to imple
 ## 5. Review and stop conditions
 
 - At a genuine `REVIEW` gate, use GovernLoop's existing automatic GPT review handoff. Do not ask the user to copy/paste the review report when the configured handoff path is available.
+- GovernLoop review traffic is canonical-review-only: trigger it through the GovernLoop review gate/command that invoked the task. Do not substitute a project-local `.agent-bridge/relay.py`, `cc-report.md`, `gpt-review.md`, or any other legacy/manual bridge for GovernLoop review or reviewer advisory.
+- Before a GovernLoop reviewer handoff, verify/report the transport identity as `~/.agentops/relay/neutral_relay.py`. If the pending action would instead execute a project-local relay, STOP and report the transport mismatch rather than sending the review through that path.
 - Continue after the review only when GovernLoop reports the next permitted action.
 - Stop and ask the user when GovernLoop reaches a real Product Owner decision or lifecycle gate.
 - Ready, Merge, Release, Deploy, tag, close, or equivalent lifecycle transitions require their existing separate explicit authorization.
