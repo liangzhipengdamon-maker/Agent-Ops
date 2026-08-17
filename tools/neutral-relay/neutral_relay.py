@@ -118,13 +118,15 @@ async def run_relay(args):
 
         await cmd("Page.enable", {}, session=sid)
 
-        # Capture the existing assistant-turn count before sending so the
-        # response can be identified without requiring GPT to echo routing fields.
-        assistant_count_before = await js("(()=>document.querySelectorAll('[data-message-author-role=\\'assistant\\']').length)()")
+        # Capture the existing user-turn count before sending. The response is
+        # correlated to the assistant turn that follows the user turn created
+        # by this send, so the pre-send state that must change is the count of
+        # user turns (not assistant turns).
+        user_count_before = await js("(()=>document.querySelectorAll('[data-message-author-role=\\'user\\']').length)()")
         try:
-            assistant_count_before = int(assistant_count_before or 0)
+            user_count_before = int(user_count_before or 0)
         except (TypeError, ValueError):
-            assistant_count_before = 0
+            user_count_before = 0
 
         # Inject request text using exact DOM interactions
         esc_text = json.dumps(request_text)
@@ -137,11 +139,13 @@ async def run_relay(args):
             print("Error: Send button not found or disabled.")
             return 1
 
-        # Poll the assistant turn created by this send. Modern ChatGPT no longer
-        # exposes the historical 'Reply actions'/'回复操作' completion marker, and
-        # ordinary natural-language responses should not be forced to echo the
-        # REVIEW_REQUEST_ID. A response is complete only after the new assistant
-        # turn has stopped streaming and its text is stable across three reads.
+        # Poll for the assistant response following the user turn created by
+        # this send. Modern ChatGPT no longer exposes the historical 'Reply
+        # actions'/'回复操作' completion marker, and ordinary natural-language
+        # responses should not be forced to echo the REVIEW_REQUEST_ID. The
+        # response is complete only after (1) a new user turn is confirmed to
+        # have been added, (2) the assistant turn that follows it has stopped
+        # streaming, and (3) its text is stable across three reads.
         deadline = time.time() + args.wait_timeout
         found_response = False
         final_text = ""
@@ -149,24 +153,44 @@ async def run_relay(args):
         stable_reads = 0
         while time.time() < deadline:
             snapshot = await js("""(()=>{
-                const nodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
-                const last = nodes.length ? nodes[nodes.length - 1] : null;
-                const text = last ? ((last.innerText || last.textContent || '').trim()) : '';
+                const roles = Array.from(document.querySelectorAll('[data-message-author-role]'));
+                const users = roles.filter(n => n.getAttribute('data-message-author-role') === 'user');
+                const lastUser = users.length ? users[users.length - 1] : null;
+                const lastUserText = lastUser ? ((lastUser.innerText || lastUser.textContent || '').trim()) : '';
+                let assistant = null;
+                if (lastUser) {
+                    const idx = roles.indexOf(lastUser);
+                    for (let i = idx + 1; i < roles.length; i++) {
+                        if (roles[i].getAttribute('data-message-author-role') === 'assistant') {
+                            assistant = roles[i];
+                            break;
+                        }
+                    }
+                }
+                const text = assistant ? ((assistant.innerText || assistant.textContent || '').trim()) : '';
                 const stop = document.querySelector('button[data-testid="stop-button"], button[data-testid="stop-generation"], button[aria-label*="Stop"], button[aria-label*="停止"]');
-                const streaming = !!(last && (
-                    last.matches('.streaming-animation') ||
-                    last.querySelector('.streaming-animation') ||
-                    last.getAttribute('data-is-streaming') === 'true' ||
-                    last.getAttribute('aria-busy') === 'true'
+                const streaming = !!(assistant && (
+                    assistant.matches('.streaming-animation') ||
+                    assistant.querySelector('.streaming-animation') ||
+                    assistant.getAttribute('data-is-streaming') === 'true' ||
+                    assistant.getAttribute('aria-busy') === 'true'
                 ));
-                return {count:nodes.length, text:text, generating:(!!stop || streaming), streaming:streaming};
+                return {userCount:users.length, lastUserText:lastUserText, text:text, hasAssistant:!!assistant, generating:(!!stop || streaming), streaming:streaming};
             })()""")
             snapshot = snapshot if isinstance(snapshot, dict) else {}
-            count = int(snapshot.get("count") or 0)
+            user_count = int(snapshot.get("userCount") or 0)
+            last_user_text = str(snapshot.get("lastUserText") or "").strip()
             text = str(snapshot.get("text") or "").strip()
+            has_assistant = bool(snapshot.get("hasAssistant"))
             generating = bool(snapshot.get("generating"))
 
-            if count > assistant_count_before and text and not generating:
+            # Confirm the current user message was actually added to the
+            # conversation: either the user-turn count increased, or the last
+            # user turn already contains this request's correlation id (which
+            # also covers DOM reconciliation that reuses an existing element).
+            user_added = (user_count > user_count_before) or (req_id and req_id in last_user_text)
+
+            if user_added and has_assistant and text and not generating:
                 if text == last_text:
                     stable_reads += 1
                 else:
