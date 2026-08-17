@@ -221,6 +221,52 @@ class TestAge53PostStreamHydration(unittest.TestCase):
         self.assertEqual(ctx.exception.stage, "RESPONSE_SETTLE")
         self.assertIn("vanished", ctx.exception.reason)
 
+    def test_h_valid_snapshot_then_invalid_current_fails_closed(self):
+        # P1: a valid snapshot A is read, then the DOM becomes invalid /
+        # incomplete (mismatched envelope) and stays untrustworthy through the
+        # settle deadline. At the deadline the CURRENT read is not complete and
+        # not strictly correlated, so the relay must FAIL CLOSED. It must NOT
+        # fall back to the earlier cached valid snapshot A.
+        env = make_envelope(req_id="AGE53-H")
+        valid_a = response_text(env, "valid snapshot A")
+        invalid_b = (f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\n"
+                     f"REPO: {env['REPO']}\n"
+                     "PR: 999\n"
+                     "HEAD: WRONG")  # mismatched envelope -> incomplete/invalid
+        script = [
+            {"text": valid_a, "id": "turn-0", "stopBtn": False},
+            {"text": invalid_b, "id": "turn-0", "stopBtn": False},
+        ]
+        # invalid_b repeats forever (script exhausted) until the deadline fires.
+        probe = ScriptedProbe(script)
+        flow = self._flow(env, probe, settle_stable_reads=3, response_settle=0.03,
+                          timeout=5.0, poll=0.002)
+        with self.assertRaises(SendFlowError) as ctx:
+            asyncio.run(flow._wait_for_response(env))
+        self.assertEqual(ctx.exception.stage, "RESPONSE_SETTLE")
+
+    def test_i_valid_snapshot_then_mismatched_correlation_fails_closed(self):
+        # P1 variant: after a valid snapshot A, the current read carries the
+        # exact envelope field names but with a mismatched PR/HEAD value, so
+        # strict correlation fails. This untrustworthy current read must also
+        # fail closed at the deadline - never returning the cached valid A.
+        env = make_envelope(req_id="AGE53-I")
+        valid_a = response_text(env, "valid snapshot A")
+        mismatch_b = (f"REVIEW_REQUEST_ID: {env['REVIEW_REQUEST_ID']}\n"
+                      f"REPO: {env['REPO']}\n"
+                      f"PR: 999\n"
+                      f"HEAD: {env['HEAD']}")  # PR value mismatches envelope
+        script = [
+            {"text": valid_a, "id": "turn-0", "stopBtn": False},
+            {"text": mismatch_b, "id": "turn-0", "stopBtn": False},
+        ]
+        probe = ScriptedProbe(script)
+        flow = self._flow(env, probe, settle_stable_reads=3, response_settle=0.03,
+                          timeout=5.0, poll=0.002)
+        with self.assertRaises(SendFlowError) as ctx:
+            asyncio.run(flow._wait_for_response(env))
+        self.assertEqual(ctx.exception.stage, "RESPONSE_SETTLE")
+
 
 if __name__ == "__main__":
     unittest.main()

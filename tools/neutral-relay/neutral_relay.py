@@ -775,26 +775,26 @@ class SendFlow:
           2. While ChatGPT exposes Stop generating / busy=true, NEVER settle or
              return success, even if the text and correlation envelope appear
              complete and temporarily stable. Streaming also invalidates any
-             previously captured post-stream snapshot.
+             previously captured post-stream settle state.
           3. Once busy=false, start the bounded final-settle window. During the
              window require the exact locked node, a complete envelope, and
-             strict correlation. Keep tracking the LATEST complete
-             strictly-correlated snapshot.
+             strict correlation.
           4. If the text becomes stable across settle_stable_reads consecutive
-             identical post-stream reads, return the latest valid snapshot
+             identical post-stream reads, return the current valid snapshot
              immediately (early settle).
-          5. If the settle window expires while generation has still ended, the
-             locked node still exists, and the latest snapshot still passes the
-             complete-envelope and strict-correlation checks, return that latest
-             valid snapshot instead of failing. Only when no valid snapshot
-             exists at the deadline does the relay fail closed.
+          5. If the settle window expires, return the CURRENT locked-node read
+             only when that very read is itself still complete and strictly
+             correlated (and generation has still ended). A valid snapshot
+             cached from an EARLIER read must never be substituted for a
+             current read that is invalid / incomplete / mismatched - that
+             would return stale content from an untrustworthy DOM. Any other
+             deadline condition fails closed.
 
-        If streaming resumes inside the settle window, the latest snapshot,
-        stability state, and settle deadline are all discarded; a fresh
-        post-stream window begins only after busy=false again. The outer
-        WAIT_ASSISTANT_RESPONSE timeout bounds the entire generation period.
-        Timeout or a missing valid snapshot fails closed: no success artifact
-        and no fabricated ACK.
+        If streaming resumes inside the settle window, the stability state and
+        settle deadline are discarded; a fresh post-stream window begins only
+        after busy=false again. The outer WAIT_ASSISTANT_RESPONSE timeout bounds
+        the entire generation period. Timeout or an untrustworthy current read
+        at the deadline fails closed: no success artifact and no fabricated ACK.
         """
         deadline = time.time() + self.timeout
         req_id = envelope.get("REVIEW_REQUEST_ID")
@@ -802,7 +802,6 @@ class SendFlow:
         locked_text = None
         stable_reads = 0
         settle_deadline = None
-        latest_valid_snapshot = None
         while time.time() < deadline:
             await self.verify_conversation_identity()
             turns = await self.probe.assistant_turns()
@@ -836,7 +835,6 @@ class SendFlow:
                 locked_text = None
                 stable_reads = 0
                 settle_deadline = None
-                latest_valid_snapshot = None
 
             # Only read the LOCKED node; never switch to another assistant
             # node (even one that also references this request_id) mid-wait.
@@ -853,12 +851,10 @@ class SendFlow:
 
             # AGE-51: DOM stability is not generation completion. If ChatGPT
             # still exposes Stop generating, discard ALL post-stream settle
-            # state (including any captured valid snapshot) and keep waiting
-            # under the outer response timeout. This prevents a temporarily
-            # stable streaming prefix - or a stale pre-resume snapshot - from
-            # ever being returned.
+            # state and keep waiting under the outer response timeout. This
+            # prevents a temporarily stable streaming prefix - or a stale
+            # pre-resume snapshot - from ever being returned.
             if bool(current.get("stopBtn")):
-                latest_valid_snapshot = None
                 locked_text = None
                 stable_reads = 0
                 settle_deadline = None
@@ -870,16 +866,14 @@ class SendFlow:
             if settle_deadline is None:
                 settle_deadline = time.time() + self.stage_timeouts["RESPONSE_SETTLE"]
 
-            # A complete, strictly-correlated snapshot is a candidate response.
-            # Stability is tracked only over such valid snapshots.
+            # The CURRENT locked-node read is the only thing that may ever be
+            # returned. A complete, strictly-correlated snapshot is a candidate
+            # response; stability is tracked only over such valid reads.
             valid = self._response_envelope_complete(text, envelope)
             if valid:
                 valid = correlate_response([text], envelope) is not None
-            if valid:
-                latest_valid_snapshot = text
-            else:
-                # An incomplete / non-correlated read earns no stability credit
-                # and must not shadow the latest valid snapshot.
+            if not valid:
+                # An incomplete / non-correlated read earns no stability credit.
                 stable_reads = 0
 
             # Early-settle optimization: byte-for-byte stability ends the wait.
@@ -890,19 +884,15 @@ class SendFlow:
                 stable_reads = 1
 
             if valid and stable_reads >= self.settle_stable_reads:
-                return latest_valid_snapshot
+                return text
 
-            # Settle-window expiry: fall back to the LATEST valid snapshot
-            # (not the first, not anything captured while streaming) when it is
-            # still safe to do so; otherwise fail closed.
+            # Settle-window expiry: return the CURRENT read only when that very
+            # read is itself still complete and strictly correlated. A snapshot
+            # cached from an EARLIER read must never override an untrustworthy
+            # current DOM state; any other deadline condition fails closed.
             if time.time() > settle_deadline:
-                if (latest_valid_snapshot is not None
-                        and not bool(current.get("stopBtn"))
-                        and self._response_envelope_complete(
-                            latest_valid_snapshot, envelope)
-                        and correlate_response([latest_valid_snapshot],
-                                               envelope) is not None):
-                    return latest_valid_snapshot
+                if valid:
+                    return text
                 raise SendFlowError(
                     "RESPONSE_SETTLE",
                     f"response for {req_id} did not stabilize after generation "
