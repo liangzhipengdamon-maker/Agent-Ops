@@ -142,7 +142,7 @@ async def run_relay(args):
         # ordinary natural-language responses should not be forced to echo the
         # REVIEW_REQUEST_ID. A response is complete only after the new assistant
         # turn has stopped streaming and its text is stable across three reads.
-        deadline = time.time() + 180
+        deadline = time.time() + args.wait_timeout
         found_response = False
         final_text = ""
         last_text = None
@@ -183,7 +183,7 @@ async def run_relay(args):
             await asyncio.sleep(2)
             
         if not found_response:
-            print("Error: Timed out waiting for a new stable Assistant response after streaming ended.")
+            print(f"Error: Timed out after {args.wait_timeout}s waiting for a new stable Assistant response after streaming ended.")
             return 1
             
         with open(args.output_file, "w") as f:
@@ -197,6 +197,7 @@ def main():
     parser.add_argument("--request-file", required=True, help="Path to the review request payload file")
     parser.add_argument("--output-file", required=True, help="Path to write the GPT review response")
     parser.add_argument("--config-file", default=os.path.expanduser("~/.agentops/relay/config.json"), help="Path to the routing config.json")
+    parser.add_argument("--wait-timeout", type=int, default=900, help="Seconds to wait for the new Assistant turn to finish streaming and stabilize (default: 900)")
     parser.add_argument("--dry-run", action="store_true", help="Simulate routing without CDP execution")
     args = parser.parse_args()
     sys.exit(asyncio.run(run_relay(args)))
