@@ -118,6 +118,14 @@ async def run_relay(args):
 
         await cmd("Page.enable", {}, session=sid)
 
+        # Capture the existing assistant-turn count before sending so the
+        # response can be identified without requiring GPT to echo routing fields.
+        assistant_count_before = await js("(()=>document.querySelectorAll('[data-message-author-role=\\'assistant\\']').length)()")
+        try:
+            assistant_count_before = int(assistant_count_before or 0)
+        except (TypeError, ValueError):
+            assistant_count_before = 0
+
         # Inject request text using exact DOM interactions
         esc_text = json.dumps(request_text)
         await js(f"(()=>{{const e=document.querySelector('[contenteditable=true]');if(!e)return false;e.focus();e.innerHTML='';e.innerText={esc_text};e.dispatchEvent(new Event('input',{{bubbles:true}}));return true}})()")
@@ -129,31 +137,54 @@ async def run_relay(args):
             print("Error: Send button not found or disabled.")
             return 1
 
-        # Poll for completion and check for request ID to prevent reading stale replies
+        # Poll the assistant turn created by this send. Modern ChatGPT no longer
+        # exposes the historical 'Reply actions'/'回复操作' completion marker, and
+        # ordinary natural-language responses should not be forced to echo the
+        # REVIEW_REQUEST_ID. A response is complete when a new non-empty assistant
+        # turn exists, generation controls are absent, and its text is stable across
+        # three consecutive reads.
         deadline = time.time() + 180
         found_response = False
         final_text = ""
+        last_text = None
+        stable_reads = 0
         while time.time() < deadline:
-            text = str(await js("(()=>{const m=document.querySelector('main');return m?m.innerText||'':''})()"))
-            if "回复操作" in text or "Reply actions" in text:
-                if "正在思考" not in text[-2000:]:
-                    # Check if our req_id is in the latest text to ensure we aren't picking up a stale review
-                    if req_id in text[-4000:]:
-                        final_text = text
-                        found_response = True
-                        break
-            await asyncio.sleep(3)
+            snapshot = await js("""(()=>{
+                const nodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+                const last = nodes.length ? nodes[nodes.length - 1] : null;
+                const text = last ? ((last.innerText || last.textContent || '').trim()) : '';
+                const stop = document.querySelector('button[data-testid="stop-button"], button[data-testid="stop-generation"], button[aria-label*="Stop"], button[aria-label*="停止"]');
+                return {count:nodes.length, text:text, generating:!!stop};
+            })()""")
+            snapshot = snapshot if isinstance(snapshot, dict) else {}
+            count = int(snapshot.get("count") or 0)
+            text = str(snapshot.get("text") or "").strip()
+            generating = bool(snapshot.get("generating"))
+
+            if count > assistant_count_before and text and not generating:
+                if text == last_text:
+                    stable_reads += 1
+                else:
+                    last_text = text
+                    stable_reads = 1
+                if stable_reads >= 3:
+                    final_text = text
+                    found_response = True
+                    break
+            else:
+                last_text = None
+                stable_reads = 0
+
+            await asyncio.sleep(2)
             
         if not found_response:
-            print("Error: Timed out waiting for Assistant reply or Request ID not found in reply.")
+            print("Error: Timed out waiting for a new stable Assistant response.")
             return 1
             
-        # Extract the relevant block (simplified: just dumping the whole latest response text that contains the ID)
-        # The relay_adapter will parse the strictly formatted block.
         with open(args.output_file, "w") as f:
             f.write(final_text)
             
-        print(f"Success: Wrote review to {args.output_file}")
+        print(f"Success: Wrote response to {args.output_file}")
         return 0
 
 def main():
