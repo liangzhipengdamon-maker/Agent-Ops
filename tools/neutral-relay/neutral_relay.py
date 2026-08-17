@@ -140,9 +140,8 @@ async def run_relay(args):
         # Poll the assistant turn created by this send. Modern ChatGPT no longer
         # exposes the historical 'Reply actions'/'回复操作' completion marker, and
         # ordinary natural-language responses should not be forced to echo the
-        # REVIEW_REQUEST_ID. A response is complete when a new non-empty assistant
-        # turn exists, generation controls are absent, and its text is stable across
-        # three consecutive reads.
+        # REVIEW_REQUEST_ID. A response is complete only after the new assistant
+        # turn has stopped streaming and its text is stable across three reads.
         deadline = time.time() + 180
         found_response = False
         final_text = ""
@@ -154,7 +153,13 @@ async def run_relay(args):
                 const last = nodes.length ? nodes[nodes.length - 1] : null;
                 const text = last ? ((last.innerText || last.textContent || '').trim()) : '';
                 const stop = document.querySelector('button[data-testid="stop-button"], button[data-testid="stop-generation"], button[aria-label*="Stop"], button[aria-label*="停止"]');
-                return {count:nodes.length, text:text, generating:!!stop};
+                const streaming = !!(last && (
+                    last.matches('.streaming-animation') ||
+                    last.querySelector('.streaming-animation') ||
+                    last.getAttribute('data-is-streaming') === 'true' ||
+                    last.getAttribute('aria-busy') === 'true'
+                ));
+                return {count:nodes.length, text:text, generating:(!!stop || streaming), streaming:streaming};
             })()""")
             snapshot = snapshot if isinstance(snapshot, dict) else {}
             count = int(snapshot.get("count") or 0)
@@ -178,7 +183,7 @@ async def run_relay(args):
             await asyncio.sleep(2)
             
         if not found_response:
-            print("Error: Timed out waiting for a new stable Assistant response.")
+            print("Error: Timed out waiting for a new stable Assistant response after streaming ended.")
             return 1
             
         with open(args.output_file, "w") as f:
