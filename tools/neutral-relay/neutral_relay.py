@@ -120,14 +120,17 @@ class RuntimeIdentityError(Exception):
         self.reason = reason
 
 
-def verify_runtime_identity(config):
-    """Verify the config's AgentOps runtime identity guards.
+def verify_runtime_identity(config, repo=None):
+    """Verify runtime identity for the exact repository route.
 
     Returns a tuple (runtime_name, runtime_cdp_port, runtime_marker, reviewer_cid).
-    Raises RuntimeIdentityError if:
-      - route cdp_port != runtime.cdp_port (mismatched port)
-      - runtime_marker is set but the on-disk marker file under
-        runtime.browser_profile does not match
+    The selected reviewer identity is repository-scoped: when ``repo`` is
+    provided, only that exact trusted route may define the expected
+    conversation and route port. A multi-route config without an explicit
+    repository fails closed rather than falling back to the first route.
+
+    For backward compatibility, callers that omit ``repo`` are supported only
+    when the config contains exactly one route.
     """
     routes = config.get("routes") or {}
     runtime_cfg = config.get("runtime") or {}
@@ -143,28 +146,35 @@ def verify_runtime_identity(config):
             "RUNTIME_PORT_MISSING",
             f"runtime.cdp_port missing in config (name={runtime_name!r})")
 
-    selected_port = None
-    selected_route = None
-    for repo, route in routes.items():
-        cp = route.get("cdp_port")
-        if cp is None:
+    if repo is None:
+        if len(routes) != 1:
             raise RuntimeIdentityError(
-                "ROUTE_PORT_MISSING",
-                f"route {repo!r} missing cdp_port")
-        if selected_port is None:
-            selected_port = cp
-            selected_route = (repo, route)
-        elif int(cp) != int(selected_port):
+                "RUNTIME_REPOSITORY_REQUIRED",
+                "multi-route config requires an explicit repository for runtime identity")
+        selected_repo, route = next(iter(routes.items()))
+    else:
+        selected_repo = repo
+        route = routes.get(repo)
+        if route is None:
             raise RuntimeIdentityError(
-                "ROUTE_PORT_MISMATCH",
-                f"route cdp_port mismatch: {repo!r}={cp} vs first={selected_port}")
-    if selected_port is None or selected_route is None:
-        raise RuntimeIdentityError("CONFIG_NO_PORT", "no route port resolved")
+                "ROUTE_NOT_CONFIGURED",
+                f"no trusted route configured for repo {repo!r}")
+
+    if not isinstance(route, dict):
+        raise RuntimeIdentityError(
+            "ROUTE_INVALID",
+            f"route {selected_repo!r} is not an object")
+
+    selected_port = route.get("cdp_port")
+    if selected_port is None:
+        raise RuntimeIdentityError(
+            "ROUTE_PORT_MISSING",
+            f"route {selected_repo!r} missing cdp_port")
 
     if int(selected_port) != int(runtime_expected_port):
         raise RuntimeIdentityError(
             "WRONG_BROWSER_RUNTIME",
-            f"route cdp_port {selected_port} != runtime {runtime_name!r} "
+            f"route {selected_repo!r} cdp_port {selected_port} != runtime {runtime_name!r} "
             f"expected port {runtime_expected_port}")
 
     if runtime_marker and runtime_profile:
@@ -185,17 +195,16 @@ def verify_runtime_identity(config):
                 "WRONG_BROWSER_RUNTIME",
                 f"marker file says {on_disk_marker!r}, config says {runtime_marker!r}")
 
-    repo, route = selected_route
     gpt_url = route.get("conversation_url")
     if not gpt_url:
         raise RuntimeIdentityError(
             "ROUTE_NO_CONVERSATION_URL",
-            f"route {repo!r} missing conversation_url")
+            f"route {selected_repo!r} missing conversation_url")
     reviewer_cid = conversation_id_from_url(gpt_url)
     if not reviewer_cid:
         raise RuntimeIdentityError(
             "INVALID_REVIEWER_CONVERSATION_URL",
-            f"route {repo!r} conversation_url does not identify a conversation")
+            f"route {selected_repo!r} conversation_url does not identify a conversation")
     return runtime_name, int(selected_port), runtime_marker, reviewer_cid
 
 
@@ -916,7 +925,7 @@ async def run_relay(args):
         return 1
 
     try:
-        runtime_name, runtime_port, runtime_marker, reviewer_cid = verify_runtime_identity(config)
+        runtime_name, runtime_port, runtime_marker, reviewer_cid = verify_runtime_identity(config, repo)
     except RuntimeIdentityError as e:
         print(f"STOP: {e}")
         return 1
