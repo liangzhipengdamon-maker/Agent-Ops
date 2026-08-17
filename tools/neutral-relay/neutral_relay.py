@@ -95,7 +95,7 @@ def normalize_conversation_url(url):
     """Normalize a reviewer conversation URL to a canonical identity.
 
     Returns the exact /c/<uuid> canonical form, or None for URLs that do not
-    identify a specific ChatGPT conversation (homepage, generic, /g/, /share/, etc.).
+    identify a specific conversation (homepage, generic, /g/, /share/, etc.).
     """
     cid = conversation_id_from_url(url)
     if not cid:
@@ -120,17 +120,14 @@ class RuntimeIdentityError(Exception):
         self.reason = reason
 
 
-def verify_runtime_identity(config, repo=None):
-    """Verify runtime identity for the exact repository route.
+def verify_runtime_identity(config):
+    """Verify the config's AgentOps runtime identity guards.
 
     Returns a tuple (runtime_name, runtime_cdp_port, runtime_marker, reviewer_cid).
-    The selected reviewer identity is repository-scoped: when ``repo`` is
-    provided, only that exact trusted route may define the expected
-    conversation and route port. A multi-route config without an explicit
-    repository fails closed rather than falling back to the first route.
-
-    For backward compatibility, callers that omit ``repo`` are supported only
-    when the config contains exactly one route.
+    Raises RuntimeIdentityError if:
+      - route cdp_port != runtime.cdp_port (mismatched port)
+      - runtime_marker is set but the on-disk marker file under
+        runtime.browser_profile does not match
     """
     routes = config.get("routes") or {}
     runtime_cfg = config.get("runtime") or {}
@@ -146,35 +143,28 @@ def verify_runtime_identity(config, repo=None):
             "RUNTIME_PORT_MISSING",
             f"runtime.cdp_port missing in config (name={runtime_name!r})")
 
-    if repo is None:
-        if len(routes) != 1:
+    selected_port = None
+    selected_route = None
+    for repo, route in routes.items():
+        cp = route.get("cdp_port")
+        if cp is None:
             raise RuntimeIdentityError(
-                "RUNTIME_REPOSITORY_REQUIRED",
-                "multi-route config requires an explicit repository for runtime identity")
-        selected_repo, route = next(iter(routes.items()))
-    else:
-        selected_repo = repo
-        route = routes.get(repo)
-        if route is None:
+                "ROUTE_PORT_MISSING",
+                f"route {repo!r} missing cdp_port")
+        if selected_port is None:
+            selected_port = cp
+            selected_route = (repo, route)
+        elif int(cp) != int(selected_port):
             raise RuntimeIdentityError(
-                "ROUTE_NOT_CONFIGURED",
-                f"no trusted route configured for repo {repo!r}")
-
-    if not isinstance(route, dict):
-        raise RuntimeIdentityError(
-            "ROUTE_INVALID",
-            f"route {selected_repo!r} is not an object")
-
-    selected_port = route.get("cdp_port")
-    if selected_port is None:
-        raise RuntimeIdentityError(
-            "ROUTE_PORT_MISSING",
-            f"route {selected_repo!r} missing cdp_port")
+                "ROUTE_PORT_MISMATCH",
+                f"route cdp_port mismatch: {repo!r}={cp} vs first={selected_port}")
+    if selected_port is None or selected_route is None:
+        raise RuntimeIdentityError("CONFIG_NO_PORT", "no route port resolved")
 
     if int(selected_port) != int(runtime_expected_port):
         raise RuntimeIdentityError(
             "WRONG_BROWSER_RUNTIME",
-            f"route {selected_repo!r} cdp_port {selected_port} != runtime {runtime_name!r} "
+            f"route cdp_port {selected_port} != runtime {runtime_name!r} "
             f"expected port {runtime_expected_port}")
 
     if runtime_marker and runtime_profile:
@@ -195,16 +185,17 @@ def verify_runtime_identity(config, repo=None):
                 "WRONG_BROWSER_RUNTIME",
                 f"marker file says {on_disk_marker!r}, config says {runtime_marker!r}")
 
+    repo, route = selected_route
     gpt_url = route.get("conversation_url")
     if not gpt_url:
         raise RuntimeIdentityError(
             "ROUTE_NO_CONVERSATION_URL",
-            f"route {selected_repo!r} missing conversation_url")
+            f"route {repo!r} missing conversation_url")
     reviewer_cid = conversation_id_from_url(gpt_url)
     if not reviewer_cid:
         raise RuntimeIdentityError(
             "INVALID_REVIEWER_CONVERSATION_URL",
-            f"route {selected_repo!r} conversation_url does not identify a conversation")
+            f"route {repo!r} conversation_url does not identify a conversation")
     return runtime_name, int(selected_port), runtime_marker, reviewer_cid
 
 
@@ -214,7 +205,7 @@ def resolve_reviewer_target(targets, reviewer_url):
     Returns the single matching target dict.
     Raises ConversationIdentityError:
       - REVIEWER_CONVERSATION_NOT_FOUND if zero targets match.
-      - AMBIGUOUS_REVIEWER_CONVERSATION if more than one exact match.
+      - AMBIGUOUS_REVIEWER_CONVERSATION if more than one target matches.
     """
     reviewer_cid = conversation_id_from_url(reviewer_url)
     if not reviewer_cid:
@@ -486,12 +477,9 @@ class DomProbe:
     }"""
 
     PROBE_ASSISTANT_TURNS = """()=>{
-      const stopBtn = !!Array.from(document.querySelectorAll('button'))
-                              .find(b => /停止生成|Stop generating/.test(b.innerText || ''));
       return Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'))
                   .map(m => ({text: m.innerText || '',
-                              id: m.getAttribute('data-message-id') || null,
-                              stopBtn}));
+                              id: m.getAttribute('data-message-id') || null}));
     }"""
 
     PROBE_FOCUS_COMPOSER = """(sels)=>{
@@ -533,12 +521,12 @@ class DomProbe:
         return await self.probe(self.PROBE_CONVERSATION, [])
 
     async def assistant_turns(self):
-        """Return per-turn assistant node descriptors {text, id, stopBtn}.
+        """Return per-turn assistant node descriptors {text, id}.
 
         Each entry is one `[data-message-author-role="assistant"]` node with
-        its current innerText, stable data-message-id when present, and the
-        current ChatGPT Stop-generating/busy signal. This lets the wait logic
-        lock the response turn and refuse to settle while generation continues.
+        its current innerText and (when present) data-message-id, so the wait
+        logic can LOCK the response turn produced by this request instead of
+        re-reading whatever happens to be the latest node on each poll.
         """
         return await self.probe(self.PROBE_ASSISTANT_TURNS, [])
 
@@ -593,15 +581,14 @@ class SendFlow:
                  settle_poll_interval=0.4, settle_stable_reads=3):
         self.probe = probe
         self.reviewer_url = reviewer_url
-        self.timeout = timeout or self.STAGE_TIMEOUTS["WAIT_ASSISTANT_RESPONSE"]
+        self.timeout = timeout or self.stage_timeouts["WAIT_ASSISTANT_RESPONSE"]
         self.max_send_attempts = max_send_attempts
         self.poll_interval = poll_interval
         self.stage_timeouts = dict(self.STAGE_TIMEOUTS)
         if stage_timeouts:
             self.stage_timeouts.update(stage_timeouts)
         # Assistant-response settling: poll the LOCKED response turn at this
-        # interval until generation has ended, the exact envelope is present,
-        # and the final text is stable.
+        # interval until the exact envelope is fully present AND stable.
         self.settle_poll_interval = settle_poll_interval
         self.settle_stable_reads = settle_stable_reads
 
@@ -767,34 +754,19 @@ class SendFlow:
     async def _wait_for_response(self, envelope):
         """Wait for the assistant response produced by THIS request.
 
-        AGE-53 final-settle semantics: DOM stability is an early-settle
-        OPTIMIZATION, not a hard authorization requirement for a complete
-        response. Completion requires all of the following, in order:
-          1. LOCK the response turn produced by this request using the exact
-             REVIEW_REQUEST_ID and stable data-message-id.
-          2. While ChatGPT exposes Stop generating / busy=true, NEVER settle or
-             return success, even if the text and correlation envelope appear
-             complete and temporarily stable. Streaming also invalidates any
-             previously captured post-stream settle state.
-          3. Once busy=false, start the bounded final-settle window. During the
-             window require the exact locked node, a complete envelope, and
-             strict correlation.
-          4. If the text becomes stable across settle_stable_reads consecutive
-             identical post-stream reads, return the current valid snapshot
-             immediately (early settle).
-          5. If the settle window expires, return the CURRENT locked-node read
-             only when that very read is itself still complete and strictly
-             correlated (and generation has still ended). A valid snapshot
-             cached from an EARLIER read must never be substituted for a
-             current read that is invalid / incomplete / mismatched - that
-             would return stale content from an untrustworthy DOM. Any other
-             deadline condition fails closed.
-
-        If streaming resumes inside the settle window, the stability state and
-        settle deadline are discarded; a fresh post-stream window begins only
-        after busy=false again. The outer WAIT_ASSISTANT_RESPONSE timeout bounds
-        the entire generation period. Timeout or an untrustworthy current read
-        at the deadline fails closed: no success artifact and no fabricated ACK.
+        Timing fix (canary-exposed): do NOT treat the currently-latest
+        assistant node, `data-is-last-node`, or "not streaming" as proof the
+        response is complete. Instead:
+          1. LOCK the response turn — the assistant node(s) produced by this
+             request, identified by the exact REVIEW_REQUEST_ID in the text —
+             and keep polling THAT turn, never switching to a different latest
+             node mid-wait.
+          2. Wait until the exact 5-field envelope is fully present.
+          3. Require the locked text to be stable across settle_stable_reads
+             consecutive identical reads (~1s) before calling the strict
+             correlate parser.
+        Timeout or permanently-incomplete DOM -> fail closed, no success
+        artifact, no fabricated ACK.
         """
         deadline = time.time() + self.timeout
         req_id = envelope.get("REVIEW_REQUEST_ID")
@@ -811,9 +783,12 @@ class SendFlow:
             ours = [t for t in turns if req_id and req_id in (t.get("text") or "")]
             if not ours:
                 # Response turn not started yet: bounded by the OUTER deadline
-                # (a formal review may take a while before GPT begins).
+                # (a formal review may take a while before GPT begins). The
+                # settle window only starts once the turn appears.
                 await asyncio.sleep(self.settle_poll_interval)
                 continue
+            if settle_deadline is None:
+                settle_deadline = time.time() + self.stage_timeouts["RESPONSE_SETTLE"]
 
             if locked_id is None:
                 # FIRST identification: the response turn must be UNIQUE.
@@ -834,7 +809,6 @@ class SendFlow:
                         f"cannot lock")
                 locked_text = None
                 stable_reads = 0
-                settle_deadline = None
 
             # Only read the LOCKED node; never switch to another assistant
             # node (even one that also references this request_id) mid-wait.
@@ -849,54 +823,29 @@ class SendFlow:
                     f"locked response node {locked_id} for {req_id} vanished")
             text = current.get("text") or ""
 
-            # AGE-51: DOM stability is not generation completion. If ChatGPT
-            # still exposes Stop generating, discard ALL post-stream settle
-            # state and keep waiting under the outer response timeout. This
-            # prevents a temporarily stable streaming prefix - or a stale
-            # pre-resume snapshot - from ever being returned.
-            if bool(current.get("stopBtn")):
-                locked_text = None
+            if not self._response_envelope_complete(text, envelope):
                 stable_reads = 0
-                settle_deadline = None
+                if time.time() > settle_deadline:
+                    raise SendFlowError(
+                        "RESPONSE_SETTLE",
+                        f"response for {req_id} never became complete "
+                        f"(envelope fields missing)")
                 await asyncio.sleep(self.settle_poll_interval)
                 continue
-
-            # Busy is now false. Only NOW may the bounded final-settle window
-            # begin. If streaming later resumes, the block above resets it.
-            if settle_deadline is None:
-                settle_deadline = time.time() + self.stage_timeouts["RESPONSE_SETTLE"]
-
-            # The CURRENT locked-node read is the only thing that may ever be
-            # returned. A complete, strictly-correlated snapshot is a candidate
-            # response; stability is tracked only over such valid reads.
-            valid = self._response_envelope_complete(text, envelope)
-            if valid:
-                valid = correlate_response([text], envelope) is not None
-            if not valid:
-                # An incomplete / non-correlated read earns no stability credit.
-                stable_reads = 0
-
-            # Early-settle optimization: byte-for-byte stability ends the wait.
-            if valid and text == locked_text:
+            # Envelope complete: require stability before strict correlation.
+            if text == locked_text:
                 stable_reads += 1
-            elif valid:
+            else:
                 locked_text = text
                 stable_reads = 1
-
-            if valid and stable_reads >= self.settle_stable_reads:
-                return text
-
-            # Settle-window expiry: return the CURRENT read only when that very
-            # read is itself still complete and strictly correlated. A snapshot
-            # cached from an EARLIER read must never override an untrustworthy
-            # current DOM state; any other deadline condition fails closed.
-            if time.time() > settle_deadline:
-                if valid:
-                    return text
-                raise SendFlowError(
-                    "RESPONSE_SETTLE",
-                    f"response for {req_id} did not stabilize after generation "
-                    f"ended")
+            if stable_reads >= self.settle_stable_reads:
+                matched = correlate_response([text], envelope)
+                if not matched:
+                    raise SendFlowError(
+                        "RESPONSE_SETTLE",
+                        f"settled response for {req_id} failed strict "
+                        f"correlation")
+                return matched
             await asyncio.sleep(self.settle_poll_interval)
         raise SendFlowError("WAIT_ASSISTANT_RESPONSE",
                             f"timed out waiting for correlated response for {req_id}")
@@ -940,7 +889,7 @@ async def run_relay(args):
         return 1
 
     try:
-        runtime_name, runtime_port, runtime_marker, reviewer_cid = verify_runtime_identity(config, repo)
+        runtime_name, runtime_port, runtime_marker, reviewer_cid = verify_runtime_identity(config)
     except RuntimeIdentityError as e:
         print(f"STOP: {e}")
         return 1

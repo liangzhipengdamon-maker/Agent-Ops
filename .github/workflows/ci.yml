@@ -51,7 +51,7 @@ jobs:
             echo "neutral relay test suite is missing! Failing."
             exit 1
           fi
-          python -m unittest discover -s tools/neutral-relay/tests
+          python -m unittest tools/neutral-relay/tests/test_neutral_relay.py
 
       - name: Run pre-v0.1 runtime regression tests
         run: |

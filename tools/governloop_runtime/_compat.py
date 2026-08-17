@@ -74,33 +74,20 @@ def configure_legacy_relay() -> None:
     relay_client.CONFIG_FILE = CONFIG_FILE
 
 
-def configure_process(task_id=None, expected_repo=None, mode="signed"):
+def configure_process(task_id=None, expected_repo=None):
     """Configure one canonical GovernLoop process.
 
-    When ``task_id`` is supplied, task execution requires a verified positive
-    authority source selected by ``mode``:
-
-      * ``"signed"`` (default, unchanged) — only the externally signed
-        operator authority bundle is accepted.
-      * ``"interactive_local"`` — same as signed, with a fallback to the
-        same-uid task-scope file ``governloop setup-task-scope`` writes.
-
-    Raw positive scope values already present in the process are
-    ignored/cleared before the compatibility aliases are populated. The
-    resolved mode is also projected to ``AGENTOPS_MODE`` / ``GOVERNLOOP_MODE``
-    so the fence layer (``builder_handoff`` / ``_verified_scope_policy``)
-    can read it without prop-drilling. The returned status is suitable for
+    When ``task_id`` is supplied, task execution requires a verified signed
+    operator authority bundle. Raw positive scope values already present in
+    the process are ignored/cleared by ``apply_verified_authority`` before the
+    compatibility aliases are populated. The returned status is suitable for
     a deterministic CLI preflight.
     """
-    if mode not in ("signed", "interactive_local"):
-        mode = "signed"
     authority_status = {"ok": True, "status": "NOT_REQUIRED"}
     if task_id:
         from .authority import apply_verified_authority
         authority_status = apply_verified_authority(
-            task_id, expected_repo=expected_repo, mode=mode)
-    os.environ["AGENTOPS_MODE"] = mode
-    os.environ["GOVERNLOOP_MODE"] = mode
+            task_id, expected_repo=expected_repo)
     apply_env_aliases()
     configure_legacy_relay()
     return authority_status

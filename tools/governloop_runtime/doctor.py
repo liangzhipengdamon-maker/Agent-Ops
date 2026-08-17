@@ -1,12 +1,7 @@
 """Read-only first-task readiness diagnostics for GovernLoop v0.1.
 
-Doctor observes the current environment and existing positive authority. Signed
-operator authority remains the preferred source. If it is absent, doctor may
-reuse an already-recorded, independently verified interactive-local task scope
-for diagnostics; when neither source exists, doctor routes the fresh task to
-the existing Interactive Local task-scope bootstrap without creating or
-broadening authority itself. It never creates authority, credentials, branches,
-PRs, or lifecycle decisions.
+Doctor observes the current environment and externally signed authority. It
+never creates authority, credentials, branches, PRs, or lifecycle decisions.
 """
 from __future__ import annotations
 
@@ -321,7 +316,7 @@ def _pr_check(repo, pr: Optional[str], verified):
 
 def _is_external_action(check):
     if check.get("name") == "positive_authority":
-        return "setup-task-scope" not in check.get("next_action", "")
+        return True
     if check.get("name") == "linear_task" and "Execution Mode" in check.get("detail", ""):
         return True
     return False
@@ -348,34 +343,14 @@ def _select_next_action(checks):
     return None, None
 
 
-def _resolve_positive_authority(task_id, repo):
-    """Prefer signed authority, then reuse an already-verified task scope.
-
-    This is diagnostic-only. It does not create a task scope, mutate process
-    authority, or change runtime mode. A task-scope fallback is considered only
-    when signed authority is unavailable and only through the existing verifier.
-    """
-    signed = authority.verify_authority(task_id, expected_repo=repo)
-    if signed.get("ok"):
-        return signed, "signed", signed
-    task_scope = authority.verify_task_scope(task_id, expected_repo=repo)
-    if task_scope.get("ok"):
-        return task_scope, "interactive_local", signed
-    return signed, "signed", signed
-
-
 def run_doctor(task_id, repo, pr=None, *, probe_reviewer=True):
-    verified, authority_source, signed_attempt = _resolve_positive_authority(task_id, repo)
+    verified = authority.verify_authority(task_id, expected_repo=repo)
     checks = []
     if verified.get("ok"):
         payload = verified.get("payload") or {}
-        if authority_source == "interactive_local":
-            detail = f"interactive-local task scope verified: {verified.get('authority_id')}"
-        else:
-            detail = f"external signed authority verified: {verified.get('authority_id')}"
-        checks.append(_check("positive_authority", "PASS", detail,
-                             data={"authority_source": authority_source,
-                                   "authority_id": verified.get("authority_id"),
+        checks.append(_check("positive_authority", "PASS",
+                             f"external signed authority verified: {verified.get('authority_id')}",
+                             data={"authority_id": verified.get("authority_id"),
                                    "repository": payload.get("repository"),
                                    "branch": payload.get("branch"),
                                    "baseline_sha": payload.get("baseline_sha"),
@@ -383,20 +358,12 @@ def run_doctor(task_id, repo, pr=None, *, probe_reviewer=True):
                                    "allowed_operations": payload.get("allowed_operations"),
                                    "trusted_reviewers": payload.get("trusted_reviewers")}))
     else:
-        detail = signed_attempt.get("detail") or "positive authority unavailable"
-        ignored = signed_attempt.get("ignored_process_authority_fields") or []
+        detail = verified.get("detail") or "positive authority unavailable"
+        ignored = verified.get("ignored_process_authority_fields") or []
         if ignored:
             detail += "; ignored raw process fields: " + ", ".join(ignored)
-        checks.append(_check(
-            "positive_authority",
-            "BLOCKED",
-            detail + "; no verified Interactive Local task scope exists yet",
-            next_action=(
-                "bootstrap Interactive Local with `governloop setup-task-scope` for this exact task/repository; "
-                "present the exact branch, baseline SHA, allowed paths/operations, and trusted reviewers in the coding-agent host, "
-                "then after explicit user approval rerun that exact command with `--host-confirm`; do not mint signed authority"
-            ),
-        ))
+        checks.append(_check("positive_authority", "BLOCKED", detail,
+                             next_action="external operator must provision a valid signed authority document through the OS-protected control channel; runtime/Builder cannot mint it"))
     checks.extend(_git_checks(repo, verified))
     checks.append(_github_auth_check())
     linear, _ = _linear_check(task_id)
@@ -407,7 +374,6 @@ def run_doctor(task_id, repo, pr=None, *, probe_reviewer=True):
         "BOOTSTRAP_REQUIRED" if any(c["status"] == "EXPECTED_GATE" for c in checks) else "READY")
     result = {"tool": "GovernLoop Doctor", "task_id": task_id, "repo": repo,
               "pr": str(pr) if pr else None, "status": status, "checks": checks,
-              "authority_source": authority_source if verified.get("ok") else None,
               "mutations_performed": False}
     key, next_action = _select_next_action(checks)
     if key:

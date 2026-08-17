@@ -18,7 +18,7 @@ classifiers = [
 ]
 
 [project.scripts]
-governloop = "governloop_runtime.cli:main"
+governloop = "governloop_runtime.__main__:main"
 
 [tool.setuptools]
 package-dir = {"" = "tools"}
@@ -27,6 +27,3 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["tools"]
 include = ["governloop_runtime*", "agentops_runtime*"]
-
-[tool.setuptools.package-data]
-governloop_runtime = ["skills/governloop/SKILL.md"]

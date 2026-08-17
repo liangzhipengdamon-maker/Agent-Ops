@@ -67,12 +67,11 @@ class TestDoctorBootstrap(unittest.TestCase):
         self.assertEqual(out["status"], "BLOCKED")
         self.assertIn("diff unavailable", out["detail"])
 
-    def test_missing_authority_routes_to_interactive_local_bootstrap_without_minting(self):
+    def test_missing_authority_reports_external_operator_not_minting_command(self):
         missing = {"ok": False, "status": "BLOCKED", "missing": ["branch"],
                    "detail": "operator authority verification failed",
                    "ignored_process_authority_fields": ["GOVERNLOOP_ALLOWED_PATHS"]}
         with mock.patch("governloop_runtime.doctor.authority.verify_authority", return_value=missing), \
-             mock.patch("governloop_runtime.doctor.authority.verify_task_scope", return_value=missing), \
              mock.patch("governloop_runtime.doctor._git_checks", return_value=[]), \
              mock.patch("governloop_runtime.doctor._github_auth_check",
                         return_value={"name":"github_auth","status":"PASS","detail":"ok"}), \
@@ -86,8 +85,7 @@ class TestDoctorBootstrap(unittest.TestCase):
         self.assertEqual(out["status"], "BLOCKED")
         auth = out["checks"][0]
         self.assertIn("ignored raw process fields", auth["detail"])
-        self.assertIn("governloop setup-task-scope", auth["next_action"])
-        self.assertIn("--host-confirm", auth["next_action"])
+        self.assertIn("external operator", auth["next_action"])
         self.assertNotIn("bind-authority", auth["next_action"])
         self.assertFalse(out["mutations_performed"])
 

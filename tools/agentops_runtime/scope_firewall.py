@@ -80,48 +80,17 @@ def _norm(path: str) -> str:
 
 
 def _is_path_allowed(path: str, allowed: Iterable[str]) -> bool:
-    """Strict path boundary with one explicit external-path exception.
+    """Strict path boundary: no traversal, no absolute path, no wildcard.
 
-    Relative paths keep the existing repository-scoped semantics. An absolute
-    path is allowed only when the already-signed ``allowed_paths`` explicitly
-    contains a canonical physical absolute root that contains the target. This
-    keeps repo-external access task-bound without introducing a second authority
-    schema or operator path.
+    Mirrors AGE-5 `AuthVerifier._is_path_allowed`. A path is allowed only if
+    it is exactly an allowed entry or inside an allowed directory prefix.
     """
-    raw = path or "."
-    normalized = _norm(raw)
-
-    # Preserve the existing fail-closed traversal rule, and also inspect the
-    # raw spelling because normpath would otherwise erase ``..`` components.
-    if ".." in raw.split(os.sep) or ".." in normalized.split(os.sep):
+    normalized = _norm(path)
+    if ".." in normalized.split(os.sep):
         return False
-
-    if os.path.isabs(raw):
-        target = os.path.realpath(raw)
-        for a in allowed:
-            if not a or not os.path.isabs(a):
-                continue
-            if ".." in a.split(os.sep):
-                continue
-            signed_root = os.path.normpath(a)
-            root = os.path.realpath(a)
-            # The signed entry itself must already name the physical canonical
-            # root. A symlink alias could otherwise be retargeted after signing
-            # and silently move positive authority to another directory.
-            if signed_root != root:
-                continue
-            # Never turn an explicit external-path allowance into whole-disk
-            # authority. Wider roots can be added deliberately in a future
-            # policy if a real use case requires them.
-            if root == os.path.abspath(os.sep):
-                continue
-            if target == root or target.startswith(root.rstrip(os.sep) + os.sep):
-                return True
+    if normalized.startswith("/") or os.path.isabs(path):
         return False
-
     for a in allowed:
-        if os.path.isabs(a):
-            continue
         norm_a = _norm(a)
         if norm_a == ".":
             return True  # explicit whole-repo boundary
