@@ -24,3 +24,8 @@ If relay transport fails, report the real failure point instead of bypassing the
 This Minimal Transport Recovery baseline does not include the historical `governloop start`, `governloop doctor`, `setup-task-scope`, host-confirm, or lifecycle-authority workflows. Do not call those as part of this skill.
 
 The Neutral Relay is transport only. It does not itself authorize repository mutation, PR creation, merge, release, or deployment.
+
+## Role boundaries
+
+- Human Product Owner grants lifecycle authorization; GPT Reviewer only reviews and gives verdicts; GovernLoop enforces scope and gates; Local Agent executes only within authorized scope.
+- GPT Reviewer approval MUST NOT be treated as Human Product Owner authorization.
