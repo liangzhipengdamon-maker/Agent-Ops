@@ -75,7 +75,7 @@ Local Agent → GovernLoop → ChatGPT → relay read-back → Local Agent
 
 This is a real recorded workflow, not a simulated demo.
 
-<video src="https://github.com/user-attachments/assets/b4ab497d-b859-444f-9e5f-d168f9802c25"></video>
+<video src="https://github.com/user-attachments/assets/0108f19d-c9c8-4a68-9dfe-af795c1ebe08"></video>
 
 ## Neutral Relay
 
