@@ -65,6 +65,18 @@ python tools/neutral-relay/neutral_relay.py \
 
 On success, read `output.md`; it contains the assistant response written back by the relay itself.
 
+## See GovernLoop in action
+
+Real workflow demo: a local coding agent sends a natural-language request to ChatGPT through GovernLoop, reads the complete assistant response back through the relay, and continues the local workflow automatically.
+
+```text
+Local Agent → GovernLoop → ChatGPT → relay read-back → Local Agent
+```
+
+This is a real recorded workflow, not a simulated demo.
+
+<video src="docs/assets/governloop-in-action-demo.mp4" controls width="100%"></video>
+
 ## Neutral Relay
 
 Canonical implementation:
