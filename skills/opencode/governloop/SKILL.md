@@ -26,3 +26,11 @@ If relay transport fails, report the real failure point instead of bypassing the
 This Minimal Transport Recovery baseline does not include the historical `governloop start`, `governloop doctor`, `setup-task-scope`, host-confirm, or lifecycle-authority workflows. Do not call those as part of this skill.
 
 The Neutral Relay is transport only. It does not itself authorize repository mutation, PR creation, merge, release, or deployment.
+
+## Shared agent safety contract
+
+Before performing repository or lifecycle actions, read and follow `docs/ops/AGENT_SAFETY_CONTRACT.md` and the repository-level `AGENTS.md`.
+
+In particular, implementation, commit/push, PR creation, Ready, merge, and deploy/release are separate authorization stages. Never infer a later-stage authorization from PASS, relay success, test success, mergeability, Ready state, task completion, or an earlier-stage authorization.
+
+For Ready, merge, deploy, or release, verify the current remote target and exact HEAD where applicable, then require explicit user authorization for that stage. If the next-stage authorization is absent, STOP and report the current state rather than continuing automatically.
