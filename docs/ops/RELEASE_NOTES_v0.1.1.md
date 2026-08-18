@@ -29,6 +29,7 @@ The recovered path was subsequently exercised in another real-project automation
 
 - Modernized ChatGPT completion detection; no dependency on the historical `Reply actions` / `回复操作` marker.
 - Identifies the assistant turn created by the current send instead of dumping the full conversation text.
+- Correlates responses to the assistant turn following the user turn created by the current send, including reused conversations with prior history.
 - Does not require GPT to echo `REVIEW_REQUEST_ID` in a normal natural-language response.
 - Treats active streaming as incomplete and never writes a temporarily stable streaming prefix.
 - Makes assistant wait timeout configurable with `--wait-timeout`.

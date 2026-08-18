@@ -17,6 +17,8 @@ Strict cross-project E2E validation was completed against `liangzhipengdamon-mak
 
 A subsequent real-project automation workflow also exercised automatic handoff to ChatGPT and return of the review result, providing an additional real-work validation beyond the README smoke test.
 
+PR #77 (Issue #76) resolved the reused-conversation correlation blocker: the relay now confirms the user turn created by the current send and reads the assistant turn that follows it, instead of relying on an assistant-turn count increase. Both clean/new and reused (multiple prior turns) conversation E2Es pass through relay read-back itself.
+
 ## Current transport contract
 
 Required request fields:

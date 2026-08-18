@@ -15,6 +15,8 @@ A request contains `REVIEW_REQUEST_ID`, `REPO`, and the ordinary natural-languag
 
 Configure the target repository route with an already-open ChatGPT `conversation_url` and its CDP port. A routing dry run may be used before real transport.
 
+Before real transport, confirm the target ChatGPT conversation. Do not guess or silently reuse a conversation URL that the user has not selected or previously authorized for this task. If no target conversation is already explicitly established, ask the user for the ChatGPT conversation URL before sending.
+
 For real transport, invoke the canonical relay with the request, output, config, and wait timeout. Read the output only after the relay exits successfully.
 
 Transport success requires all of the following: relay exit code 0; stdout contains `Success: Wrote response to ...`; the relay created the output file; and the output contains the complete assistant response. External CDP probes are diagnostic only and do not substitute for relay read-back.
