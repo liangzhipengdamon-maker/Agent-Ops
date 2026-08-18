@@ -8,31 +8,55 @@ import urllib.request
 import websockets
 import asyncio
 
-STABLE_READS_REQUIRED = 3
+# Two-stage finalization settle.
+#   NORMAL       (no soft streaming/busy markers): short settle.
+#   CONSERVATIVE (one or more soft markers remain): long settle so a brief
+#                generation pause cannot be mistaken for "done".
+NORMAL_STABLE_READS = 3
 NORMAL_SETTLE_SECONDS = 4.0
-SOFT_MARKER_SETTLE_SECONDS = 10.0
+CONSERVATIVE_STABLE_READS = 6
+CONSERVATIVE_SETTLE_SECONDS = 30.0
 
 
 class ResponseCompletionTracker:
-    """Track a correlated Assistant turn until its text is safely settled.
+    """Two-stage finalization settle for a correlated Assistant turn.
 
-    ChatGPT Web can leave stop/streaming/busy DOM markers behind after a reply
-    is visibly complete. Treat those markers as soft evidence only. A text
-    change is the hard live-generation signal: every change restarts the settle
-    window. Stable text may finalize after the normal settle window when no
-    soft marker remains, or after a longer settle window when stale markers are
-    still present.
+    Stage selection is driven by the *current* soft-generation signal (leftover
+    stop-button / streaming / aria-busy DOM markers). Those markers are SOFT
+    only and are NEVER a hard veto. A text change is the hard live-generation
+    signal and always blocks finalization, resetting both the settle timer and
+    the stable-read counter.
+
+    NORMAL (no soft markers present):
+        - assistant text stable for >= NORMAL_SETTLE_SECONDS
+        - >= NORMAL_STABLE_READS consecutive identical reads
+        => finalize
+
+    CONSERVATIVE (one or more soft markers remain):
+        - assistant text stable for >= CONSERVATIVE_SETTLE_SECONDS
+        - >= CONSERVATIVE_STABLE_READS consecutive identical reads
+        => finalize
+
+    Rules:
+        - any assistant text change resets the settle timer + stable-read count
+        - if soft markers clear, NORMAL settle applies to the already-stable text
+        - stale markers must not block forever (CONSERVATIVE still finalizes)
+        - text still changing always blocks
+        - timeout (enforced by the caller) remains fail-closed
+        - the response is NOT required to echo REVIEW_REQUEST_ID (generic transport)
     """
 
     def __init__(
         self,
-        stable_reads_required=STABLE_READS_REQUIRED,
+        normal_stable_reads=NORMAL_STABLE_READS,
         normal_settle_seconds=NORMAL_SETTLE_SECONDS,
-        soft_marker_settle_seconds=SOFT_MARKER_SETTLE_SECONDS,
+        conservative_stable_reads=CONSERVATIVE_STABLE_READS,
+        conservative_settle_seconds=CONSERVATIVE_SETTLE_SECONDS,
     ):
-        self.stable_reads_required = stable_reads_required
+        self.normal_stable_reads = normal_stable_reads
         self.normal_settle_seconds = normal_settle_seconds
-        self.soft_marker_settle_seconds = soft_marker_settle_seconds
+        self.conservative_stable_reads = conservative_stable_reads
+        self.conservative_settle_seconds = conservative_settle_seconds
         self.last_text = None
         self.stable_reads = 0
         self.stable_since = None
@@ -56,6 +80,9 @@ class ResponseCompletionTracker:
         has_assistant = bool(snapshot.get("hasAssistant"))
         soft_generating = bool(snapshot.get("softGenerating"))
 
+        # Correlation: this send must have produced a new user turn followed by
+        # an assistant turn. The response itself is NOT required to echo
+        # REVIEW_REQUEST_ID (supports generic transport).
         user_added = (user_count > user_count_before) or (
             bool(req_id) and req_id in last_user_text
         )
@@ -65,6 +92,7 @@ class ResponseCompletionTracker:
             return False, ""
 
         if text != self.last_text:
+            # Hard live-generation evidence: reset settle + stable-read count.
             self.last_text = text
             self.stable_reads = 1
             self.stable_since = now
@@ -72,13 +100,15 @@ class ResponseCompletionTracker:
 
         self.stable_reads += 1
         stable_for = max(0.0, now - (self.stable_since if self.stable_since is not None else now))
-        required_settle = (
-            self.soft_marker_settle_seconds
-            if soft_generating
-            else self.normal_settle_seconds
-        )
 
-        if self.stable_reads >= self.stable_reads_required and stable_for >= required_settle:
+        if soft_generating:
+            required_reads = self.conservative_stable_reads
+            required_settle = self.conservative_settle_seconds
+        else:
+            required_reads = self.normal_stable_reads
+            required_settle = self.normal_settle_seconds
+
+        if self.stable_reads >= required_reads and stable_for >= required_settle:
             return True, text
 
         return False, ""
