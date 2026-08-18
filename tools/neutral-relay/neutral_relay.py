@@ -8,6 +8,112 @@ import urllib.request
 import websockets
 import asyncio
 
+# Two-stage finalization settle.
+#   NORMAL       (no soft streaming/busy markers): short settle.
+#   CONSERVATIVE (one or more soft markers remain): long settle so a brief
+#                generation pause cannot be mistaken for "done".
+NORMAL_STABLE_READS = 3
+NORMAL_SETTLE_SECONDS = 4.0
+CONSERVATIVE_STABLE_READS = 6
+CONSERVATIVE_SETTLE_SECONDS = 30.0
+
+
+class ResponseCompletionTracker:
+    """Two-stage finalization settle for a correlated Assistant turn.
+
+    Stage selection is driven by the *current* soft-generation signal (leftover
+    stop-button / streaming / aria-busy DOM markers). Those markers are SOFT
+    only and are NEVER a hard veto. A text change is the hard live-generation
+    signal and always blocks finalization, resetting both the settle timer and
+    the stable-read counter.
+
+    NORMAL (no soft markers present):
+        - assistant text stable for >= NORMAL_SETTLE_SECONDS
+        - >= NORMAL_STABLE_READS consecutive identical reads
+        => finalize
+
+    CONSERVATIVE (one or more soft markers remain):
+        - assistant text stable for >= CONSERVATIVE_SETTLE_SECONDS
+        - >= CONSERVATIVE_STABLE_READS consecutive identical reads
+        => finalize
+
+    Rules:
+        - any assistant text change resets the settle timer + stable-read count
+        - if soft markers clear, NORMAL settle applies to the already-stable text
+        - stale markers must not block forever (CONSERVATIVE still finalizes)
+        - text still changing always blocks
+        - timeout (enforced by the caller) remains fail-closed
+        - the response is NOT required to echo REVIEW_REQUEST_ID (generic transport)
+    """
+
+    def __init__(
+        self,
+        normal_stable_reads=NORMAL_STABLE_READS,
+        normal_settle_seconds=NORMAL_SETTLE_SECONDS,
+        conservative_stable_reads=CONSERVATIVE_STABLE_READS,
+        conservative_settle_seconds=CONSERVATIVE_SETTLE_SECONDS,
+    ):
+        self.normal_stable_reads = normal_stable_reads
+        self.normal_settle_seconds = normal_settle_seconds
+        self.conservative_stable_reads = conservative_stable_reads
+        self.conservative_settle_seconds = conservative_settle_seconds
+        self.last_text = None
+        self.stable_reads = 0
+        self.stable_since = None
+
+    def reset(self):
+        self.last_text = None
+        self.stable_reads = 0
+        self.stable_since = None
+
+    def observe(self, snapshot, user_count_before, req_id, now=None):
+        now = time.monotonic() if now is None else now
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+
+        try:
+            user_count = int(snapshot.get("userCount") or 0)
+        except (TypeError, ValueError):
+            user_count = 0
+
+        last_user_text = str(snapshot.get("lastUserText") or "").strip()
+        text = str(snapshot.get("text") or "").strip()
+        has_assistant = bool(snapshot.get("hasAssistant"))
+        soft_generating = bool(snapshot.get("softGenerating"))
+
+        # Correlation: this send must have produced a new user turn followed by
+        # an assistant turn. The response itself is NOT required to echo
+        # REVIEW_REQUEST_ID (supports generic transport).
+        user_added = (user_count > user_count_before) or (
+            bool(req_id) and req_id in last_user_text
+        )
+
+        if not (user_added and has_assistant and text):
+            self.reset()
+            return False, ""
+
+        if text != self.last_text:
+            # Hard live-generation evidence: reset settle + stable-read count.
+            self.last_text = text
+            self.stable_reads = 1
+            self.stable_since = now
+            return False, ""
+
+        self.stable_reads += 1
+        stable_for = max(0.0, now - (self.stable_since if self.stable_since is not None else now))
+
+        if soft_generating:
+            required_reads = self.conservative_stable_reads
+            required_settle = self.conservative_settle_seconds
+        else:
+            required_reads = self.normal_stable_reads
+            required_settle = self.normal_settle_seconds
+
+        if self.stable_reads >= required_reads and stable_for >= required_settle:
+            return True, text
+
+        return False, ""
+
+
 async def run_relay(args):
     # 1. Read request file
     if not os.path.exists(args.request_file):
@@ -140,17 +246,16 @@ async def run_relay(args):
             return 1
 
         # Poll for the assistant response following the user turn created by
-        # this send. Modern ChatGPT no longer exposes the historical 'Reply
-        # actions'/'回复操作' completion marker, and ordinary natural-language
-        # responses should not be forced to echo the REVIEW_REQUEST_ID. The
-        # response is complete only after (1) a new user turn is confirmed to
-        # have been added, (2) the assistant turn that follows it has stopped
-        # streaming, and (3) its text is stable across three reads.
+        # this send. Correlation remains user-turn -> following Assistant turn.
+        # Completion is text-first: a text change is hard evidence that output
+        # is still live and restarts the settle window. ChatGPT DOM stop/busy/
+        # streaming markers are only soft evidence because they may remain stale
+        # after a visibly complete response. Soft markers therefore require a
+        # longer stable-text settle window, but cannot block finalization forever.
         deadline = time.time() + args.wait_timeout
         found_response = False
         final_text = ""
-        last_text = None
-        stable_reads = 0
+        completion = ResponseCompletionTracker()
         while time.time() < deadline:
             snapshot = await js("""(()=>{
                 const roles = Array.from(document.querySelectorAll('[data-message-author-role]'));
@@ -175,39 +280,31 @@ async def run_relay(args):
                     assistant.getAttribute('data-is-streaming') === 'true' ||
                     assistant.getAttribute('aria-busy') === 'true'
                 ));
-                return {userCount:users.length, lastUserText:lastUserText, text:text, hasAssistant:!!assistant, generating:(!!stop || streaming), streaming:streaming};
+                return {
+                    userCount:users.length,
+                    lastUserText:lastUserText,
+                    text:text,
+                    hasAssistant:!!assistant,
+                    softGenerating:(!!stop || streaming),
+                    stopPresent:!!stop,
+                    streamingMarker:streaming
+                };
             })()""")
-            snapshot = snapshot if isinstance(snapshot, dict) else {}
-            user_count = int(snapshot.get("userCount") or 0)
-            last_user_text = str(snapshot.get("lastUserText") or "").strip()
-            text = str(snapshot.get("text") or "").strip()
-            has_assistant = bool(snapshot.get("hasAssistant"))
-            generating = bool(snapshot.get("generating"))
 
-            # Confirm the current user message was actually added to the
-            # conversation: either the user-turn count increased, or the last
-            # user turn already contains this request's correlation id (which
-            # also covers DOM reconciliation that reuses an existing element).
-            user_added = (user_count > user_count_before) or (req_id and req_id in last_user_text)
-
-            if user_added and has_assistant and text and not generating:
-                if text == last_text:
-                    stable_reads += 1
-                else:
-                    last_text = text
-                    stable_reads = 1
-                if stable_reads >= 3:
-                    final_text = text
-                    found_response = True
-                    break
-            else:
-                last_text = None
-                stable_reads = 0
+            complete, settled_text = completion.observe(
+                snapshot,
+                user_count_before=user_count_before,
+                req_id=req_id,
+            )
+            if complete:
+                final_text = settled_text
+                found_response = True
+                break
 
             await asyncio.sleep(2)
             
         if not found_response:
-            print(f"Error: Timed out after {args.wait_timeout}s waiting for a new stable Assistant response after streaming ended.")
+            print(f"Error: Timed out after {args.wait_timeout}s waiting for a new stable Assistant response to settle.")
             return 1
             
         with open(args.output_file, "w") as f:
