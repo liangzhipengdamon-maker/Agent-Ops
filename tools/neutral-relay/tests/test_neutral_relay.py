@@ -9,6 +9,72 @@ import asyncio
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import neutral_relay
 
+
+class TestResponseCompletionTracker(unittest.TestCase):
+    def snapshot(self, text, *, user_count=2, last_user_text="RID-1", soft=False, has_assistant=True):
+        return {
+            "userCount": user_count,
+            "lastUserText": last_user_text,
+            "text": text,
+            "hasAssistant": has_assistant,
+            "softGenerating": soft,
+        }
+
+    def test_stable_completed_response_with_stale_streaming_marker(self):
+        tracker = neutral_relay.ResponseCompletionTracker()
+        snap = self.snapshot("VERDICT: PASS", soft=True)
+        self.assertEqual(tracker.observe(snap, 1, "RID-1", now=0), (False, ""))
+        self.assertEqual(tracker.observe(snap, 1, "RID-1", now=4), (False, ""))
+        self.assertEqual(tracker.observe(snap, 1, "RID-1", now=10), (True, "VERDICT: PASS"))
+
+    def test_genuinely_streaming_response_keeps_resetting_settle_window(self):
+        tracker = neutral_relay.ResponseCompletionTracker()
+        for now, text in [(0, "V"), (2, "VERDICT"), (4, "VERDICT: PASS")]:
+            self.assertEqual(
+                tracker.observe(self.snapshot(text, soft=True), 1, "RID-1", now=now),
+                (False, ""),
+            )
+
+    def test_persisting_stop_button_soft_signal_does_not_block_stable_text_forever(self):
+        tracker = neutral_relay.ResponseCompletionTracker()
+        snap = self.snapshot("Done", soft=True)
+        tracker.observe(snap, 1, "RID-1", now=0)
+        tracker.observe(snap, 1, "RID-1", now=5)
+        self.assertEqual(tracker.observe(snap, 1, "RID-1", now=10), (True, "Done"))
+
+    def test_normal_short_response_uses_normal_settle_window(self):
+        tracker = neutral_relay.ResponseCompletionTracker()
+        snap = self.snapshot("Short answer", soft=False)
+        tracker.observe(snap, 1, "RID-1", now=0)
+        tracker.observe(snap, 1, "RID-1", now=2)
+        self.assertEqual(tracker.observe(snap, 1, "RID-1", now=4), (True, "Short answer"))
+
+    def test_long_conversation_user_count_has_no_turn_ceiling(self):
+        tracker = neutral_relay.ResponseCompletionTracker()
+        snap = self.snapshot("PASS", user_count=26, soft=False)
+        tracker.observe(snap, 25, "RID-1", now=0)
+        tracker.observe(snap, 25, "RID-1", now=2)
+        self.assertEqual(tracker.observe(snap, 25, "RID-1", now=4), (True, "PASS"))
+
+    def test_never_stable_never_completes(self):
+        tracker = neutral_relay.ResponseCompletionTracker()
+        for now in range(0, 30, 2):
+            complete, text = tracker.observe(
+                self.snapshot(f"changing-{now}", soft=True),
+                1,
+                "RID-1",
+                now=now,
+            )
+            self.assertFalse(complete)
+            self.assertEqual(text, "")
+
+    def test_correlation_still_requires_intended_user_turn(self):
+        tracker = neutral_relay.ResponseCompletionTracker()
+        snap = self.snapshot("PASS", user_count=1, last_user_text="OLD-RID", soft=False)
+        for now in (0, 2, 4, 10):
+            self.assertEqual(tracker.observe(snap, 1, "RID-1", now=now), (False, ""))
+
+
 class TestNeutralRelay(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -71,6 +137,7 @@ class TestNeutralRelay(unittest.TestCase):
         
         self.assertEqual(ret, 1)
         self.assertFalse(os.path.exists(self.out_path))
+
 
 if __name__ == '__main__':
     unittest.main()
