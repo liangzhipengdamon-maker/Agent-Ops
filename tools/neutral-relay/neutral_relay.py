@@ -168,14 +168,35 @@ async def run_relay(args):
                     }
                 }
                 const text = assistant ? ((assistant.innerText || assistant.textContent || '').trim()) : '';
-                const stop = document.querySelector('button[data-testid="stop-button"], button[data-testid="stop-generation"], button[aria-label*="Stop"], button[aria-label*="停止"]');
+                const isVisible = (el) => {
+                    if (!el || !el.isConnected || el.getClientRects().length === 0) return false;
+                    const style = window.getComputedStyle(el);
+                    return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+                };
+                const stopSelectors = [
+                    'button[data-testid="stop-button"]',
+                    'button[data-testid="stop-generation"]',
+                    'button[aria-label*="Stop"]',
+                    'button[aria-label*="停止"]'
+                ];
+                const visibleStop = stopSelectors.some(selector =>
+                    Array.from(document.querySelectorAll(selector)).some(isVisible)
+                );
                 const streaming = !!(assistant && (
                     assistant.matches('.streaming-animation') ||
                     assistant.querySelector('.streaming-animation') ||
                     assistant.getAttribute('data-is-streaming') === 'true' ||
                     assistant.getAttribute('aria-busy') === 'true'
                 ));
-                return {userCount:users.length, lastUserText:lastUserText, text:text, hasAssistant:!!assistant, generating:(!!stop || streaming), streaming:streaming};
+                return {
+                    userCount: users.length,
+                    lastUserText: lastUserText,
+                    text: text,
+                    hasAssistant: !!assistant,
+                    generating: (visibleStop || streaming),
+                    visibleStop: visibleStop,
+                    streaming: streaming
+                };
             })()""")
             snapshot = snapshot if isinstance(snapshot, dict) else {}
             user_count = int(snapshot.get("userCount") or 0)
