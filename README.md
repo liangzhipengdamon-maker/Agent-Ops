@@ -6,9 +6,9 @@ The current stable baseline focuses on one capability: a local agent sends a nat
 
 ## Current status
 
-**Minimal Transport Recovery — cross-project E2E verified.**
+**v0.1.1 — Minimal Transport Recovery, cross-project E2E verified.**
 
-The recovery baseline was merged by PR #74. Its Neutral Relay has been verified end-to-end against a separate real repository and in a subsequent real-project automation workflow.
+The recovery baseline was merged by PR #74 and released as `v0.1.1` after clean/new and reused-conversation relay read-back E2Es passed, followed by a final clean-conversation release smoke on `main`.
 
 Verified path:
 
@@ -23,31 +23,21 @@ Local Agent
 
 The transport does not require ChatGPT to return `PR`, `HEAD`, `ACK`, `RESULT`, or `FINAL` fields.
 
-## Neutral Relay
+## Quick Start
 
-Canonical implementation:
+1. Start Chrome/Chromium with remote debugging enabled on the CDP port you want GovernLoop to use, then open the target ChatGPT conversation in that browser.
+2. Confirm the target ChatGPT conversation before real transport. Do not guess or silently reuse a conversation URL that the user has not selected or previously authorized for this task. If no target conversation is already explicitly established, ask the user for the ChatGPT conversation URL before sending.
+3. Add that conversation URL and CDP port to the route config for the repository.
+4. Create a request file containing `REVIEW_REQUEST_ID`, `REPO`, and the ordinary natural-language task.
+5. Run the Neutral Relay and read the output only after the relay exits successfully.
 
-```text
-tools/neutral-relay/neutral_relay.py
-```
-
-CLI:
-
-```bash
-python tools/neutral-relay/neutral_relay.py \
-  --request-file request.txt \
-  --output-file output.md \
-  --config-file config.json \
-  --wait-timeout 900
-```
-
-Required request routing fields:
+Example request:
 
 ```text
-REVIEW_REQUEST_ID: <unique-id>
+REVIEW_REQUEST_ID: GL-EXAMPLE-001
 REPO: owner/repository
 
-<ordinary natural-language task>
+Please read this project's README and summarize what the project does in two or three sentences.
 ```
 
 Example route config:
@@ -61,6 +51,45 @@ Example route config:
     }
   }
 }
+```
+
+Run:
+
+```bash
+python tools/neutral-relay/neutral_relay.py \
+  --request-file request.txt \
+  --output-file output.md \
+  --config-file config.json \
+  --wait-timeout 900
+```
+
+On success, read `output.md`; it contains the assistant response written back by the relay itself.
+
+## Neutral Relay
+
+Canonical implementation:
+
+```text
+tools/neutral-relay/neutral_relay.py
+```
+
+Current CLI arguments:
+
+```text
+--request-file
+--output-file
+--config-file
+--wait-timeout   # default: 900 seconds
+--dry-run
+```
+
+Required request routing fields:
+
+```text
+REVIEW_REQUEST_ID: <unique-id>
+REPO: owner/repository
+
+<ordinary natural-language task>
 ```
 
 The target ChatGPT conversation must already be open in the CDP-enabled browser.
@@ -89,6 +118,6 @@ It documents the current Neutral Relay workflow only. Historical commands such a
 ## Release line
 
 - `v0.1.0` — original public release.
-- `v0.1.1` — planned Minimal Transport Recovery release; cross-project natural-language relay behavior verified before release.
+- `v0.1.1` — current stable Minimal Transport Recovery release; cross-project natural-language relay behavior verified before release.
 
 See `docs/ops/CURRENT_STATUS.md` and `docs/ops/RELEASE_NOTES_v0.1.1.md` for the release closure record.
