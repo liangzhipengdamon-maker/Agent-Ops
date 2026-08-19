@@ -8,6 +8,9 @@ import urllib.request
 import websockets
 import asyncio
 
+# Canonical local routing authority for GovernLoop Minimal Transport.
+DEFAULT_CONFIG_PATH = os.path.expanduser("~/.governloop/relay/config.json")
+
 # Two-stage finalization settle.
 #   NORMAL       (no soft streaming/busy markers): short settle.
 #   CONSERVATIVE (one or more soft markers remain): long settle so a brief
@@ -314,10 +317,10 @@ async def run_relay(args):
         return 0
 
 def main():
-    parser = argparse.ArgumentParser(description="Neutral Relay Transport for Agent-Ops")
+    parser = argparse.ArgumentParser(description="GovernLoop Neutral Relay Transport")
     parser.add_argument("--request-file", required=True, help="Path to the review request payload file")
     parser.add_argument("--output-file", required=True, help="Path to write the GPT review response")
-    parser.add_argument("--config-file", default=os.path.expanduser("~/.agentops/relay/config.json"), help="Path to the routing config.json")
+    parser.add_argument("--config-file", default=DEFAULT_CONFIG_PATH, help=f"Path to the routing config.json (default: {DEFAULT_CONFIG_PATH})")
     parser.add_argument("--wait-timeout", type=int, default=900, help="Seconds to wait for the new Assistant turn to finish streaming and stabilize (default: 900)")
     parser.add_argument("--dry-run", action="store_true", help="Simulate routing without CDP execution")
     args = parser.parse_args()

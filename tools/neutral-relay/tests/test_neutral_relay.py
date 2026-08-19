@@ -151,11 +151,18 @@ class TestNeutralRelay(unittest.TestCase):
             self.config_file = cfg
             self.dry_run = dry_run
 
+    def test_default_config_path_uses_governloop_authority(self):
+        self.assertEqual(
+            neutral_relay.DEFAULT_CONFIG_PATH,
+            os.path.expanduser("~/.governloop/relay/config.json"),
+        )
+
     def test_repo_route_parsing_and_dry_run(self):
         # Setup valid request
         with open(self.req_path, "w") as f:
             f.write("REVIEW_REQUEST_ID: 12345\nREPO: test/repo\nPR: 1\nHEAD: abc\n")
 
+        # An explicit --config-file equivalent must continue to override the default.
         args = self.Args(self.req_path, self.out_path, self.config_path, dry_run=True)
         ret = asyncio.run(neutral_relay.run_relay(args))
         
