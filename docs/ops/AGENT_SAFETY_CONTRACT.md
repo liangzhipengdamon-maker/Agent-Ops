@@ -4,9 +4,25 @@ This contract defines the minimal authorization boundary for any local agent usi
 
 GovernLoop is transport. Transport success does not authorize repository mutation.
 
-## Separate authorization stages
+## Authorization model
 
-Treat each of the following as a separate stage:
+GovernLoop uses a scoped-authorization model, not a per-stage re-confirmation
+model.
+
+- When the user explicitly authorizes execution of one clearly scoped task, the
+  agent may continue within that same scope through the full lifecycle:
+  implementation → commit/push → PR → Ready → merge. It does not need to stop
+  and re-request authorization at each individual stage.
+- Authorization is scoped to the task as granted. It does NOT extend to:
+  - a material change in scope or a follow-up issue;
+  - deploy or release;
+  - tag, force push, or direct rewrite of `main`;
+  - any destructive or high-risk action.
+- STOP and require fresh explicit authorization when any of these occur:
+  material scope change, unexpected HEAD/main drift, merge conflict, P0/P1
+  blocker, or a destructive/high-risk action.
+
+Keep these stages conceptually distinct for verification and reporting:
 
 1. implementation / repository modification
 2. commit and push
@@ -15,8 +31,6 @@ Treat each of the following as a separate stage:
 5. merge
 6. deploy or release
 
-Authorization for one stage never implies authorization for a later stage.
-
 Do not infer Ready, merge, deploy, release, or follow-up work from:
 - review PASS or APPROVED
 - relay success
@@ -24,19 +38,19 @@ Do not infer Ready, merge, deploy, release, or follow-up work from:
 - PR mergeability
 - PR Ready state
 - task completion
-- authorization granted for an earlier stage
+- authorization granted for an earlier stage within a different scope
 
 ## Before Ready, merge, deploy, or release
 
-Before executing the requested stage:
+During an authorized in-scope flow, before executing the requested stage:
 
 1. read the current remote state;
 2. verify the exact target object;
 3. for PR lifecycle actions, verify the exact current PR HEAD where applicable;
-4. require explicit user authorization for that stage;
-5. stop if the remote state drifted in a way that invalidates the authorization target.
+4. stop if the remote state drifted in a way that invalidates the authorization target.
 
-If authorization for the next stage is absent, STOP and report the current state. Do not continue automatically.
+If authorization for the flow is absent, STOP and report the current state. Do
+not continue automatically.
 
 ## Scope
 
