@@ -61,21 +61,23 @@ def parse_porcelain(text):
     return worktrees
 
 
-def has_tracked_changes(status_lines):
-    """Return True if status porcelain output has tracked modifications.
+def has_changes(status_lines):
+    """Return True if status porcelain output has any change at all.
 
-    Untracked files (lines starting with `??`) are ignored: they are not
-    tracked-tree dirt.
+    Untracked files (lines starting with `??`) count as a change: for a
+    worktree-hygiene / lifecycle tool a worktree holding only untracked files
+    is not clean and may contain assets that still need preserving or
+    committing, so it must not be reported as `clean`.
     """
-    return any(not line.startswith("??") for line in status_lines)
+    return any(line.strip() for line in status_lines)
 
 
 def is_clean(path):
-    """Return True if the worktree has no tracked modifications."""
+    """Return True if the worktree has no changes at all (tracked or untracked)."""
     out = run_git(["status", "--porcelain"], cwd=path)
     if out is None:
         return None
-    return not has_tracked_changes(out.splitlines())
+    return not has_changes(out.splitlines())
 
 
 def fmt_head(sha):
