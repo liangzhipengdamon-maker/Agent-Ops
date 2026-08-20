@@ -54,23 +54,58 @@ class TestPorcelainParsing(unittest.TestCase):
     def test_empty_input_returns_no_worktrees(self):
         self.assertEqual(worktree_status.parse_porcelain(""), [])
 
-    def test_has_tracked_changes_ignores_untracked_only(self):
-        self.assertFalse(
-            worktree_status.has_tracked_changes(["?? .workbuddy/", "?? scratch.txt"])
-        )
-
-    def test_has_tracked_changes_detects_modified(self):
+    def test_has_changes_detects_untracked_only(self):
+        # Untracked-only must count as a change: a hygiene tool must not
+        # report such a worktree as clean (P1 from GPT review).
         self.assertTrue(
-            worktree_status.has_tracked_changes([" M scripts/worktree_status.py"])
+            worktree_status.has_changes(["?? .workbuddy/", "?? scratch.txt"])
         )
 
-    def test_has_tracked_changes_detects_staged(self):
+    def test_has_changes_detects_modified(self):
         self.assertTrue(
-            worktree_status.has_tracked_changes(["A  scripts/worktree_status.py"])
+            worktree_status.has_changes([" M scripts/worktree_status.py"])
         )
 
-    def test_has_tracked_changes_empty_is_clean(self):
-        self.assertFalse(worktree_status.has_tracked_changes([]))
+    def test_has_changes_detects_staged(self):
+        self.assertTrue(
+            worktree_status.has_changes(["A  scripts/worktree_status.py"])
+        )
+
+    def test_has_changes_empty_is_clean(self):
+        self.assertFalse(worktree_status.has_changes([]))
+
+
+class TestIsClean(unittest.TestCase):
+    """Integration tests for is_clean against real git worktrees."""
+
+    def _make_repo(self):
+        import subprocess
+        import tempfile
+
+        path = tempfile.mkdtemp(prefix="wt-status-test-")
+        subprocess.run(
+            ["git", "init", "-q", path],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", path, "config", "user.email", "test@example.com"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", path, "config", "user.name", "Test"],
+            check=True,
+        )
+        return path
+
+    def test_is_clean_true_when_no_changes(self):
+        path = self._make_repo()
+        self.assertTrue(worktree_status.is_clean(path))
+
+    def test_is_clean_false_when_untracked_only(self):
+        path = self._make_repo()
+        with open(os.path.join(path, "uncommitted.txt"), "w") as f:
+            f.write("local asset\n")
+        self.assertFalse(worktree_status.is_clean(path))
 
     def test_fmt_head_shortens_and_handles_none(self):
         self.assertEqual(
