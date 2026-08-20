@@ -53,17 +53,20 @@ Example route config:
 }
 ```
 
-Run:
+Run (the canonical config is used by default — no `--config-file` needed):
 
 ```bash
-python tools/neutral-relay/neutral_relay.py \
+python3 tools/neutral-relay/neutral_relay.py \
   --request-file request.txt \
-  --output-file output.md \
-  --config-file config.json \
-  --wait-timeout 900
+  --output-file output.md
 ```
 
 On success, read `output.md`; it contains the assistant response written back by the relay itself.
+
+`--config-file` remains an optional override. By default the relay reads
+`~/.governloop/relay/config.json` (see `DEFAULT_CONFIG_PATH` in
+`tools/neutral-relay/neutral_relay.py`). Pass `--config-file <path>` only when
+you need a non-default route configuration.
 
 ## See GovernLoop in action
 
@@ -90,7 +93,7 @@ Current CLI arguments:
 ```text
 --request-file
 --output-file
---config-file
+--config-file   # optional; default ~/.governloop/relay/config.json
 --wait-timeout   # default: 900 seconds
 --dry-run
 ```
@@ -126,6 +129,18 @@ skills/opencode/governloop/SKILL.md
 ```
 
 It documents the current Neutral Relay workflow only. Historical commands such as `governloop start`, `setup-task-scope`, and governance/authority workflows are not part of this recovery baseline.
+
+## Local development convention
+
+GovernLoop development follows a simple, runtime-free workflow:
+
+- a single canonical `main` checkout is the source of truth;
+- feature and fix work happens in Git worktrees, which are retired after merge;
+- there is no second clone for normal development.
+
+This repository ships as Minimal Transport — no AgentOps lifecycle runtime or
+governance state machine. See `WORKTREE_LIFECYCLE.md` (local workspace) for the
+full worktree convention.
 
 ## Release line
 

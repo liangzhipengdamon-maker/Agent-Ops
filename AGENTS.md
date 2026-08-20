@@ -7,11 +7,24 @@ All local agents working in this repository must follow the shared authorization
 Key rules:
 
 - GovernLoop transport success does not authorize repository mutation.
-- Implementation, commit/push, PR creation, Ready, merge, and deploy/release are separate authorization stages.
-- Never infer a later-stage authorization from PASS, relay success, test success, mergeability, Ready state, task completion, or an earlier-stage authorization.
-- Before Ready, merge, deploy, or release, verify current remote state and the exact target/HEAD where applicable, then require explicit user authorization for that stage.
-- If authorization for the next stage is absent, STOP and report current state; do not auto-continue.
+- Scoped authorization: for one clearly scoped task, once the user explicitly
+  authorizes execution, the agent may continue within that same scope through
+  implementation → commit/push → PR → Ready → merge without repeatedly stopping
+  for authorization at each individual stage.
+- Still STOP (and require fresh explicit authorization) when any of these occur:
+  material scope change, unexpected HEAD/main drift, merge conflict, P0/P1
+  blocker, destructive/high-risk action (e.g. force push, direct `main` rewrite),
+  or deploy/release/tag.
+- Transport success, GPT/REVIEW PASS, test PASS, PR mergeability, or Ready state
+  alone does NOT create authorization. Authorization originates only from an
+  explicit user grant for the task in scope.
+- Before executing Ready/merge/deploy/release within an authorized flow, verify
+  current remote state and the exact target/HEAD (PR HEAD) where applicable; if
+  state drifted, STOP.
 - Do not broaden scope or start follow-up work without explicit authorization.
-- Do not directly push/rewrite/force-push `main` without explicit authorization for that exact action.
-- Diagnostic CDP read-back is not canonical relay success; canonical success requires relay exit success plus canonical output written.
-- Do not reintroduce the historical AgentOps lifecycle/authority/runtime stack just to enforce these rules.
+- Do not directly push/rewrite/force-push `main` without explicit authorization
+  for that exact action.
+- Diagnostic CDP read-back is not canonical relay success; canonical success
+  requires relay exit success plus canonical output written.
+- Do not reintroduce the historical AgentOps lifecycle/authority/runtime stack
+  just to enforce these rules.
