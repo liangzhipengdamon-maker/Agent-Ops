@@ -105,7 +105,7 @@ Local Agent → GovernLoop → ChatGPT → relay read-back → Local Agent
 
 This is a real recorded workflow, not a simulated demo.
 
-[![GovernLoop live demo — click to watch the full 2-minute workflow](https://github.com/liangzhipengdamon-maker/GovernLoop/releases/download/v0.1.2/demo_poster.png)](https://github.com/liangzhipengdamon-maker/GovernLoop/releases/download/v0.1.2/demo_v0.1.2.mp4)
+[![GovernLoop live demo — click to watch the full 2-minute workflow](https://github.com/liangzhipengdamon-maker/GovernLoop/releases/download/v0.1.2/demo_poster.png)](https://liangzhipengdamon-maker.github.io/GovernLoop/assets/demo_v0.1.2.mp4)
 
 *Click the image above to watch the full 2-minute recorded workflow on GitHub.*
 
