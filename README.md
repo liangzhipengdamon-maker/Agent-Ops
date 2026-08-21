@@ -93,9 +93,12 @@ Current CLI arguments:
 ```text
 --request-file
 --output-file
---config-file   # optional; default ~/.governloop/relay/config.json
---wait-timeout   # default: 900 seconds
+--config-file       # optional; default ~/.governloop/relay/config.json
+--wait-timeout      # default: 900 seconds
 --dry-run
+--attachment        # evidence file(s) uploaded to the conversation before sending (repeatable)
+--conversation-url  # session-level conversation override; never written to config
+--cdp-port          # session-level CDP port override; never written to config
 ```
 
 Required request routing fields:
@@ -108,6 +111,27 @@ REPO: owner/repository
 ```
 
 The target ChatGPT conversation must already be open in the CDP-enabled browser.
+
+### Checkpoint evidence delivery
+
+Review checkpoints (`NEW_BLOCKER`, `UNEXPECTED_STATE`, `BEFORE_DESTRUCTIVE_ACTION`,
+`REVIEW_REQUIRED`, `FINAL_VERIFICATION`) deliver concise text **and** the supporting
+evidence files as attachments to the same session-bound conversation. A local path
+written in the text is not delivery. Every attachment is checked (exists -> relevant
+-> secret scan -> filename/size/sha256) before upload; secret-bearing evidence is only
+ever attached as a redacted copy. Any attachment failure aborts the run fail-closed —
+never a false COMPLETE. Full contract: `docs/architecture/neutral-relay-checkpoint-delivery.md`.
+
+Short real usage example (session-level target + evidence attachments):
+
+```bash
+python3 tools/neutral-relay/neutral_relay.py \
+  --request-file request.txt \
+  --output-file response.md \
+  --conversation-url <session-url> \
+  --attachment report.md \
+  --attachment manifest.json
+```
 
 ### Success condition
 
