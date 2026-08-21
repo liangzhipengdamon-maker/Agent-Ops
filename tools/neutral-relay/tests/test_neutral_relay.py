@@ -145,11 +145,16 @@ class TestNeutralRelay(unittest.TestCase):
         self.temp_dir.cleanup()
 
     class Args:
-        def __init__(self, req, out, cfg, dry_run=False):
+        def __init__(self, req, out, cfg, dry_run=False, conversation_url=None,
+                     cdp_port=None, attachment=None):
             self.request_file = req
             self.output_file = out
             self.config_file = cfg
             self.dry_run = dry_run
+            self.conversation_url = conversation_url
+            self.cdp_port = cdp_port
+            self.attachment = attachment or []
+            self.wait_timeout = 60
 
     def test_default_config_path_uses_governloop_authority(self):
         self.assertEqual(
