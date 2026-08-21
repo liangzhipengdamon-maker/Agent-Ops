@@ -86,3 +86,20 @@ and CLI `--help` for the new timeout arguments were sanity-checked.
 Agent-agnostic positioning is unchanged: WorkBuddy `/governloop`, OpenCode
 skill, Claude Code, Codex, and generic local coding agents all use the same
 Neutral Relay transport. No historical runtime/commands were reintroduced.
+
+## Post-release note (separate patch on `main`, no new tag)
+
+After v0.1.2 shipped, the README demo-video embed rendered blank on the
+homepage. Root cause: GitHub's README renderer strips raw `<video>` tags
+entirely (verified via `gh api /markdown` with and without `mode=gfm`,
+and confirmed by fetching the rendered repo HTML). The previous v0.1.2
+embed used `<video src=".../releases/download/v0.1.2/demo_v0.1.2.mp4">`,
+which was also being stripped — so the prior embed was already broken
+even though the asset itself was reachable.
+
+Fix: replaced the `<video>` with a markdown image link
+`[![poster](demo_poster.png)](demo_v0.1.2.mp4)` so the demo poster
+inlines on the homepage and clicking it opens the mp4. The poster
+(`demo_poster.png`) and the video (`demo_v0.1.2.mp4`) are both attached
+to the v0.1.2 release. No code, transport, or contract changes — this
+is a docs/embedding patch only, made directly on `main`.

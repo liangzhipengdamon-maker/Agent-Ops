@@ -74,3 +74,13 @@ session-manager 24/24, relay adapter 5/5, worktree status 11/11 (total 75/75).
 The current stable release is `v0.1.2` (reliability patch for Neutral Relay
 delivery confirmation). Tag `v0.1.2` and the corresponding GitHub Release were
 created from the v0.1.2 release commit on `main`.
+
+## Post-release patches (no new tag)
+
+- README demo-video embed fix (post-v0.1.2 patch on `main`, separate from the
+  v0.1.2 release): GitHub's README renderer strips raw `<video>` tags, so the
+  homepage rendered blank after v0.1.2 even though the prior user-attachments
+  embed had the same problem. Replaced the `<video>` with a clickable poster
+  image (`demo_poster.png`, 960px, ~100 KB) linking to the demo mp4 in the
+  v0.1.2 release assets. No code/contract change, no new release/tag —
+  README is read from `main`.
