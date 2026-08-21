@@ -51,6 +51,8 @@ CHECKPOINT_TYPES = (
     "REVIEW_REQUIRED",
     "FINAL_VERIFICATION",
 )
+# Cap for inline attachment degradation (relay without --attachment support).
+INLINE_ATTACHMENT_MAX_CHARS = 200_000
 
 SECRET_RE = re.compile(
     r"github_pat_[A-Za-z0-9_]{10,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|"
@@ -304,6 +306,23 @@ def build_request(state, ctype, message, seq):
     return head + body.strip()
 
 
+def relay_supports_attachment(relay):
+    """Probe whether the neutral relay accepts --attachment args.
+
+    Relay versions differ: older builds reject --attachment (argparse exit 2,
+    CHECKPOINT_DELIVERY_INCOMPLETE). Fail open on probe errors so callers
+    degrade to inline delivery.
+    """
+    try:
+        r = subprocess.run(
+            [sys.executable, relay, "--help"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return "--attachment" in (r.stdout or "") + (r.stderr or "")
+    except Exception:
+        return False
+
+
 def run_checkpoint(
     state_dir,
     cwd=None,
@@ -335,6 +354,10 @@ def run_checkpoint(
             "ChatGPT conversation URL; ask the user once and run `/governloop bind <url>`"
         ), 3
 
+    relay = relay_path or env.get("GOVERLOOP_RELAY_PATH") or RELAY_DEFAULT
+    if not os.path.exists(relay):
+        return False, f"ERROR: relay not found at {relay} (set GOVERLOOP_RELAY_PATH)", 1
+
     # evidence attachments: safety scan first (contract: exists/relevance/secret/sha256)
     attach = [a for a in (attach or []) if a]
     refused = []
@@ -352,6 +375,38 @@ def run_checkpoint(
                 message = f.read()
         except Exception as e:
             return False, f"ERROR: cannot read message file {message_file}: {e}", 1
+
+    # relay capability probe: relay versions differ on --attachment support.
+    # Without support, degrade to inlining the attachment text into the message
+    # body so the conversation still receives the full content (honest
+    # degradation, never a false "attachments delivered").
+    inline_degraded = False
+    inline_count = 0
+    if attach and not relay_supports_attachment(relay):
+        inline_parts = []
+        for ap in attach:
+            try:
+                with open(ap, encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+            except Exception as e:
+                refused.append(f"{ap} (unreadable for inline: {e})")
+                continue
+            if len(content) > INLINE_ATTACHMENT_MAX_CHARS:
+                refused.append(
+                    f"{ap} ({len(content)} chars exceeds inline limit "
+                    f"{INLINE_ATTACHMENT_MAX_CHARS}; attach a trimmed copy)"
+                )
+                continue
+            inline_parts.append(
+                f"\n\n===== [ATTACHMENT INLINE: {ap} ({len(content)} chars)] =====\n"
+                f"{content}\n===== END ATTACHMENT ====="
+            )
+        if refused:
+            return False, f"CHECKPOINT_DELIVERY_INCOMPLETE: refused attachments: {', '.join(refused)}", 1
+        message = (message or "").rstrip() + "".join(inline_parts)
+        inline_count = len(inline_parts)
+        attach = []
+        inline_degraded = bool(inline_count)
 
     seq = len(state.get("checkpoints", [])) + 1
     request_text = build_request(state, ctype, message, seq)
@@ -373,10 +428,6 @@ def run_checkpoint(
             f,
             indent=2,
         )
-
-    relay = relay_path or env.get("GOVERLOOP_RELAY_PATH") or RELAY_DEFAULT
-    if not os.path.exists(relay):
-        return False, f"ERROR: relay not found at {relay} (set GOVERLOOP_RELAY_PATH)", 1
 
     cmd = [
         sys.executable, relay,
@@ -406,12 +457,15 @@ def run_checkpoint(
     state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     save_state(state_dir, state)
 
-    summary = (
-        f"CHECKPOINT {ctype} -> {USER_CONVERSATION_SELECTION_REQUIRED.replace('USER_','') or 'ok'}\n"
-    )
+    attrs_note = f"ATTACHMENTS: {len(attach)} delivered"
+    if inline_degraded:
+        attrs_note = (
+            f"ATTACHMENTS: 0 delivered ({inline_count} inlined into message text "
+            f"-- relay has no --attachment support)"
+        )
     summary = (
         f"CHECKPOINT: {ctype}\nSESSION: {state['session_id']}\n"
-        f"TEXT_RELAY: PASS\nATTACHMENTS: {len(attach)} delivered\n"
+        f"TEXT_RELAY: PASS\n{attrs_note}\n"
         f"RESPONSE (head): {response[:400]!r}"
     )
     return True, summary, 0

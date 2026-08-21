@@ -176,12 +176,20 @@ class TestBindAndRequirement(unittest.TestCase):
 
 class TestCheckpointDelivery(unittest.TestCase):
     def _stub_relay(self, td):
-        """A stub relay that records argv and writes a canned response."""
+        """A stub relay that records argv and writes a canned response.
+
+        It advertises --attachment support via --help so the session manager
+        uses the real attachment path (see relay_supports_attachment probe).
+        """
         stub = os.path.join(td, "stub_relay.py")
         argv_out = os.path.join(td, "stub-argv.json")
         with open(stub, "w") as f:
             f.write(
                 "import json, sys\n"
+                "if '--help' in sys.argv:\n"
+                "    print('usage: stub_relay.py --request-file R --output-file O '\n"
+                "          '--config-file C [--attachment A]')\n"
+                "    sys.exit(0)\n"
                 "args = sys.argv[1:]\n"
                 f"open({argv_out!r},'w').write(json.dumps(args))\n"
                 "out = args[args.index('--output-file')+1]\n"
@@ -275,6 +283,114 @@ class TestCheckpointDelivery(unittest.TestCase):
             argv = json.load(open(argv_out))
             req = open(argv[argv.index("--request-file") + 1]).read()
             self.assertIn("CHECKPOINT: FINAL_VERIFICATION", req)
+
+    def test_attachment_inlined_when_relay_lacks_support(self):
+        """Legacy relays without --attachment get evidence inlined (honest degrade)."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = make_git_repo(td, "https://github.com/acme/widget.git",
+                                 branch="feature/LEA-42")
+            state, _, _ = gl.new_session(td, cwd=repo)
+            gl.bind_url(td, state["session_id"], "https://chatgpt.com/c/abc-123")
+            ev = os.path.join(td, "evidence.md")
+            with open(ev, "w") as f:
+                f.write("# evidence\nno secrets\n")
+            # legacy relay: --help does not advertise --attachment
+            legacy = os.path.join(td, "legacy_relay.py")
+            argv_out = os.path.join(td, "legacy-argv.json")
+            with open(legacy, "w") as f:
+                f.write(
+                    "import json, sys\n"
+                    "if '--help' in sys.argv:\n"
+                    "    print('usage: relay.py --request-file R --output-file O '\n"
+                    "          '--config-file C')\n"
+                    "    sys.exit(0)\n"
+                    "args = sys.argv[1:]\n"
+                    f"open({argv_out!r},'w').write(json.dumps(args))\n"
+                    "out = args[args.index('--output-file')+1]\n"
+                    "open(out,'w').write('DECISION: PROCEED\\n')\n"
+                    "print('Success: Wrote response to ' + out)\n"
+                )
+            ok, text, code = gl.run_checkpoint(
+                td, cwd=repo, ctype="REVIEW_REQUIRED",
+                message="needs review", attach=[ev], relay_path=legacy,
+            )
+            self.assertTrue(ok, text)
+            self.assertEqual(code, 0)
+            self.assertIn("TEXT_RELAY: PASS", text)
+            self.assertIn("0 delivered (1 inlined", text)
+            # relay was NOT passed --attachment
+            argv = json.load(open(argv_out))
+            self.assertNotIn("--attachment", argv)
+            # attachment content is in the request text (real delivery via body)
+            req = argv[argv.index("--request-file") + 1]
+            body = open(req).read()
+            self.assertIn("[ATTACHMENT INLINE:", body)
+            self.assertIn("# evidence", body)
+            self.assertIn("END ATTACHMENT", body)
+
+    def test_oversized_attachment_refused_for_inline(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = make_git_repo(td, "https://github.com/acme/widget.git",
+                                 branch="feature/LEA-42")
+            state, _, _ = gl.new_session(td, cwd=repo)
+            gl.bind_url(td, state["session_id"], "https://chatgpt.com/c/abc-123")
+            big = os.path.join(td, "big.md")
+            with open(big, "w") as f:
+                f.write("x" * (gl.INLINE_ATTACHMENT_MAX_CHARS + 10))
+            legacy = os.path.join(td, "legacy_relay.py")
+            with open(legacy, "w") as f:
+                f.write("import sys\nif '--help' in sys.argv:\n"
+                        "    print('usage: relay.py --request-file R --output-file O')\n"
+                        "    sys.exit(0)\n")
+            ok, text, code = gl.run_checkpoint(
+                td, cwd=repo, ctype="REVIEW_REQUIRED", attach=[big], relay_path=legacy,
+            )
+            self.assertFalse(ok)
+            self.assertEqual(code, 1)
+            self.assertIn("CHECKPOINT_DELIVERY_INCOMPLETE", text)
+            self.assertIn("exceeds inline limit", text)
+
+
+class TestCLIWorkflow(unittest.TestCase):
+    """End-to-end CLI: new -> status -> bind -> end (no real relay/CDP)."""
+
+    def test_cli_new_status_bind_end(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = make_git_repo(td, "https://github.com/acme/widget.git",
+                                 branch="feature/LEA-42")
+            env = dict(os.environ)
+            env["GOVERLOOP_STATE_DIR"] = td
+            script = os.path.abspath(os.path.join(os.path.dirname(__file__),
+                                                  "governloop_session.py"))
+            # new -> asks for conversation URL once (exit 3)
+            r = subprocess.run([sys.executable, script, "new"], cwd=repo,
+                               capture_output=True, text=True, env=env, timeout=30)
+            self.assertEqual(r.returncode, 3)
+            self.assertIn(gl.USER_CONVERSATION_SELECTION_REQUIRED, r.stdout)
+            # status shows detected repo + session
+            r = subprocess.run([sys.executable, script, "status"], cwd=repo,
+                               capture_output=True, text=True, env=env, timeout=30)
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("acme/widget", r.stdout)
+            self.assertIn("bound: no", r.stdout)
+            # bind once
+            r = subprocess.run([sys.executable, script, "bind",
+                                "https://chatgpt.com/c/abc-123"],
+                               cwd=repo, capture_output=True, text=True, env=env,
+                               timeout=30)
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("BOUND", r.stdout)
+            # end -> cleanup, canonical config untouched
+            r = subprocess.run([sys.executable, script, "end"], cwd=repo,
+                               capture_output=True, text=True, env=env, timeout=30)
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("ENDED", r.stdout)
+            leftover = [f for f in os.listdir(td) if f.startswith("governloop-session-")]
+            self.assertEqual(leftover, [])  # temp state removed
+            if os.path.exists(gl.CANONICAL_CONFIG):
+                d = json.load(open(gl.CANONICAL_CONFIG, encoding="utf-8"))
+                route = d.get("routes", {}).get("acme/widget", {})
+                self.assertIsNone(route.get("conversation_url", None))
 
 
 if __name__ == "__main__":

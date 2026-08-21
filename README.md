@@ -175,6 +175,15 @@ session in temporary state only (never the canonical config), and reports the
 five review checkpoints with evidence attachments through the Neutral Relay.
 Install it into `~/.workbuddy/skills/governloop/` to activate the slash command.
 
+Usage docs:
+
+- `docs/QUICK_START.md` — user guide in 3 commands, including the 8 most
+  common questions (switching projects, session ids, URLs, checkpoints,
+  evidence, cleanup).
+- `docs/USAGE.md` — full command/reference manual for the session manager.
+- `docs/MULTI_PROJECT_WORKFLOW.md` — cross-project isolation rules (shared
+  infrastructure; one session + one conversation per project).
+
 ## Local development convention
 
 GovernLoop development follows a simple, runtime-free workflow:
