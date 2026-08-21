@@ -20,6 +20,18 @@ NORMAL_SETTLE_SECONDS = 4.0
 CONSERVATIVE_STABLE_READS = 6
 CONSERVATIVE_SETTLE_SECONDS = 30.0
 
+# Strong delivery confirmation (see run_relay): "send button clicked" is NOT
+# "message delivered". A click that lands while ChatGPT is still processing
+# freshly-uploaded attachments can be silently swallowed, leaving the draft in
+# the composer. Delivery is confirmed only when BOTH signals hold:
+#   (1) composer content cleared, and
+#   (2) the thread's user-turn count increased by exactly 1.
+SEND_CONFIRM_TIMEOUT = 30         # seconds to wait for the two confirmation signals
+SEND_CONFIRM_MAX_ATTEMPTS = 2     # 1 initial click + 1 safe re-click (no re-upload / re-inject)
+SEND_UI_TRANSITION_SECONDS = 2.0  # wait after each click for the UI to transition
+SEND_PENDING_TIMEOUT = 90         # SEND_PENDING window: composer cleared but thread not yet
+                                  # confirmed (never re-click in this state)
+
 
 class ResponseCompletionTracker:
     """Two-stage finalization settle for a correlated Assistant turn.
@@ -163,6 +175,147 @@ class AttachmentUploader:
             if await self.is_visible(base):
                 return True, None
         return False, "not-visible"
+
+
+class SendConfirmation:
+    """Three-state strong delivery confirmation for a user-turn send.
+
+    "Send button clicked" is NOT "message delivered": a click that lands while
+    ChatGPT is still processing freshly-uploaded attachments can be silently
+    swallowed, leaving the draft in the composer. Delivery is modelled as three
+    states (per reviewer design):
+
+      - Draft still present (composer non-empty, user turn unchanged within
+        confirm_timeout) -> the send was not accepted -> ONE safe re-click
+        (never re-upload attachments or re-inject text -- duplicate risk) ->
+        if the composer is still non-empty -> SEND_NOT_CONFIRMED (fail closed).
+      - Composer cleared + user turn unchanged -> SEND_PENDING: the message
+        left the composer but the thread has not confirmed it yet -> NEVER
+        re-click / re-upload / re-inject from this state -> within
+        pending_timeout, confirm via user-turn +1 (canonical, PRIMARY) or a NEW
+        assistant turn with no assistant streaming before the send (AUXILIARY)
+        -> timeout yields SEND_PENDING_TIMEOUT (no resend; manual verification).
+      - Composer cleared + user turn +1 -> DELIVERY_CONFIRMED_PRIMARY.
+
+    All CDP interaction is injected as async callables so the state machine is
+    unit-testable without a live browser (same pattern as AttachmentUploader).
+
+    Returned status is one of: DELIVERY_CONFIRMED_PRIMARY,
+    DELIVERY_CONFIRMED_AUXILIARY, SEND_NOT_CONFIRMED, SEND_PENDING_TIMEOUT,
+    SEND_BUTTON_UNAVAILABLE. `delivered` is True only for the two DELIVERY_*
+    statuses.
+    """
+
+    def __init__(
+        self,
+        click_send,
+        composer_cleared,
+        turn_counts,
+        assistant_streaming,
+        confirm_timeout=SEND_CONFIRM_TIMEOUT,
+        pending_timeout=SEND_PENDING_TIMEOUT,
+        ui_transition_seconds=SEND_UI_TRANSITION_SECONDS,
+        sleep=asyncio.sleep,
+        now=time.time,
+    ):
+        self.click_send = click_send
+        self.composer_cleared = composer_cleared
+        self.turn_counts = turn_counts
+        self.assistant_streaming = assistant_streaming
+        self.confirm_timeout = confirm_timeout
+        self.pending_timeout = pending_timeout
+        self.ui_transition_seconds = ui_transition_seconds
+        self.sleep = sleep
+        self.now = now
+
+    async def confirm(self, user_count_before):
+        """Run the state machine. Returns (delivered, primary, status)."""
+        # Baselines for the auxiliary SEND_PENDING signal: a NEW assistant turn
+        # appearing after our send proves server-side acceptance -- but only if
+        # no assistant turn was actively streaming before the send (a late-
+        # rendered node from a previous turn could otherwise false-positive).
+        _, assistant_count_before = await self.turn_counts()
+        assistant_streaming_before = await self.assistant_streaming()
+
+        if not await self.click_send():
+            print("Error: Send button not found or disabled.")
+            return False, False, "SEND_BUTTON_UNAVAILABLE"
+        await self.sleep(self.ui_transition_seconds)
+
+        delivered, primary, cleared, user_now, assistant_now = await self._await_confirm(
+            user_count_before)
+        if not delivered and not cleared:
+            # Draft still present: one safe re-click is allowed.
+            print("SEND_DRAFT_STILL_PRESENT: composer not cleared after first send attempt. "
+                  "Re-clicking send once (no re-upload, no re-inject).")
+            if await self.click_send():
+                await self.sleep(self.ui_transition_seconds)
+                delivered, primary, cleared, user_now, assistant_now = await self._await_confirm(
+                    user_count_before)
+        if not delivered and not cleared:
+            print("SEND_NOT_CONFIRMED: composer still non-empty after "
+                  f"{SEND_CONFIRM_MAX_ATTEMPTS} attempts "
+                  f"(user_turn={user_count_before}->{user_now}, composer_cleared={cleared}). "
+                  "Failing closed. Manual recovery: "
+                  "1) verify the draft + attachments are still present in the composer; "
+                  "2) click Send ONCE; "
+                  "3) confirm the composer cleared and the user turn appeared in the thread; "
+                  "4) DO NOT re-run the send path for the same request (duplicate-delivery risk); "
+                  "5) continue via manual readback, or stop and record "
+                  "DELIVERY_MODE=MANUAL_SEND_RECOVERY.")
+            return False, False, "SEND_NOT_CONFIRMED"
+        if not delivered:
+            # SEND_PENDING: composer cleared, thread not yet confirmed. From
+            # here on: NEVER re-click / re-upload / re-inject.
+            print("SEND_PENDING: draft has left the composer; awaiting thread confirmation "
+                  "(no auto re-click to avoid duplicate delivery).")
+            user_now = assistant_now = 0
+            pending_deadline = self.now() + self.pending_timeout
+            while self.now() < pending_deadline:
+                user_now, assistant_now = await self.turn_counts()
+                if user_now == user_count_before + 1:
+                    print("DELIVERY_CONFIRMED_PRIMARY: PASS (composer cleared, user turn +1)")
+                    return True, True, "DELIVERY_CONFIRMED_PRIMARY"
+                if (not assistant_streaming_before) and assistant_now > assistant_count_before:
+                    # Auxiliary evidence: a NEW assistant turn appeared after
+                    # our send and nothing was streaming before the send, which
+                    # can only happen if the server accepted the user message.
+                    print("DELIVERY_CONFIRMED_AUXILIARY: PASS (composer cleared; new assistant "
+                          "turn after send; no assistant streaming before send)")
+                    return True, False, "DELIVERY_CONFIRMED_AUXILIARY"
+                await self.sleep(1)
+            print("SEND_PENDING_TIMEOUT: draft has left the composer but the thread has "
+                  f"not confirmed delivery within {self.pending_timeout}s "
+                  f"(user_turn={user_count_before}->{user_now}, "
+                  f"assistant_turn={assistant_count_before}->{assistant_now}). "
+                  "The relay will NOT retry Send to avoid duplicate delivery. "
+                  "Manual verification required: check whether the user message appeared "
+                  "in the thread; if yes, continue without resending; if no, inspect the "
+                  "conversation before taking any further send action. Record "
+                  "DELIVERY_MODE=MANUAL_SEND_RECOVERY / SEND_PENDING_TIMEOUT.")
+            return False, False, "SEND_PENDING_TIMEOUT"
+        if primary:
+            print("DELIVERY_CONFIRMED_PRIMARY: PASS (composer cleared, user turn +1)")
+        else:
+            print("DELIVERY_CONFIRMED_AUXILIARY: PASS (composer cleared; new assistant turn "
+                  "after send; no assistant streaming before send)")
+        return True, primary, "DELIVERY_CONFIRMED_PRIMARY" if primary else "DELIVERY_CONFIRMED_AUXILIARY"
+
+    async def _await_confirm(self, user_count_before):
+        """Wait up to confirm_timeout for composer-clear (+user+1) or
+        composer-clear alone (-> SEND_PENDING). Returns (delivered, primary,
+        cleared, user_now, assistant_now)."""
+        user_now = assistant_now = 0
+        deadline = self.now() + self.confirm_timeout
+        while self.now() < deadline:
+            user_now, assistant_now = await self.turn_counts()
+            cleared = await self.composer_cleared()
+            if cleared and user_now == user_count_before + 1:
+                return True, True, True, user_now, assistant_now
+            if cleared:
+                return False, False, True, user_now, assistant_now   # -> SEND_PENDING
+            await self.sleep(1)
+        return False, False, False, user_now, assistant_now
 
 
 async def upload_attachments(uploader, paths):
@@ -343,10 +496,45 @@ async def run_relay(args):
         await js(f"(()=>{{const e=document.querySelector('[contenteditable=true]');if(!e)return false;e.focus();e.innerHTML='';e.innerText={esc_text};e.dispatchEvent(new Event('input',{{bubbles:true}}));return true}})()")
         await asyncio.sleep(1)
         
-        # Click send
-        clk = await js("(()=>{const b=document.querySelector('button[data-testid=\\'send-button\\']'); if(b && !b.disabled){b.click(); return true;} return false;})()")
-        if not clk:
-            print("Error: Send button not found or disabled.")
+        # Click send and STRONGLY confirm delivery before waiting for the
+        # assistant turn. "Send button clicked" is NOT "message delivered": if
+        # the click lands while ChatGPT is still processing freshly-uploaded
+        # attachments, the send can be silently swallowed and the draft stays
+        # in the composer. The three-state delivery state machine lives in
+        # SendConfirmation (unit-tested); here we wire it to the live CDP js()
+        # helpers. See SendConfirmation for the full state model.
+        send_confirm_timeout = getattr(args, "send_confirm_timeout", SEND_CONFIRM_TIMEOUT)
+        send_pending_timeout = getattr(args, "send_pending_timeout", SEND_PENDING_TIMEOUT)
+
+        async def _click_send():
+            return await js("(()=>{const b=document.querySelector('button[data-testid=\\'send-button\\']'); if(b && !b.disabled){b.click(); return true;} return false;})()")
+
+        async def _composer_cleared():
+            return bool(await js("(()=>{const e=document.querySelector('[contenteditable=true]');return !e || ((e.innerText||'').trim().length===0);})()"))
+
+        async def _turn_counts():
+            n = await js("(()=>{const r=document.querySelectorAll('[data-message-author-role]');let u=0,a=0;r.forEach(x=>{const v=x.getAttribute('data-message-author-role');if(v==='user')u++;else if(v==='assistant')a++;});return JSON.stringify({u:u,a:a});})()")
+            try:
+                c = json.loads(n or '{"u":0,"a":0}')
+                return int(c.get("u", 0)), int(c.get("a", 0))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return 0, 0
+
+        async def _assistant_streaming():
+            return bool(await js("(()=>{let s=false;document.querySelectorAll('[data-message-author-role=\\'assistant\\']').forEach(x=>{if(x.matches('.streaming-animation')||x.querySelector('.streaming-animation')||x.getAttribute('data-is-streaming')==='true'||x.getAttribute('aria-busy')==='true')s=true;});const st=document.querySelector('button[data-testid=\\'stop-button\\'],button[data-testid=\\'stop-generation\\'],button[aria-label*=\\'Stop\\'],button[aria-label*=\\'停止\\']');return s||!!st;})()"))
+
+        confirmation = SendConfirmation(
+            click_send=_click_send,
+            composer_cleared=_composer_cleared,
+            turn_counts=_turn_counts,
+            assistant_streaming=_assistant_streaming,
+            confirm_timeout=send_confirm_timeout,
+            pending_timeout=send_pending_timeout,
+        )
+        delivered, _primary, send_status = await confirmation.confirm(user_count_before)
+        if not delivered:
+            # SEND_BUTTON_UNAVAILABLE / SEND_NOT_CONFIRMED / SEND_PENDING_TIMEOUT
+            # (state machine already printed the detailed reason).
             return 1
 
         # Poll for the assistant response following the user turn created by
@@ -423,6 +611,14 @@ def main():
     parser.add_argument("--output-file", required=True, help="Path to write the GPT review response")
     parser.add_argument("--config-file", default=DEFAULT_CONFIG_PATH, help=f"Path to the routing config.json (default: {DEFAULT_CONFIG_PATH})")
     parser.add_argument("--wait-timeout", type=int, default=900, help="Seconds to wait for the new Assistant turn to finish streaming and stabilize (default: 900)")
+    parser.add_argument("--send-confirm-timeout", type=int, default=SEND_CONFIRM_TIMEOUT,
+                        help=f"Seconds to wait for strong delivery confirmation (composer cleared "
+                             f"+ user turn +1) before the safe re-click / fail-closed path "
+                             f"(default: {SEND_CONFIRM_TIMEOUT})")
+    parser.add_argument("--send-pending-timeout", type=int, default=SEND_PENDING_TIMEOUT,
+                        help=f"Seconds to wait in the SEND_PENDING state (composer cleared but "
+                             f"thread not yet confirmed; no re-click) before SEND_PENDING_TIMEOUT "
+                             f"(default: {SEND_PENDING_TIMEOUT})")
     parser.add_argument("--dry-run", action="store_true", help="Simulate routing without CDP execution")
     parser.add_argument("--attachment", action="append", default=[],
                         help="evidence file to upload to the conversation before sending "

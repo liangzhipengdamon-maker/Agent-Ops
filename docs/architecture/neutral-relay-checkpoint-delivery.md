@@ -107,6 +107,23 @@ Transport mechanics:
   not visible all abort the run with a non-zero exit; the request text is never
   sent and no response is written.
 
+Delivery confirmation (three-state model, after clicking Send):
+
+- `--send-confirm-timeout` (default 30s): window while the composer is
+  non-empty; the send is deemed not accepted and one safe re-click is allowed.
+  If the composer is still non-empty afterwards -> `SEND_NOT_CONFIRMED`
+  (fail-closed; guidance explicitly forbids re-running the same request after a
+  manual send to avoid duplicate delivery).
+- `--send-pending-timeout` (default 90s): if the composer is cleared but the
+  thread's user-turn count has not incremented, the relay enters `SEND_PENDING`
+  and **never** re-clicks / re-uploads / re-injects (duplicate-delivery risk).
+  Confirmation is `DELIVERY_CONFIRMED_PRIMARY` (user turn +1, canonical) or
+  `DELIVERY_CONFIRMED_AUXILIARY` (a new assistant turn appears after the send
+  AND no assistant turn was streaming before the send). If neither signal
+  appears -> `SEND_PENDING_TIMEOUT` (no resend; manual verification guidance).
+- The relay never reports PASS or starts wait-for-assistant while the composer
+  is still non-empty.
+
 Short usage example (session-level target + attachments):
 
 ```bash
@@ -131,3 +148,10 @@ python3 tools/neutral-relay/neutral_relay.py \
 - attachment failure never returns COMPLETE (iteration stops at first failure)
 - session-level `--conversation-url` override used for the run and canonical
   config untouched
+- delivery state machine (`tests/test_send_confirmation.py`): first click
+  swallowed -> one safe re-click; still non-empty -> SEND_NOT_CONFIRMED;
+  composer cleared + delayed user turn -> SEND_PENDING; pending user +1 ->
+  PRIMARY; pending new assistant turn without prior streaming -> AUXILIARY;
+  prior streaming rejects the auxiliary signal; pending timeout -> no resend,
+  SEND_PENDING_TIMEOUT; never re-click after composer cleared; manual recovery
+  guidance contains no "re-run same request"
