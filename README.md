@@ -130,6 +130,44 @@ skills/opencode/governloop/SKILL.md
 
 It documents the current Neutral Relay workflow only. Historical commands such as `governloop start`, `setup-task-scope`, and governance/authority workflows are not part of this recovery baseline.
 
+## Session manager + checkpoint reporter
+
+A higher-level, platform-agnostic **session manager** sits on top of the relay.
+It gives agents (and humans) a `/governloop` workflow:
+
+```text
+cd <project>
+/governloop            # auto-detect repo + task, auto-generate session id,
+                       # ask ChatGPT URL once per session
+# work normally        # agent auto-reports the five checkpoints
+/governloop status     # repo/task/session/URL/last checkpoint
+/governloop end        # optional FINAL_VERIFICATION + temp state cleanup
+```
+
+Key properties:
+
+- session id `<PROJECT>-<TASK>-<YYYY-MM-DD>` is **auto-generated** — users
+  never invent one;
+- conversation URLs are **task/session-level state** — asked once per session,
+  never persisted to the canonical routing config, never inherited across
+  repos (see `docs/MULTI_PROJECT_WORKFLOW.md`);
+- the five checkpoints `NEW_BLOCKER` / `UNEXPECTED_STATE` /
+  `BEFORE_DESTRUCTIVE_ACTION` / `REVIEW_REQUIRED` / `FINAL_VERIFICATION` are
+  reported with evidence attachments; ordinary progress is never sent;
+- if the relay does not support `--attachment`, evidence is inlined into the
+  message with an explicit degradation note (never a false "delivered").
+
+Components:
+
+```text
+tools/session-manager/governloop_session.py   # CLI: new|status|bind|checkpoint|end
+tools/session-manager/test_governloop_session.py
+skills/workbuddy/governloop/SKILL.md          # agent-facing skill definition
+docs/QUICK_START.md                            # user guide (3 commands)
+docs/USAGE.md                                  # full reference
+docs/MULTI_PROJECT_WORKFLOW.md                 # cross-project isolation rules
+```
+
 ## Local development convention
 
 GovernLoop development follows a simple, runtime-free workflow:
