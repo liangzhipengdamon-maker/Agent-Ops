@@ -25,48 +25,34 @@ The transport does not require ChatGPT to return `PR`, `HEAD`, `ACK`, `RESULT`, 
 
 ## Quick Start
 
-1. Start Chrome/Chromium with remote debugging enabled on the CDP port you want GovernLoop to use, then open the target ChatGPT conversation in that browser.
-2. Confirm the target ChatGPT conversation before real transport. Do not guess or silently reuse a conversation URL that the user has not selected or previously authorized for this task. If no target conversation is already explicitly established, ask the user for the ChatGPT conversation URL before sending.
-3. Add that conversation URL and CDP port to the route config for the repository.
-4. Create a request file containing `REVIEW_REQUEST_ID`, `REPO`, and the ordinary natural-language task.
-5. Run the Neutral Relay and read the output only after the relay exits successfully.
-
-Example request:
+Install GovernLoop once, then use it from any project.
 
 ```text
-REVIEW_REQUEST_ID: GL-EXAMPLE-001
-REPO: owner/repository
+cd <your-project>
 
-Please read this project's README and summarize what the project does in two or three sentences.
+/governloop          # creates a session for this repo, asks for the ChatGPT
+                     # conversation URL once — then just work normally
+/governloop status   # optional: repo / task / session / bound URL / last checkpoint
+/governloop end      # when done: optional FINAL_VERIFICATION + temp state cleanup
 ```
 
-Example route config:
+`/governloop` automatically:
 
-```json
-{
-  "routes": {
-    "owner/repository": {
-      "conversation_url": "https://chatgpt.com/c/<conversation-id>",
-      "cdp_port": 9233
-    }
-  }
-}
-```
+- detects the current git repo and derives the task (issue id → branch → title);
+- generates the session id `<PROJECT>-<TASK>-<YYYY-MM-DD>` — no manual session
+  ids, no per-project routing config to maintain;
+- binds the ChatGPT conversation URL **once per session** (temporary state
+  only; the canonical config is never modified);
+- reports the five review checkpoints — `NEW_BLOCKER`, `UNEXPECTED_STATE`,
+  `BEFORE_DESTRUCTIVE_ACTION`, `REVIEW_REQUIRED`, `FINAL_VERIFICATION` — with
+  evidence attachments to that conversation. Ordinary progress is not sent.
 
-Run (the canonical config is used by default — no `--config-file` needed):
+Guides: `docs/QUICK_START.md` (3 commands, incl. the 8 most common questions),
+`docs/USAGE.md` (full reference), `docs/MULTI_PROJECT_WORKFLOW.md` (using
+GovernLoop across many projects).
 
-```bash
-python3 tools/neutral-relay/neutral_relay.py \
-  --request-file request.txt \
-  --output-file output.md
-```
-
-On success, read `output.md`; it contains the assistant response written back by the relay itself.
-
-`--config-file` remains an optional override. By default the relay reads
-`~/.governloop/relay/config.json` (see `DEFAULT_CONFIG_PATH` in
-`tools/neutral-relay/neutral_relay.py`). Pass `--config-file <path>` only when
-you need a non-default route configuration.
+> Need the low-level Neutral Relay instead (route config + `--request-file`)?
+> That flow is documented in [Neutral Relay](#neutral-relay) below.
 
 ## See GovernLoop in action
 
