@@ -154,6 +154,27 @@ skills/opencode/governloop/SKILL.md
 
 It documents the current Neutral Relay workflow only. Historical commands such as `governloop start`, `setup-task-scope`, and governance/authority workflows are not part of this recovery baseline.
 
+## WorkBuddy skill (`/governloop`)
+
+A first-class WorkBuddy command entrypoint is maintained in:
+
+```text
+skills/workbuddy/governloop/
+├── SKILL.md                 # command contract (new/status/bind/checkpoint/end)
+├── QUICK_START.md           # user-facing 3-command workflow
+├── references/policy.md     # session routing + checkpoint + attachment policy
+└── scripts/
+    ├── governloop_session.py
+    └── test_governloop_session.py
+```
+
+Normal user workflow: `cd <project>` → `/governloop` → work → `/governloop end`.
+The skill auto-detects the repo and task, auto-generates the session id
+`<PROJECT>-<TASK>-<YYYY-MM-DD>`, binds the ChatGPT conversation URL once per
+session in temporary state only (never the canonical config), and reports the
+five review checkpoints with evidence attachments through the Neutral Relay.
+Install it into `~/.workbuddy/skills/governloop/` to activate the slash command.
+
 ## Local development convention
 
 GovernLoop development follows a simple, runtime-free workflow:
