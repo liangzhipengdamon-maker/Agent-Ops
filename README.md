@@ -1,8 +1,30 @@
 # GovernLoop
 
-GovernLoop is a lightweight local-agent ↔ ChatGPT transport layer for real project work.
+GovernLoop is a lightweight local-agent ↔ ChatGPT review loop for real project
+work. It is **agent-agnostic**: the same session model works from WorkBuddy,
+OpenCode, Claude Code, Codex, or any local coding agent.
 
-The current stable baseline focuses on one capability: a local agent sends a natural-language request through the Neutral Relay to an already-open ChatGPT conversation over Chrome DevTools Protocol (CDP), waits for the assistant turn to finish streaming, and writes the complete response to a local output file.
+The current stable baseline focuses on one capability: a local agent sends a
+natural-language request through the Neutral Relay to an already-open ChatGPT
+conversation over Chrome DevTools Protocol (CDP), waits for the assistant turn
+to finish streaming, and writes the complete response to a local output file —
+wrapped in a session manager that handles repo/task detection, session ids,
+conversation binding, review checkpoints, and evidence delivery.
+
+## Works with
+
+| Agent | Entry point |
+|---|---|
+| **WorkBuddy** | `/governloop` slash command (fastest UX) |
+| **OpenCode** | GovernLoop skill (`skills/opencode/governloop/`) |
+| **Claude Code** | invoke the local session manager CLI |
+| **Codex** | invoke the local session manager CLI |
+| **Any local coding agent** | invoke the local session manager CLI or the Neutral Relay directly |
+
+All agents share **one session model** — repo → task → session → conversation →
+checkpoints → evidence → end — and the same rules: no per-agent permanent
+routing config, conversation URLs stay session-level. See
+`docs/AGENT_INTEGRATIONS.md` for per-agent setup.
 
 ## Current status
 
@@ -27,6 +49,8 @@ The transport does not require ChatGPT to return `PR`, `HEAD`, `ACK`, `RESULT`, 
 
 Install GovernLoop once, then use it from any project.
 
+### WorkBuddy fast path (`/governloop`)
+
 ```text
 cd <your-project>
 
@@ -47,9 +71,26 @@ cd <your-project>
   `BEFORE_DESTRUCTIVE_ACTION`, `REVIEW_REQUIRED`, `FINAL_VERIFICATION` — with
   evidence attachments to that conversation. Ordinary progress is not sent.
 
+### Generic agent path (session manager CLI)
+
+Any agent — Claude Code, Codex, OpenCode, or a plain local script — invokes the
+**same** session manager directly:
+
+```bash
+python3 <repo>/skills/workbuddy/governloop/scripts/governloop_session.py new
+python3 <repo>/skills/workbuddy/governloop/scripts/governloop_session.py bind https://chatgpt.com/c/<conversation-id>
+python3 <repo>/skills/workbuddy/governloop/scripts/governloop_session.py checkpoint REVIEW_REQUIRED --message "..." --attach <evidence>
+python3 <repo>/skills/workbuddy/governloop/scripts/governloop_session.py end
+```
+
+Identical session model, identical rules — same repo/task detection, auto
+session id, URL once per session, five checkpoints, evidence delivery, temp
+state cleanup.
+
 Guides: `docs/QUICK_START.md` (3 commands, incl. the 8 most common questions),
-`docs/USAGE.md` (full reference), `docs/MULTI_PROJECT_WORKFLOW.md` (using
-GovernLoop across many projects).
+`docs/USAGE.md` (full reference), `docs/AGENT_INTEGRATIONS.md` (per-agent
+setup), `docs/MULTI_PROJECT_WORKFLOW.md` (using GovernLoop across many
+projects).
 
 > Need the low-level Neutral Relay instead (route config + `--request-file`)?
 > That flow is documented in [Neutral Relay](#neutral-relay) below.

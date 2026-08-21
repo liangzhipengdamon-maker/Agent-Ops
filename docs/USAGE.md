@@ -3,7 +3,13 @@
 This is the full reference for the GovernLoop session manager
 (`skills/workbuddy/governloop/scripts/governloop_session.py`) and its
 slash-command skill (`skills/workbuddy/governloop/`). For the 60-second version
-see `docs/QUICK_START.md`.
+see `docs/QUICK_START.md`; for per-agent setup (WorkBuddy, OpenCode, Claude
+Code, Codex, generic agents) see `docs/AGENT_INTEGRATIONS.md`.
+
+The session manager is **agent-agnostic**: `/governloop` (WorkBuddy) and the
+raw CLI (any other agent) drive the exact same session model — repo → task →
+session → conversation → checkpoints → evidence → end — with no per-agent
+permanent routing config.
 
 ## Commands
 

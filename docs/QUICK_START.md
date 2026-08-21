@@ -56,6 +56,23 @@ cd <target-project>
    The temp session state is removed; nothing is ever written to the permanent
    GovernLoop config.
 
+## Not on WorkBuddy? (generic agent path)
+
+The same workflow is available to any agent (Claude Code, Codex, OpenCode, a
+plain script) by invoking the **same session manager** directly:
+
+```bash
+python3 <repo>/skills/workbuddy/governloop/scripts/governloop_session.py new
+python3 <repo>/skills/workbuddy/governloop/scripts/governloop_session.py bind https://chatgpt.com/c/<conversation-id>
+python3 <repo>/skills/workbuddy/governloop/scripts/governloop_session.py checkpoint REVIEW_REQUIRED --message "..." --attach <evidence...>
+python3 <repo>/skills/workbuddy/governloop/scripts/governloop_session.py end
+```
+
+Same session model, same rules: repo/task detection, auto session id, URL
+once per session, five checkpoints, evidence delivery, temp-state cleanup.
+There is no per-agent config — only per-session temporary state. Per-agent
+setup notes: `docs/AGENT_INTEGRATIONS.md`.
+
 ## FAQ (the 8 questions)
 
 **1. How do I use it in a different project?**
