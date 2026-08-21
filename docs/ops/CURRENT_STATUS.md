@@ -1,12 +1,12 @@
 # GovernLoop Current Status
 
-Status date: 2026-08-18
+Status date: 2026-08-22
 
 ## Current repository baseline
 
-- `main`: `af654f9ff4e9f08465739fd9ce8e9a3465147603`
-- Merge source: PR #74 — Restore minimal transport recovery baseline
-- Verified recovery tree: `bfb069ed46b01028a168a64f9456da492564b4d5`
+- `main`: `79f8c9f454ea76f408253963371f87674b568b1b`
+- Merge source: PR #97 — Neutral Relay three-state delivery confirmation state machine
+- Verified tree: delivery state machine (`SEND_DRAFT_STILL_PRESENT` / `SEND_PENDING` / `SEND_PENDING_TIMEOUT` / `DELIVERY_CONFIRMED_PRIMARY` / `DELIVERY_CONFIRMED_AUXILIARY`)
 - Neutral Relay: `tools/neutral-relay/neutral_relay.py`
 
 ## Verified capability
@@ -40,6 +40,37 @@ The recovery baseline is not the later complex governance/runtime stack. Histori
 
 GovernLoop transport success also does not itself authorize code mutation, PR creation, merge, deployment, or other project actions.
 
+## v0.1.2 — Reliable delivery confirmation (patch)
+
+v0.1.2 is a reliability patch for Neutral Relay message delivery, especially
+review/checkpoint messages that carry evidence attachments. It does **not**
+change the transport contract or the agent-agnostic positioning; it tightens
+delivery confirmation so "send button clicked" is no longer treated as
+"message delivered".
+
+Delivery changes (merged via PR #97):
+
+- Strong send confirmation: a send is confirmed only when the composer clears
+  **and** the thread's user-turn count increases by one (PRIMARY), or — while
+  SEND_PENDING — a guarded new assistant turn appears with no assistant
+  streaming before the send (AUXILIARY).
+- Three-state model: `SEND_DRAFT_STILL_PRESENT` (composer non-empty → one safe
+  re-click), `SEND_PENDING` (composer cleared, thread not yet confirmed →
+  never re-click / re-upload / re-inject), `SEND_PENDING_TIMEOUT` (no resend;
+  manual verification guidance).
+- Duplicate-send protection: a safe re-click is permitted only while the
+  original draft is still present; once the composer clears, automatic resend
+  is prohibited.
+- Configurable `--send-confirm-timeout` (default 30s) and
+  `--send-pending-timeout` (default 90s).
+- Manual-recovery guidance explicitly forbids re-running the same send path
+  after a successful manual send.
+
+Validated on `main` (post-PR #97) with the full suite: relay 35/35,
+session-manager 24/24, relay adapter 5/5, worktree status 11/11 (total 75/75).
+
 ## Release closure
 
-The next planned release is `v0.1.1`, focused on the recovered and cross-project-verified minimal transport behavior. No tag or GitHub Release has been created yet.
+The current stable release is `v0.1.2` (reliability patch for Neutral Relay
+delivery confirmation). Tag `v0.1.2` and the corresponding GitHub Release were
+created from the v0.1.2 release commit on `main`.

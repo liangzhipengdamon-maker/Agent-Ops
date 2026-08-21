@@ -28,9 +28,9 @@ routing config, conversation URLs stay session-level. See
 
 ## Current status
 
-**v0.1.1 — Minimal Transport Recovery, cross-project E2E verified.**
+**v0.1.2 — Reliable attachment-message delivery confirmation.**
 
-The recovery baseline was merged by PR #74 and released as `v0.1.1` after clean/new and reused-conversation relay read-back E2Es passed, followed by a final clean-conversation release smoke on `main`.
+v0.1.2 is a reliability patch for Neutral Relay message delivery, especially review/checkpoint messages carrying evidence attachments. It strengthens send confirmation, introduces a three-state delivery model (SEND_PENDING after the composer clears, safe retry only while the draft remains in the composer, and duplicate-send protection), and clarifies manual-recovery semantics. Released as `v0.1.2` after the full relay and session-manager test suite passed on `main`.
 
 Verified path:
 
@@ -105,7 +105,7 @@ Local Agent → GovernLoop → ChatGPT → relay read-back → Local Agent
 
 This is a real recorded workflow, not a simulated demo.
 
-<video src="https://github.com/user-attachments/assets/0108f19d-c9c8-4a68-9dfe-af795c1ebe08"></video>
+<video src="https://github.com/liangzhipengdamon-maker/GovernLoop/releases/download/v0.1.2/demo_v0.1.2.mp4"></video>
 
 ## Neutral Relay
 
@@ -226,6 +226,7 @@ full worktree convention.
 ## Release line
 
 - `v0.1.0` — original public release.
-- `v0.1.1` — current stable Minimal Transport Recovery release; cross-project natural-language relay behavior verified before release.
+- `v0.1.1` — Minimal Transport Recovery release; cross-project natural-language relay behavior verified before release.
+- `v0.1.2` — current stable reliability patch for Neutral Relay delivery confirmation (strong send confirmation, SEND_PENDING, duplicate-send protection).
 
-See `docs/ops/CURRENT_STATUS.md` and `docs/ops/RELEASE_NOTES_v0.1.1.md` for the release closure record.
+See `docs/ops/CURRENT_STATUS.md` and `docs/ops/RELEASE_NOTES_v0.1.2.md` for the release closure record.
