@@ -4,8 +4,8 @@ Status date: 2026-08-22
 
 ## Current repository baseline
 
-- `main`: `79f8c9f454ea76f408253963371f87674b568b1b`
-- Merge source: PR #97 — Neutral Relay three-state delivery confirmation state machine
+- `main`: `84073d8546730c812f4203a15cece03bdedd30d0`
+- Merge source: PR #98 — v0.1.2 release docs/version/demo (builds on PR #97 delivery state machine, 79f8c9f)
 - Verified tree: delivery state machine (`SEND_DRAFT_STILL_PRESENT` / `SEND_PENDING` / `SEND_PENDING_TIMEOUT` / `DELIVERY_CONFIRMED_PRIMARY` / `DELIVERY_CONFIRMED_AUXILIARY`)
 - Neutral Relay: `tools/neutral-relay/neutral_relay.py`
 
