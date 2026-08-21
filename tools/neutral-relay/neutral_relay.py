@@ -227,6 +227,41 @@ async def run_relay(args):
 
         await cmd("Page.enable", {}, session=sid)
 
+        # ── OPTIONAL: upload evidence attachments before sending text ────────
+        # Each --attachment is uploaded through the ChatGPT file input via CDP
+        # DOM.setFileInputFiles (no user gesture needed). Attachment readiness is
+        # verified by waiting for the file name to appear in the composer DOM.
+        for ap in (args.attachment or []):
+            if not os.path.exists(ap):
+                print(f"ATTACH_FAIL missing-file: {ap}")
+                return 1
+            await cmd("DOM.enable", {}, session=sid)
+            doc = await cmd("DOM.getDocument", {"depth": -1}, session=sid)
+            root = doc.get("result", {}).get("root", {}).get("nodeId")
+            q = await cmd("DOM.querySelector",
+                          {"nodeId": root, "selector": "input[type=file]"},
+                          session=sid)
+            node_id = q.get("result", {}).get("nodeId")
+            if not node_id:
+                print(f"ATTACH_FAIL no-file-input: {ap}")
+                return 1
+            await cmd("DOM.setFileInputFiles",
+                      {"nodeId": node_id, "files": [os.path.abspath(ap)]},
+                      session=sid)
+            base = os.path.basename(ap)
+            ok = False
+            for _ in range(15):
+                await asyncio.sleep(1)
+                seen = await js("(()=>{const t=(document.querySelector('[contenteditable=true]')||{}).innerText||'';const b=document.body.innerText||'';return t+' '+b;})()")
+                if base in (seen or ""):
+                    ok = True
+                    break
+            if not ok:
+                print(f"ATTACH_FAIL not-visible: {ap}")
+                return 1
+            print(f"ATTACHED: {ap}")
+        await asyncio.sleep(1)
+
         # Capture the existing user-turn count before sending. The response is
         # correlated to the assistant turn that follows the user turn created
         # by this send, so the pre-send state that must change is the count of
@@ -323,6 +358,10 @@ def main():
     parser.add_argument("--config-file", default=DEFAULT_CONFIG_PATH, help=f"Path to the routing config.json (default: {DEFAULT_CONFIG_PATH})")
     parser.add_argument("--wait-timeout", type=int, default=900, help="Seconds to wait for the new Assistant turn to finish streaming and stabilize (default: 900)")
     parser.add_argument("--dry-run", action="store_true", help="Simulate routing without CDP execution")
+    parser.add_argument("--attachment", action="append", default=[],
+                        help="evidence file to upload to the conversation before sending "
+                             "the request text (repeatable). The file is uploaded through the "
+                             "ChatGPT file input via CDP and its readiness is verified.")
     args = parser.parse_args()
     sys.exit(asyncio.run(run_relay(args)))
 
