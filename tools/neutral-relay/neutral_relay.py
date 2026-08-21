@@ -117,6 +117,71 @@ class ResponseCompletionTracker:
         return False, ""
 
 
+class AttachmentUploader:
+    """Upload evidence attachments through the conversation file input.
+
+    CDP mechanics are injected as async callables so the decision logic is
+    unit-testable without a live browser:
+
+      find_input()                 -> file-input node id (or None)
+      set_files(node_id, abs_path) -> awaitable; raises on transport failure
+      is_visible(filename)         -> awaitable bool (name visible in composer)
+
+    Fail-closed: a missing file, absent file input, upload error, or a file
+    name that never becomes visible all yield (False, reason). The caller MUST
+    NOT send the request text or write a response when any attachment fails.
+    """
+
+    def __init__(
+        self,
+        find_input,
+        set_files,
+        is_visible,
+        visibility_retries=15,
+        retry_delay=1.0,
+    ):
+        self.find_input = find_input
+        self.set_files = set_files
+        self.is_visible = is_visible
+        self.visibility_retries = visibility_retries
+        self.retry_delay = retry_delay
+
+    async def upload(self, path):
+        """Return (ok, reason). reason is None on success."""
+        if not os.path.exists(path):
+            return False, "missing-file"
+        node_id = await self.find_input()
+        if not node_id:
+            return False, "no-file-input"
+        try:
+            await self.set_files(node_id, os.path.abspath(path))
+        except Exception as exc:  # fail-closed on transport/upload errors
+            return False, f"upload-error:{exc}"
+        base = os.path.basename(path)
+        for _ in range(self.visibility_retries):
+            await asyncio.sleep(self.retry_delay)
+            if await self.is_visible(base):
+                return True, None
+        return False, "not-visible"
+
+
+async def upload_attachments(uploader, paths):
+    """Upload every evidence attachment; stop at the first failure.
+
+    Returns (ok, failed_path, reason). Never returns ok=True when any
+    attachment failed to upload - callers must treat failure as
+    CHECKPOINT_DELIVERY_INCOMPLETE and must not proceed to send text or write
+    a response (no false COMPLETE).
+    """
+    for ap in paths:
+        ok, reason = await uploader.upload(ap)
+        if not ok:
+            print(f"ATTACH_FAIL {reason}: {ap}")
+            return False, ap, reason
+        print(f"ATTACHED: {ap}")
+    return True, None, None
+
+
 async def run_relay(args):
     # 1. Read request file
     if not os.path.exists(args.request_file):
@@ -156,9 +221,13 @@ async def run_relay(args):
         print(f"Error: No trusted route configured for repo {repo}. Fail closed.")
         return 1
 
-    gpt_url = route.get("conversation_url")
-    cdp_port = route.get("cdp_port")
-    
+    # Session-level overrides (never written back to config): the conversation
+    # URL is task/session state. The repo must still be a trusted configured
+    # route, but its conversation target may be overridden for this run only
+    # (ask the user once per session; never persist a permanent binding).
+    gpt_url = args.conversation_url or route.get("conversation_url")
+    cdp_port = args.cdp_port or route.get("cdp_port")
+
     if not gpt_url or not cdp_port:
         print("Error: Incomplete route configuration. Need conversation_url and cdp_port.")
         return 1
@@ -231,35 +300,32 @@ async def run_relay(args):
         # Each --attachment is uploaded through the ChatGPT file input via CDP
         # DOM.setFileInputFiles (no user gesture needed). Attachment readiness is
         # verified by waiting for the file name to appear in the composer DOM.
-        for ap in (args.attachment or []):
-            if not os.path.exists(ap):
-                print(f"ATTACH_FAIL missing-file: {ap}")
-                return 1
+        # All uploads happen inside this single attached session, so text and
+        # attachments always go to the SAME bound conversation.
+        async def _find_file_input():
             await cmd("DOM.enable", {}, session=sid)
             doc = await cmd("DOM.getDocument", {"depth": -1}, session=sid)
             root = doc.get("result", {}).get("root", {}).get("nodeId")
             q = await cmd("DOM.querySelector",
                           {"nodeId": root, "selector": "input[type=file]"},
                           session=sid)
-            node_id = q.get("result", {}).get("nodeId")
-            if not node_id:
-                print(f"ATTACH_FAIL no-file-input: {ap}")
-                return 1
+            return q.get("result", {}).get("nodeId")
+
+        async def _set_files(node_id, abs_path):
             await cmd("DOM.setFileInputFiles",
-                      {"nodeId": node_id, "files": [os.path.abspath(ap)]},
+                      {"nodeId": node_id, "files": [abs_path]},
                       session=sid)
-            base = os.path.basename(ap)
-            ok = False
-            for _ in range(15):
-                await asyncio.sleep(1)
-                seen = await js("(()=>{const t=(document.querySelector('[contenteditable=true]')||{}).innerText||'';const b=document.body.innerText||'';return t+' '+b;})()")
-                if base in (seen or ""):
-                    ok = True
-                    break
-            if not ok:
-                print(f"ATTACH_FAIL not-visible: {ap}")
-                return 1
-            print(f"ATTACHED: {ap}")
+
+        async def _is_visible(base):
+            seen = await js("(()=>{const t=(document.querySelector('[contenteditable=true]')||{}).innerText||'';const b=document.body.innerText||'';return t+' '+b;})()")
+            return base in (seen or "")
+
+        uploader = AttachmentUploader(_find_file_input, _set_files, _is_visible)
+        ok, failed_path, reason = await upload_attachments(uploader, args.attachment or [])
+        if not ok:
+            # CHECKPOINT_DELIVERY_INCOMPLETE: never proceed to send the text or
+            # write a response when any required attachment failed to upload.
+            return 1
         await asyncio.sleep(1)
 
         # Capture the existing user-turn count before sending. The response is
@@ -362,6 +428,12 @@ def main():
                         help="evidence file to upload to the conversation before sending "
                              "the request text (repeatable). The file is uploaded through the "
                              "ChatGPT file input via CDP and its readiness is verified.")
+    parser.add_argument("--conversation-url", default=None,
+                        help="session-level ChatGPT conversation URL override for this run "
+                             "(ask the user once per session; never written to config)")
+    parser.add_argument("--cdp-port", type=int, default=None,
+                        help="session-level CDP port override for this run "
+                             "(never written to config)")
     args = parser.parse_args()
     sys.exit(asyncio.run(run_relay(args)))
 
