@@ -92,8 +92,19 @@ python3 tools/neutral-relay/neutral_relay.py \
 
 `--attachment` is repeatable. Each file is uploaded through the conversation's file input via CDP `DOM.setFileInputFiles`; the relay verifies the file name becomes visible in the composer before proceeding. Any attachment failure (missing file, no file input, upload error, not visible) is fail-closed: the run aborts with a non-zero exit before the request text is sent, and no response is written — i.e. never a false COMPLETE.
 
+### Strong delivery confirmation (three-state model)
+
+After clicking Send, the relay does **not** treat "button clicked" as "message delivered". A click that lands while ChatGPT is still processing freshly-uploaded attachments can be silently swallowed, leaving the draft in the composer. Delivery is modelled as three states:
+
+- **Draft still present** (composer non-empty, user turn unchanged within `--send-confirm-timeout`, default 30s) → the send was not accepted → **one safe re-click** (never re-uploads attachments or re-injects text — that risks duplicate messages) → if the composer is still non-empty → `SEND_NOT_CONFIRMED`, fail closed. Manual-recovery guidance: verify the draft + attachments are still present, click Send ONCE, confirm the composer cleared and the user turn appeared, **DO NOT re-run the send path for the same request** (duplicate-delivery risk); continue via manual readback or record `DELIVERY_MODE=MANUAL_SEND_RECOVERY`.
+- **SEND_PENDING** (composer cleared, user turn unchanged) → the message left the composer but the thread has not confirmed it yet → **never re-click / re-upload / re-inject** from this state. Within `--send-pending-timeout` (default 90s) the relay confirms via either:
+  - user-turn count increased by exactly 1 (canonical) → `DELIVERY_CONFIRMED_PRIMARY`, or
+  - a **new** assistant turn appearing after the send **and no assistant turn was streaming before the send** (tight auxiliary correlation, so a late-rendered node from a previous turn cannot false-positive) → `DELIVERY_CONFIRMED_AUXILIARY`.
+  If neither appears → `SEND_PENDING_TIMEOUT`: the relay does **not** claim PASS and does **not** instruct a resend; it prints manual-verification guidance (check whether the user message appeared; if yes continue without resending, if no inspect the conversation first) and suggests recording `DELIVERY_MODE=MANUAL_SEND_RECOVERY / SEND_PENDING_TIMEOUT`.
+- **DELIVERY_CONFIRMED** (composer cleared + user turn +1) → PASS; only now does wait-for-assistant start.
+
 ## Tests
 
 ```bash
-python3 -m unittest tools/neutral-relay/tests/test_neutral_relay.py tools/neutral-relay/tests/test_attachment_delivery.py
+python3 -m unittest tools/neutral-relay/tests/test_neutral_relay.py tools/neutral-relay/tests/test_attachment_delivery.py tools/neutral-relay/tests/test_send_confirmation.py
 ```
