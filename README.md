@@ -1,38 +1,137 @@
 # GovernLoop
 
-GovernLoop is a lightweight local-agent ↔ ChatGPT review loop for real project
-work. It is **agent-agnostic**: the same session model works from WorkBuddy,
-OpenCode, Claude Code, Codex, or any local coding agent.
+> **Connect your local coding agent to ChatGPT as a persistent project brain.**
 
-The current stable baseline focuses on one capability: a local agent sends a
-natural-language request through the Neutral Relay to an already-open ChatGPT
-conversation over Chrome DevTools Protocol (CDP), waits for the assistant turn
-to finish streaming, and writes the complete response to a local output file —
-wrapped in a session manager that handles repo/task detection, session ids,
-conversation binding, review checkpoints, and evidence delivery.
+GovernLoop creates a two-agent workflow between ChatGPT and local coding
+agents.
 
-## Works with
+ChatGPT can stay above the repository as the long-lived reasoning layer for
+architecture, research, review, project context, and connected tools.
 
-| Agent | Entry point |
-|---|---|
-| **WorkBuddy** | `/governloop` slash command (fastest UX) |
-| **OpenCode** | GovernLoop skill (`skills/opencode/governloop/`) |
-| **Claude Code** | invoke the local session manager CLI |
-| **Codex** | invoke the local session manager CLI |
-| **Any local coding agent** | invoke the local session manager CLI or the Neutral Relay directly |
+The local coding agent works inside the real execution environment:
+repositories, files, tests, builds, debugging, and runtime operations.
 
-All agents share **one session model** — repo → task → session → conversation →
-checkpoints → evidence → end — and the same rules: no per-agent permanent
-routing config, conversation URLs stay session-level. See
-`docs/AGENT_INTEGRATIONS.md` for per-agent setup.
+GovernLoop connects the two.
 
-## Current status
+```text
+                 Human
+                   │
+            final decisions
+                   │
+                   ▼
+              ChatGPT Web
+     Architecture · Research · Review
+       Project Context · Connected Tools
+                   │
+               GovernLoop
+                   │
+                   ▼
+          Local Coding Agent
+      Inspect · Implement · Test · Operate
+                   │
+                   ▼
+             Real Repository
+```
 
-**v0.1.2 — Reliable attachment-message delivery confirmation.**
+The automatic loop:
 
-v0.1.2 is a reliability patch for Neutral Relay message delivery, especially review/checkpoint messages carrying evidence attachments. It strengthens send confirmation, introduces a three-state delivery model (SEND_PENDING after the composer clears, safe retry only while the draft remains in the composer, and duplicate-send protection), and clarifies manual-recovery semantics. Released as `v0.1.2` after the full relay and session-manager test suite passed on `main`.
+```text
+ChatGPT
+→ GovernLoop
+→ Local Agent
+→ implementation + evidence
+→ GovernLoop
+→ ChatGPT
+→ review / remediation / next decision
+→ GovernLoop
+→ Local Agent
+```
 
-Verified path:
+**Stop using yourself as the copy-paste bridge between the two.**
+
+---
+
+## Why GovernLoop?
+
+The real workflow problem is not tooling — it is handoff. Without a bridge,
+this is what a project loop looks like:
+
+```text
+ChatGPT proposes architecture
+→ human copies to coding agent
+→ agent executes
+→ human copies result to ChatGPT
+→ ChatGPT reviews
+→ human copies review back
+```
+
+In those steps the human is not making a decision. The human is acting as a
+**clipboard API**.
+
+GovernLoop removes that mechanical handoff while preserving human authority at
+the decision points that actually matter.
+
+## Why ChatGPT as the project/reasoning layer?
+
+The two sides are not interchangeable — they are complementary.
+
+```text
+Local agent:
+  terminal · filesystem · repo
+  implementation · tests · build · runtime
+
+ChatGPT workspace:
+  long-lived context · architecture reasoning
+  cross-task reasoning · research · review
+  documents · GitHub · Linear · Google Drive
+  other connected project tools
+```
+
+GovernLoop is not trying to turn both sides into identical coding agents. It
+connects a **project/reasoning agent** and an **execution agent** — each doing
+what it is good at.
+
+## Reuse the ChatGPT workspace you already work in
+
+A key design motivation: GovernLoop connects into the ChatGPT workspace the
+user already works in, instead of recreating the entire upper layer as a new
+API-agent stack.
+
+The upper layer is a whole stack, not one model call:
+
+```text
+model
+memory / context
+research
+GitHub
+project management
+documents
+review UI
+conversation history
+```
+
+GovernLoop connects into that existing workspace rather than recreating all of
+it. The point is not the API pricing model — it is that the project/reasoning
+layer already exists, is already maintained, and is already where the user
+thinks about the project.
+
+## What exists today
+
+The long-term idea is a two-agent project loop.
+
+The current stable implementation deliberately starts with a narrower
+primitive: **a reliable local-agent ↔ ChatGPT checkpoint and review loop.**
+
+As of the current stable release (`v0.1.2`), GovernLoop provides:
+
+- session-level conversation routing (`repo → task → session → conversation`)
+- five decision-relevant checkpoints
+- evidence attachments
+- fail-closed delivery
+- Neutral Relay transport
+- Chrome DevTools Protocol (CDP) interaction with an already-open ChatGPT
+  conversation
+- complete assistant response read-back
 
 ```text
 Local Agent
@@ -43,11 +142,66 @@ Local Agent
   → local output file
 ```
 
-The transport does not require ChatGPT to return `PR`, `HEAD`, `ACK`, `RESULT`, or `FINAL` fields.
+It is deliberately not (yet) a fully autonomous general-purpose orchestration
+platform. The primitive is small on purpose: get the handoff right, then build
+on it.
+
+## Send decisions, not logs
+
+GovernLoop does not report all progress to ChatGPT. Ordinary progress stays
+local.
+
+Only state that changes the next decision crosses the bridge, through five
+checkpoints:
+
+```text
+NEW_BLOCKER
+UNEXPECTED_STATE
+BEFORE_DESTRUCTIVE_ACTION
+REVIEW_REQUIRED
+FINAL_VERIFICATION
+```
+
+The rule: **send decisions, not logs.**
+
+## Evidence is part of the loop
+
+A local path is not evidence delivery. ChatGPT cannot see `/tmp/report.md`.
+
+Review/checkpoint messages deliver the supporting files themselves as
+attachments to the same conversation. Every attachment is checked before
+upload:
+
+```text
+exists → relevant → secret scan → filename / size / sha256 → upload
+```
+
+Any attachment failure aborts the run fail-closed — never a false COMPLETE.
+If the evidence did not actually arrive, the checkpoint does not claim it did.
+Full contract:
+[`docs/architecture/neutral-relay-checkpoint-delivery.md`](docs/architecture/neutral-relay-checkpoint-delivery.md).
+
+## See GovernLoop in action
+
+A real recorded workflow: a local coding agent sends a natural-language request
+to ChatGPT through GovernLoop, reads the complete assistant response back
+through the relay, and continues the local workflow automatically.
+
+**This is a real recorded workflow, not a simulated demo.**
+
+```text
+Local Agent → GovernLoop → ChatGPT → relay read-back → Local Agent
+```
+
+[![GovernLoop live demo — click to watch the full 2-minute workflow](https://github.com/liangzhipengdamon-maker/GovernLoop/releases/download/v0.1.2/demo_poster.png)](https://liangzhipengdamon-maker.github.io/GovernLoop/assets/demo_v0.1.2.mp4)
+
+*Click the image above to watch the full 2-minute recorded workflow.*
+
+---
 
 ## Quick Start
 
-Install GovernLoop once, then use it from any project.
+Install once, use from any project.
 
 ### WorkBuddy fast path (`/governloop`)
 
@@ -67,9 +221,8 @@ cd <your-project>
   ids, no per-project routing config to maintain;
 - binds the ChatGPT conversation URL **once per session** (temporary state
   only; the canonical config is never modified);
-- reports the five review checkpoints — `NEW_BLOCKER`, `UNEXPECTED_STATE`,
-  `BEFORE_DESTRUCTIVE_ACTION`, `REVIEW_REQUIRED`, `FINAL_VERIFICATION` — with
-  evidence attachments to that conversation. Ordinary progress is not sent.
+- reports the five checkpoints with evidence attachments to that conversation.
+  Ordinary progress is not sent.
 
 ### Generic agent path (session manager CLI)
 
@@ -87,31 +240,88 @@ Identical session model, identical rules — same repo/task detection, auto
 session id, URL once per session, five checkpoints, evidence delivery, temp
 state cleanup.
 
-Guides: `docs/QUICK_START.md` (3 commands, incl. the 8 most common questions),
-`docs/USAGE.md` (full reference), `docs/AGENT_INTEGRATIONS.md` (per-agent
-setup), `docs/MULTI_PROJECT_WORKFLOW.md` (using GovernLoop across many
-projects).
+Guides: [`docs/QUICK_START.md`](docs/QUICK_START.md) (3 commands, incl. the 8
+most common questions), [`docs/USAGE.md`](docs/USAGE.md) (full reference),
+[`docs/AGENT_INTEGRATIONS.md`](docs/AGENT_INTEGRATIONS.md) (per-agent setup),
+[`docs/MULTI_PROJECT_WORKFLOW.md`](docs/MULTI_PROJECT_WORKFLOW.md) (using
+GovernLoop across many projects).
 
 > Need the low-level Neutral Relay instead (route config + `--request-file`)?
 > That flow is documented in [Neutral Relay](#neutral-relay) below.
 
-## See GovernLoop in action
+## Works with
 
-Real workflow demo: a local coding agent sends a natural-language request to ChatGPT through GovernLoop, reads the complete assistant response back through the relay, and continues the local workflow automatically.
+GovernLoop is agent-agnostic. The same session model works from any local
+coding agent:
+
+| Agent | Entry point |
+|---|---|
+| **WorkBuddy** | `/governloop` slash command (fastest UX) |
+| **OpenCode** | GovernLoop skill (`skills/opencode/governloop/`) |
+| **Claude Code** | invoke the local session manager CLI |
+| **Codex** | invoke the local session manager CLI |
+| **Any local coding agent** | invoke the local session manager CLI or the Neutral Relay directly |
+
+All agents share one session model — repo → task → session → conversation →
+checkpoints → evidence → end — and the same rules: no per-agent permanent
+routing config, conversation URLs stay session-level.
+
+## Current stable release & reliability story
+
+**v0.1.2 — Reliable attachment-message delivery confirmation.**
+
+A reliability patch for Neutral Relay message delivery, especially
+review/checkpoint messages that carry evidence attachments. Released as
+`v0.1.2` after the full relay and session-manager test suite passed on `main`.
+
+The story behind it: **clicking Send is not confirmed delivery.** Real browser
+automation can lose a send — the button click gets swallowed by the UI and the
+draft is still sitting in the composer. v0.1.2 replaced click-based success
+with state-based delivery confirmation:
 
 ```text
-Local Agent → GovernLoop → ChatGPT → relay read-back → Local Agent
+draft still present  → one safe retry (re-click while the draft remains)
+composer cleared     → SEND_PENDING — never auto-resend, never re-upload
+new user turn        → DELIVERY_CONFIRMED
 ```
 
-This is a real recorded workflow, not a simulated demo.
+Once the composer clears, the message may already be in the server send queue
+even if the page has not rendered it — resending could duplicate the message.
+So the relay never sends twice on a cleared composer.
 
-[![GovernLoop live demo — click to watch the full 2-minute workflow](https://github.com/liangzhipengdamon-maker/GovernLoop/releases/download/v0.1.2/demo_poster.png)](https://liangzhipengdamon-maker.github.io/GovernLoop/assets/demo_v0.1.2.mp4)
+The transport does not require ChatGPT to return `PR`, `HEAD`, `ACK`,
+`RESULT`, or `FINAL` fields.
 
-*Click the image above to watch the full 2-minute recorded workflow on GitHub.*
+Release line:
+
+- `v0.1.0` — original public release.
+- `v0.1.1` — Minimal Transport Recovery release; cross-project natural-language relay behavior verified before release.
+- `v0.1.2` — current stable reliability patch for Neutral Relay delivery confirmation (strong send confirmation, SEND_PENDING, duplicate-send protection).
+
+See [`docs/ops/CURRENT_STATUS.md`](docs/ops/CURRENT_STATUS.md) and
+[`docs/ops/RELEASE_NOTES_v0.1.2.md`](docs/ops/RELEASE_NOTES_v0.1.2.md) for the
+release closure record.
+
+## Session model
+
+Conversation binding is **session-level**, not project-permanent:
+
+```text
+repo → task → session → ChatGPT conversation
+```
+
+The user picks a ChatGPT conversation once at session start; the whole session
+reuses it. When the task ends, the temporary routing state can be cleared.
+
+This avoids the failure mode of permanently binding a project to one
+conversation — a project often runs several distinct threads (design, cleanup,
+a PR review, a release, a bug investigation) that should not all share one
+chat.
 
 ## Neutral Relay
 
-Canonical implementation:
+The Neutral Relay is the transport layer between the local agent and the
+ChatGPT conversation. Canonical implementation:
 
 ```text
 tools/neutral-relay/neutral_relay.py
@@ -139,17 +349,8 @@ REPO: owner/repository
 <ordinary natural-language task>
 ```
 
-The target ChatGPT conversation must already be open in the CDP-enabled browser.
-
-### Checkpoint evidence delivery
-
-Review checkpoints (`NEW_BLOCKER`, `UNEXPECTED_STATE`, `BEFORE_DESTRUCTIVE_ACTION`,
-`REVIEW_REQUIRED`, `FINAL_VERIFICATION`) deliver concise text **and** the supporting
-evidence files as attachments to the same session-bound conversation. A local path
-written in the text is not delivery. Every attachment is checked (exists -> relevant
--> secret scan -> filename/size/sha256) before upload; secret-bearing evidence is only
-ever attached as a redacted copy. Any attachment failure aborts the run fail-closed —
-never a false COMPLETE. Full contract: `docs/architecture/neutral-relay-checkpoint-delivery.md`.
+The target ChatGPT conversation must already be open in the CDP-enabled
+browser.
 
 Short real usage example (session-level target + evidence attachments):
 
@@ -171,64 +372,78 @@ A transport run is successful only when the relay itself:
 3. creates the output file, and
 4. writes the complete assistant response to that file.
 
-External CDP probes may be used for diagnosis, but do not substitute for relay read-back.
+External CDP probes may be used for diagnosis, but do not substitute for relay
+read-back.
 
-## OpenCode skill
+## Agent integrations
 
-A minimal OpenCode skill is maintained in:
+A first-class WorkBuddy command entrypoint is maintained in
+`skills/workbuddy/governloop/` (`SKILL.md`, `QUICK_START.md`,
+`references/policy.md`, `scripts/governloop_session.py` + tests). Normal user
+workflow: `cd <project>` → `/governloop` → work → `/governloop end`. Install
+it into `~/.workbuddy/skills/governloop/` to activate the slash command.
+
+A minimal OpenCode skill is maintained in `skills/opencode/governloop/SKILL.md`.
+It documents the current Neutral Relay workflow only.
+
+Per-agent setup: [`docs/AGENT_INTEGRATIONS.md`](docs/AGENT_INTEGRATIONS.md).
+
+## Documentation
+
+- [`docs/QUICK_START.md`](docs/QUICK_START.md) — user guide in 3 commands, incl. the 8 most common questions.
+- [`docs/USAGE.md`](docs/USAGE.md) — full command/reference manual for the session manager.
+- [`docs/AGENT_INTEGRATIONS.md`](docs/AGENT_INTEGRATIONS.md) — per-agent setup.
+- [`docs/MULTI_PROJECT_WORKFLOW.md`](docs/MULTI_PROJECT_WORKFLOW.md) — cross-project isolation rules.
+- [`docs/architecture/neutral-relay-checkpoint-delivery.md`](docs/architecture/neutral-relay-checkpoint-delivery.md) — checkpoint + evidence delivery contract.
+- [`docs/ops/CURRENT_STATUS.md`](docs/ops/CURRENT_STATUS.md) — current repository baseline.
+- [`docs/ops/RELEASE_NOTES_v0.1.2.md`](docs/ops/RELEASE_NOTES_v0.1.2.md) — v0.1.2 release closure.
+
+## What GovernLoop is not
+
+- **Not** an autonomous multi-agent platform, a workflow engine, a policy
+  engine, or a governance authority.
+- **Not** a replacement for Codex, Claude Code, OpenCode, or WorkBuddy — it
+  works *with* them as the execution side.
+- **Not** an implementation of GitHub / Linear / Google Drive APIs. Those
+  capabilities already exist in the user's ChatGPT workspace; GovernLoop
+  connects the local agent to that workspace rather than rebuilding them.
+
+## Design principles
+
+- **Separate execution context from review/reasoning context.** The local
+  agent executes; ChatGPT reasons and reviews. They are not the same context,
+  and GovernLoop keeps them separate rather than collapsing them into one
+  self-review loop.
+- **Small, reliable boundaries over big orchestration.** Get the loop edges
+  right — who executes, who reviews, where the evidence is, whether the
+  message actually arrived, which session is current, when to stop and ask —
+  and the agents themselves can do a lot.
+- **Send decisions, not logs.** Ordinary progress stays local.
+- **Fail closed.** If evidence did not arrive or delivery is unconfirmed, do
+  not report success.
+- **Human authority at decision points.** The human is the final authority;
+  GovernLoop removes the *mechanical* handoff, not the *meaningful* decisions.
+
+## Feedback
+
+Open an issue or a discussion on GitHub. GovernLoop is built out of real
+project failures — if you hit a new one, that is exactly the kind of input the
+project needs.
+
+---
+
+## Closing
+
+One agent understands the project.
+One agent operates the machine.
+GovernLoop keeps them in the same loop.
 
 ```text
-skills/opencode/governloop/SKILL.md
+Reasoning
++
+Execution
++
+Evidence
++
+Human Authority
 ```
-
-It documents the current Neutral Relay workflow only. Historical commands such as `governloop start`, `setup-task-scope`, and governance/authority workflows are not part of this recovery baseline.
-
-## WorkBuddy skill (`/governloop`)
-
-A first-class WorkBuddy command entrypoint is maintained in:
-
-```text
-skills/workbuddy/governloop/
-├── SKILL.md                 # command contract (new/status/bind/checkpoint/end)
-├── QUICK_START.md           # user-facing 3-command workflow
-├── references/policy.md     # session routing + checkpoint + attachment policy
-└── scripts/
-    ├── governloop_session.py
-    └── test_governloop_session.py
-```
-
-Normal user workflow: `cd <project>` → `/governloop` → work → `/governloop end`.
-The skill auto-detects the repo and task, auto-generates the session id
-`<PROJECT>-<TASK>-<YYYY-MM-DD>`, binds the ChatGPT conversation URL once per
-session in temporary state only (never the canonical config), and reports the
-five review checkpoints with evidence attachments through the Neutral Relay.
-Install it into `~/.workbuddy/skills/governloop/` to activate the slash command.
-
-Usage docs:
-
-- `docs/QUICK_START.md` — user guide in 3 commands, including the 8 most
-  common questions (switching projects, session ids, URLs, checkpoints,
-  evidence, cleanup).
-- `docs/USAGE.md` — full command/reference manual for the session manager.
-- `docs/MULTI_PROJECT_WORKFLOW.md` — cross-project isolation rules (shared
-  infrastructure; one session + one conversation per project).
-
-## Local development convention
-
-GovernLoop development follows a simple, runtime-free workflow:
-
-- a single canonical `main` checkout is the source of truth;
-- feature and fix work happens in Git worktrees, which are retired after merge;
-- there is no second clone for normal development.
-
-This repository ships as Minimal Transport — no AgentOps lifecycle runtime or
-governance state machine. See `WORKTREE_LIFECYCLE.md` (local workspace) for the
-full worktree convention.
-
-## Release line
-
-- `v0.1.0` — original public release.
-- `v0.1.1` — Minimal Transport Recovery release; cross-project natural-language relay behavior verified before release.
-- `v0.1.2` — current stable reliability patch for Neutral Relay delivery confirmation (strong send confirmation, SEND_PENDING, duplicate-send protection).
-
-See `docs/ops/CURRENT_STATUS.md` and `docs/ops/RELEASE_NOTES_v0.1.2.md` for the release closure record.
