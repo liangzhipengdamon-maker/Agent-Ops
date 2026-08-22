@@ -195,7 +195,11 @@ def find_session_for_repo(state_dir, repo, task=None):
         for s in states:
             if normalize_task(s.get("task", "")) == normalize_task(task):
                 return s
-    return None  # ambiguous: caller must disambiguate
+    # Ambiguous (multiple sessions for the same repo): prefer the most recently
+    # updated ACTIVE session. Deterministic and practical for bind/status/end.
+    active = [s for s in states if s.get("status") == "ACTIVE"]
+    pool = active or states
+    return max(pool, key=lambda s: s.get("updated_at", ""))
 
 
 def new_session(state_dir, cwd=None, env=None, title=None, date=None):
@@ -523,6 +527,7 @@ def main(argv=None):
     p_bind = sub.add_parser("bind", help="bind a ChatGPT conversation URL (temp state only)")
     p_bind.add_argument("url")
     p_bind.add_argument("--cdp-port", type=int, default=None)
+    p_bind.add_argument("--session", dest="sid", default=None)
 
     p_chk = sub.add_parser("checkpoint", help="report a review checkpoint")
     p_chk.add_argument("type", choices=CHECKPOINT_TYPES)

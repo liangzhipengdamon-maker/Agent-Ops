@@ -115,6 +115,15 @@ class TestSessionIdentity(unittest.TestCase):
             s2, _, _ = gl.new_session(td, cwd=r2)
             self.assertNotEqual(s1["session_id"], s2["session_id"])
 
+    def test_ambiguous_same_repo_sessions_prefer_latest_active(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = make_git_repo(td, "https://github.com/acme/widget.git",
+                                 branch="feature/LEA-1")
+            s1, _, _ = gl.new_session(td, cwd=repo, env={"GOVERLOOP_TASK": "TASK-A"})
+            s2, _, _ = gl.new_session(td, cwd=repo, env={"GOVERLOOP_TASK": "TASK-B"})
+            found = gl.find_session_for_repo(td, "acme/widget")
+            self.assertEqual(found["session_id"], s2["session_id"])  # latest ACTIVE wins
+
     def test_new_session_does_not_inherit_prior_url(self):
         with tempfile.TemporaryDirectory() as td:
             r1 = make_git_repo(os.path.join(td, "a"), "https://github.com/acme/alpha.git",
