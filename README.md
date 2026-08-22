@@ -83,9 +83,12 @@ Local agent:
 ChatGPT workspace:
   long-lived context · architecture reasoning
   cross-task reasoning · research · review
-  documents · GitHub · Linear · Google Drive
-  other connected project tools
+  documents · connected project tools
+  such as GitHub, Linear, and Google Drive
 ```
+
+Connected-tool availability depends on the user's ChatGPT workspace and
+configuration.
 
 GovernLoop is not trying to turn both sides into identical coding agents. It
 connects a **project/reasoning agent** and an **execution agent** — each doing
